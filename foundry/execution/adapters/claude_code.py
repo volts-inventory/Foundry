@@ -97,10 +97,18 @@ _EPILOGUE = (
 _EXCLUDED_TOP_DIRS = frozenset({".git", ".claude", "node_modules", "__pycache__"})
 # Toolchain output the agent's own install/typecheck/test runs leave anywhere in the
 # tree: environments and caches, never authored source.
-_EXCLUDED_DIRS = frozenset({
-    "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache", ".pytest_cache",
-    ".ruff_cache", ".tox",
-})
+_EXCLUDED_DIRS = frozenset(
+    {
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+    }
+)
 
 
 # Cargo and Maven build into a top-level target/: output, not source, in their projects.
@@ -168,14 +176,29 @@ def _default_exec(
 # patterns), never from the content-bearing ones. `content` / `new_string` / `old_string`
 # carry whole file bodies — those must never leave the sandbox on a progress channel.
 _ACTIVITY_VERB: dict[str, str] = {
-    "Edit": "editing", "MultiEdit": "editing", "Write": "writing", "NotebookEdit": "editing",
-    "Read": "reading", "Bash": "running", "Glob": "looking for", "Grep": "searching for",
-    "WebFetch": "fetching", "WebSearch": "searching the web for", "Task": "delegating",
+    "Edit": "editing",
+    "MultiEdit": "editing",
+    "Write": "writing",
+    "NotebookEdit": "editing",
+    "Read": "reading",
+    "Bash": "running",
+    "Glob": "looking for",
+    "Grep": "searching for",
+    "WebFetch": "fetching",
+    "WebSearch": "searching the web for",
+    "Task": "delegating",
     "TodoWrite": "planning",
 }
-_ACTIVITY_ARG: tuple[str, ...] = ("file_path", "path", "notebook_path", "command",
-                                  "pattern", "query", "url")
-_ACTIVITY_MAX = 72          # one short line — never a payload
+_ACTIVITY_ARG: tuple[str, ...] = (
+    "file_path",
+    "path",
+    "notebook_path",
+    "command",
+    "pattern",
+    "query",
+    "url",
+)
+_ACTIVITY_MAX = 72  # one short line — never a payload
 
 
 def _activity_phrase(tool: str, args: Any) -> str | None:
@@ -190,7 +213,7 @@ def _activity_phrase(tool: str, args: Any) -> str | None:
         for key in _ACTIVITY_ARG:
             val = args.get(key)
             if isinstance(val, str) and val.strip():
-                detail = " ".join(val.split())          # collapse newlines/tabs
+                detail = " ".join(val.split())  # collapse newlines/tabs
                 break
     if not detail:
         return verb if tool != "Bash" else "running a command"
@@ -243,7 +266,7 @@ def _stream_envelope(stdout: str) -> dict[str, Any]:
         except (ValueError, TypeError):
             continue
         if isinstance(obj, dict) and obj.get("type") == "result":
-            envelope = obj          # keep the LAST one
+            envelope = obj  # keep the LAST one
     return envelope or _lenient_json_object(stdout)
 
 
@@ -278,6 +301,7 @@ def _observed_model(envelope: dict[str, Any]) -> str | None:
     IGNORED for lineage (arch §2b)."""
     usage_by_model = envelope.get("modelUsage")
     if isinstance(usage_by_model, dict) and usage_by_model:
+
         def _tokens(item: tuple[str, Any]) -> int:
             v = item[1]
             if not isinstance(v, dict):
@@ -393,8 +417,10 @@ class ClaudeCodeAdapter:
             self.token_meter.check()
         before = walk_worktree(sandbox.worktree)
         tier = packet.task.get("tier")
-        label = (f"agent session: {packet.task.get('id', 'unknown')}"
-                 f" ({self._tier_models.get(str(tier)) or self._model or 'default model'})")
+        label = (
+            f"agent session: {packet.task.get('id', 'unknown')}"
+            f" ({self._tier_models.get(str(tier)) or self._model or 'default model'})"
+        )
         progress.log(f"start {label}")
         started = time.monotonic()
         if self._on_activity is not None:
@@ -402,23 +428,30 @@ class ClaudeCodeAdapter:
             # happen. `on_stdout_line` is only passed in this branch, so a custom
             # exec seam that predates it is untouched unless it opts into activity.
             result = self._exec(
-                sandbox, self._argv(packet), self._timeout_s,
+                sandbox,
+                self._argv(packet),
+                self._timeout_s,
                 on_stdout_line=self._pump_activity,
             )
         else:
             result = self._exec(sandbox, self._argv(packet), self._timeout_s)
         after = walk_worktree(sandbox.worktree)
 
-        envelope = (_stream_envelope(result.stdout) if self._on_activity is not None
-                    else _lenient_json_object(result.stdout))
+        envelope = (
+            _stream_envelope(result.stdout)
+            if self._on_activity is not None
+            else _lenient_json_object(result.stdout)
+        )
         if result.timed_out:
             # Budget breach, never a verdict: record what was authored so far —
             # the gates decide whether the partial tree passes.
             summary = "claude hard-killed at the sandbox wall-clock cap"
         elif envelope.get("is_error"):
-            summary = (f"claude reported is_error (subtype={envelope.get('subtype')}, "
-                       f"num_turns={envelope.get('num_turns')}): "
-                       f"{str(envelope.get('result'))[:400]}")
+            summary = (
+                f"claude reported is_error (subtype={envelope.get('subtype')}, "
+                f"num_turns={envelope.get('num_turns')}): "
+                f"{str(envelope.get('result'))[:400]}"
+            )
         elif not envelope and result.returncode != 0:
             raise AdapterUnavailableError(
                 f"claude exit {result.returncode} with no parseable envelope: "
@@ -430,15 +463,22 @@ class ClaudeCodeAdapter:
 
         u = envelope.get("usage")
         if isinstance(u, dict):
-            self.usage.append({
-                k: int(u.get(k) or 0)
-                for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
-                          "cache_creation_input_tokens")
-            })
+            self.usage.append(
+                {
+                    k: int(u.get(k) or 0)
+                    for k in (
+                        "input_tokens",
+                        "output_tokens",
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                    )
+                }
+            )
             if self.token_meter is not None:
                 self.token_meter.charge(self.usage[-1])
-        progress.finished(label, started, self.usage[-1] if isinstance(u, dict) else None,
-                          self.token_meter)
+        progress.finished(
+            label, started, self.usage[-1] if isinstance(u, dict) else None, self.token_meter
+        )
         authored, deleted, skipped_binary = changed_files(before, after)
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:
@@ -446,8 +486,14 @@ class ClaudeCodeAdapter:
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         diff_uri = sandbox.put_blob(blob.encode("utf-8"))
 
-        notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope,
-                                   failed=result.timed_out or bool(envelope.get("is_error")))
+        notes = self._triage_notes(
+            summary,
+            sandbox,
+            deleted,
+            skipped_binary,
+            envelope,
+            failed=result.timed_out or bool(envelope.get("is_error")),
+        )
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(

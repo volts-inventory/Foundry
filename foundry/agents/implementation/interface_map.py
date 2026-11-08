@@ -17,8 +17,7 @@ from pathlib import PurePosixPath
 from foundry.canonical import content_digest
 
 DEFAULT_BUDGET = 6000
-MAP_LABEL = ("INTERFACES ALREADY BUILT — import these exactly; read a file only if "
-             "you need its body")
+MAP_LABEL = "INTERFACES ALREADY BUILT — import these exactly; read a file only if you need its body"
 
 _SHORT = 80
 
@@ -34,8 +33,9 @@ def _public(name: str) -> bool:
     return not name.startswith("_")
 
 
-def _decorators(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
-                indent: str) -> list[str]:
+def _decorators(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, indent: str
+) -> list[str]:
     out = []
     for d in node.decorator_list:
         text = ast.unparse(d)
@@ -78,10 +78,12 @@ def python_outline(text: str) -> list[str]:
             out += [*_decorators(node, ""), _def(node, "")]
         elif isinstance(node, ast.ClassDef) and _public(node.name):
             bases = [ast.unparse(b) for b in node.bases] + [
-                f"{k.arg}={ast.unparse(k.value)}" for k in node.keywords if k.arg]
+                f"{k.arg}={ast.unparse(k.value)}" for k in node.keywords if k.arg
+            ]
             out += _decorators(node, "")
-            out.append(f"class {node.name}({', '.join(bases)}):" if bases
-                       else f"class {node.name}:")
+            out.append(
+                f"class {node.name}({', '.join(bases)}):" if bases else f"class {node.name}:"
+            )
             members: list[str] = []
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -144,8 +146,13 @@ def _head(stmt: str) -> str:
     or whole when its braces close on the line (a one-line type or struct)."""
     code = _code(stmt)
     lead = code.split("{", 1)[0]
-    if ("{" in code and code.count("{") == code.count("}") and len(stmt) <= 160
-            and _TYPE_WORD.search(lead) and "(" not in lead):
+    if (
+        "{" in code
+        and code.count("{") == code.count("}")
+        and len(stmt) <= 160
+        and _TYPE_WORD.search(lead)
+        and "(" not in lead
+    ):
         return " ".join(stmt.split()).rstrip(";,").rstrip()
     depth, quote, cut = 0, "", len(stmt)
     for i, ch in enumerate(stmt):
@@ -178,8 +185,11 @@ def _brace_outline(
     while i < len(lines):
         stmt = lines[i].strip()
         # Join a multi-line signature until its parentheses balance.
-        while (_code(stmt).count("(") > _code(stmt).count(")")
-               and i + 1 < len(lines) and len(stmt) < 400):
+        while (
+            _code(stmt).count("(") > _code(stmt).count(")")
+            and i + 1 < len(lines)
+            and len(stmt) < 400
+        ):
             i += 1
             stmt += " " + lines[i].strip()
         code = _code(stmt)
@@ -203,26 +213,33 @@ def _brace_outline(
 
 def ts_outline(text: str) -> list[str]:
     return _brace_outline(
-        text, _TS_TOP, lambda h: bool(_TS_CONTAINER.search(h)),
-        lambda line, _h: bool(_TS_MEMBER.match(line))
-        and not line.startswith(("private ", "protected ", "#", "_", "return ")),
+        text,
+        _TS_TOP,
+        lambda h: bool(_TS_CONTAINER.search(h)),
+        lambda line, _h: (
+            bool(_TS_MEMBER.match(line))
+            and not line.startswith(("private ", "protected ", "#", "_", "return "))
+        ),
     )
 
 
 def go_outline(text: str) -> list[str]:
-    return _brace_outline(text, _GO_TOP, lambda h: bool(_GO_CONTAINER.match(h + " {")),
-                          lambda line, _h: bool(_GO_MEMBER.match(line)))
+    return _brace_outline(
+        text,
+        _GO_TOP,
+        lambda h: bool(_GO_CONTAINER.match(h + " {")),
+        lambda line, _h: bool(_GO_MEMBER.match(line)),
+    )
 
 
 def rust_outline(text: str) -> list[str]:
-    return _brace_outline(text, _RUST_TOP, lambda h: bool(_RUST_CONTAINER.search(h)),
-                          _rust_member)
+    return _brace_outline(text, _RUST_TOP, lambda h: bool(_RUST_CONTAINER.search(h)), _rust_member)
 
 
 _OUTLINERS: dict[str, Callable[[str], list[str]]] = {
-    ".py": python_outline, ".pyi": python_outline,
-    **dict.fromkeys((".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"),
-                    ts_outline),
+    ".py": python_outline,
+    ".pyi": python_outline,
+    **dict.fromkeys((".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"), ts_outline),
     ".go": go_outline,
     ".rs": rust_outline,
 }
@@ -230,9 +247,23 @@ _OUTLINERS: dict[str, Callable[[str], list[str]]] = {
 
 def _is_test(path: str) -> bool:
     name = PurePosixPath(path).name
-    return (name.startswith("test_") or name == "conftest.py" or name.endswith(
-        ("_test.py", "_test.go", ".test.ts", ".test.js", ".spec.ts", ".spec.js",
-         ".test.tsx", ".spec.tsx")) or path.startswith(("tests/", "features/")))
+    return (
+        name.startswith("test_")
+        or name == "conftest.py"
+        or name.endswith(
+            (
+                "_test.py",
+                "_test.go",
+                ".test.ts",
+                ".test.js",
+                ".spec.ts",
+                ".spec.js",
+                ".test.tsx",
+                ".spec.tsx",
+            )
+        )
+        or path.startswith(("tests/", "features/"))
+    )
 
 
 def outline(path: str, text: str) -> list[str]:
@@ -290,8 +321,12 @@ def signature_map(
         entries: list[tuple[int, int, str, list[str]]] = []
         for i, path in enumerate(_expand(group, tree)):
             text = tree.get(path)
-            if path in seen or path in skip or not isinstance(text, str) or (
-                    _is_test(path) and path not in contract_files):
+            if (
+                path in seen
+                or path in skip
+                or not isinstance(text, str)
+                or (_is_test(path) and path not in contract_files)
+            ):
                 continue
             seen.add(path)
             lines = outline(path, text)

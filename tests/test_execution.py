@@ -133,9 +133,7 @@ def test_dir_chmod_never_follows_a_symlink(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_env_scrubbed_no_credentials_leak(
-    source_dir: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_env_scrubbed_no_credentials_leak(source_dir: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake-do-not-leak")
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_fake")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-fake")
@@ -451,7 +449,7 @@ def test_streaming_yields_lines_as_they_arrive_and_still_returns_full_stdout(san
         on_stdout_line=seen.append,
     )
     assert [s.strip() for s in seen] == ["one", "two", "three"]
-    assert res.stdout == "one\ntwo\nthree\n"      # identical to the buffered path
+    assert res.stdout == "one\ntwo\nthree\n"  # identical to the buffered path
     assert res.stderr.strip() == "to-err"
     assert res.ok and not res.timed_out
 
@@ -469,8 +467,8 @@ def test_streaming_still_enforces_the_wall_clock_cap(sandbox: Sandbox):
     )
     elapsed = time.monotonic() - start
     assert res.timed_out and not res.ok
-    assert elapsed < 5.0                          # killed at the cap, not after 30s
-    assert [s.strip() for s in seen] == ["started"]   # what it managed to say is kept
+    assert elapsed < 5.0  # killed at the cap, not after 30s
+    assert [s.strip() for s in seen] == ["started"]  # what it managed to say is kept
 
 
 def test_streaming_callback_errors_cannot_break_the_run(sandbox: Sandbox):

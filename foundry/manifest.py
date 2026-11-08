@@ -245,9 +245,14 @@ def render_manifest_md(m: BuildManifest) -> str:
         f"- **Result:** {'PASS' if m.passed else 'HALTED'} (phase: {m.phase})",
         f"- **Tree:** `{m.tree_sha or 'n/a'}`",
         f"- **Estimated cost:** ${m.estimated_cost_microusd / 1_000_000:.4f}",
-        *([f"- **Change on base:** run `{m.base.thread_id or 'unknown'}` "
-           f"({m.base.request!r}), {m.base.files} files, digest `{m.base.digest}`"]
-          if m.base is not None else []),
+        *(
+            [
+                f"- **Change on base:** run `{m.base.thread_id or 'unknown'}` "
+                f"({m.base.request!r}), {m.base.files} files, digest `{m.base.digest}`"
+            ]
+            if m.base is not None
+            else []
+        ),
         "",
         "## Gates",
         "",
@@ -319,13 +324,15 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
             body = resolve(a)
             if isinstance(body, InterfaceContract):
                 newest[body.name] = body
-    contracts = [ContractRef(name=c.name, kind=c.kind, signature=c.signature)
-                 for c in newest.values()]
+    contracts = [
+        ContractRef(name=c.name, kind=c.kind, signature=c.signature) for c in newest.values()
+    ]
     files = contract_paths(state, resolve)
     if prior is not None:
         # A change keeps the base's contracts in force beside its own.
-        contracts = [ContractRef(**c) for c in prior.contracts
-                     if c["name"] not in newest] + contracts
+        contracts = [
+            ContractRef(**c) for c in prior.contracts if c["name"] not in newest
+        ] + contracts
         files = tuple(dict.fromkeys((*prior.contracts_files, *files)))
     update["contracts"] = tuple(contracts)
     update["contracts_files"] = tuple(files)
@@ -341,8 +348,10 @@ def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -
     prior = read_base(base_dir) if base_dir else None
     if prior is not None and base_dir:
         update["base"] = BaseRef(
-            thread_id=prior.thread_id, request=prior.request,
-            digest=base_digest(base_dir), files=len(prior.files),
+            thread_id=prior.thread_id,
+            request=prior.request,
+            digest=base_digest(base_dir),
+            files=len(prior.files),
         )
     return manifest.model_copy(update=update)
 
@@ -357,19 +366,23 @@ def write_manifest(
     passed: bool,
 ) -> BuildManifest:
     """Build the manifest for a finished run and write BUILD-MANIFEST.{json,md}."""
-    manifest = _with_plan(build_manifest(
-        request=request,
-        thread_id=thread_id,
-        generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
-        passed=passed,
-        phase=str(state.get("phase") or "unknown"),
-        artifacts=tuple(state.get("artifacts") or ()),
-        gates=tuple(state.get("gates") or ()),
-        proxy_manifest=rt.proxy.manifest,
-        drift_events=len(rt.proxy.drift_events),
-        agent_usage=getattr(rt.adapter, "usage", ()),
-        estimated_cost_microusd=_budget_spend(state),
-    ), state, rt)
+    manifest = _with_plan(
+        build_manifest(
+            request=request,
+            thread_id=thread_id,
+            generated_at=datetime.now(UTC).isoformat(timespec="seconds"),
+            passed=passed,
+            phase=str(state.get("phase") or "unknown"),
+            artifacts=tuple(state.get("artifacts") or ()),
+            gates=tuple(state.get("gates") or ()),
+            proxy_manifest=rt.proxy.manifest,
+            drift_events=len(rt.proxy.drift_events),
+            agent_usage=getattr(rt.adapter, "usage", ()),
+            estimated_cost_microusd=_budget_spend(state),
+        ),
+        state,
+        rt,
+    )
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
     (root / "BUILD-MANIFEST.json").write_text(

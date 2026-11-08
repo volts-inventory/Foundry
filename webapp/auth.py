@@ -87,6 +87,7 @@ def enabled() -> bool:
 # stored state
 # --------------------------------------------------------------------------
 
+
 def _read() -> dict[str, Any]:
     try:
         data = json.loads(AUTH_FILE.read_text(encoding="utf-8"))
@@ -151,6 +152,7 @@ def must_change() -> bool:
 # passwords
 # --------------------------------------------------------------------------
 
+
 def check_password(candidate: str) -> bool:
     data = _read()
     salt = bytes.fromhex(str(data.get("salt") or ""))
@@ -194,6 +196,7 @@ def set_password(new_password: str) -> tuple[bool, str]:
 # sessions
 # --------------------------------------------------------------------------
 
+
 def _secret() -> bytes:
     return str(_read().get("session_secret") or "").encode("utf-8")
 
@@ -235,7 +238,10 @@ def cookie_header(value: str, max_age: int | None = None) -> str:
     so setting it without TLS in front locks you out.
     """
     secure = (os.environ.get("FOUNDRY_COOKIE_SECURE") or "").strip().lower() in (
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     )
     age = SESSION_MAX_AGE_S if max_age is None else max_age
     bits = [
@@ -261,6 +267,7 @@ def session_from_cookies(header: str | None) -> str:
 # --------------------------------------------------------------------------
 # rate limiting
 # --------------------------------------------------------------------------
+
 
 def note_failure(client: str) -> None:
     with _lock:

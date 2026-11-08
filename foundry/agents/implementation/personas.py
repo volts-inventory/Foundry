@@ -55,8 +55,7 @@ AREA_PERSONAS: dict[str, str] = {
     "infra": (
         "You are a SENIOR INFRASTRUCTURE / PLATFORM ENGINEER. Expertise: build and "
         "deploy, containerization, configuration, and operability. Make the service "
-        "reproducible, configurable via environment, and observable (health, logs)."
-        + _SHARED
+        "reproducible, configurable via environment, and observable (health, logs)." + _SHARED
     ),
     "security": (
         "You are a SENIOR SECURITY ENGINEER. Expertise: authn/authz, input "

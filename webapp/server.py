@@ -53,7 +53,7 @@ def _load_env_file() -> bool:
     a key wins — so `echo "KEY=value" >> .env` reliably overrides an earlier line
     (e.g. a preset's placeholder)."""
     root = Path(__file__).resolve().parent.parent
-    preexisting = set(os.environ)            # real-env vars win over the file
+    preexisting = set(os.environ)  # real-env vars win over the file
     for cand in (Path.cwd() / ".env", root / ".env"):
         if not cand.is_file():
             continue
@@ -69,7 +69,7 @@ def _load_env_file() -> bool:
             # model ids, tokens, and paths with garbage that fails every CLI call.
             val = re.split(r"\s#", val, maxsplit=1)[0]
             val = os.path.expandvars(os.path.expanduser(val.strip().strip('"').strip("'")))
-            if not key or key in preexisting:    # last file line for a key wins
+            if not key or key in preexisting:  # last file line for a key wins
                 continue
             # A blank `KEY=` placeholder (the presets ship CLAUDE_CODE_OAUTH_TOKEN=
             # empty) must NOT inject a present-but-empty env var: the claude CLI
@@ -88,15 +88,16 @@ def _load_env_file() -> bool:
     return False
 
 
-_ENV_FILE_FOUND = _load_env_file()   # before the config constants below read os.environ
+_ENV_FILE_FOUND = _load_env_file()  # before the config constants below read os.environ
 
 _STATIC = Path(__file__).parent / "static"
-_PACE = 0.5          # seconds between paced closing events
+_PACE = 0.5  # seconds between paced closing events
 # Live activity from inside an agentic step (each edit / command the substrate runs).
 # Bounded on BOTH axes: a floor is readable at ~1 line every 2s, and one step can't
 # flood the log (or every connected device's stream) with hundreds of tool calls.
-_ACT_MIN_GAP = 2.0          # seconds between reported activities
-_ACT_MAX_PER_STEP = 40      # then one "still working" line and silence for that step
+_ACT_MIN_GAP = 2.0  # seconds between reported activities
+_ACT_MAX_PER_STEP = 40  # then one "still working" line and silence for that step
+
 
 def _int_env(name: str, default: int) -> int:
     """A small non-negative int from the environment (blank/garbage -> default)."""
@@ -113,15 +114,14 @@ def _int_env(name: str, default: int) -> int:
 # WORKSHOP_MAX_CONCURRENT_BUILDS=0 disables the cap (unbounded, the prior behaviour).
 _MAX_CONCURRENT_BUILDS = _int_env("WORKSHOP_MAX_CONCURRENT_BUILDS", 2)
 _BUILD_GATE: threading.BoundedSemaphore | None = (
-    threading.BoundedSemaphore(_MAX_CONCURRENT_BUILDS)
-    if _MAX_CONCURRENT_BUILDS > 0 else None
+    threading.BoundedSemaphore(_MAX_CONCURRENT_BUILDS) if _MAX_CONCURRENT_BUILDS > 0 else None
 )
 
 # A server running for days accumulates one in-memory event log per build (every
 # build ever, in _PROJECTS). The full history is ALSO durable in SQLite, so once a
 # build has been FINISHED for a grace period its in-memory log is trimmed to a tail;
 # a (rare) late viewer of a finished build replays the full story from the store.
-_LOG_TAIL = _int_env("WORKSHOP_LOG_TAIL", 64)       # events kept in memory after trim
+_LOG_TAIL = _int_env("WORKSHOP_LOG_TAIL", 64)  # events kept in memory after trim
 _LOG_GRACE_S = _int_env("WORKSHOP_LOG_GRACE_S", 90)  # wait after a build ends before trimming
 _LOG_SWEEP_S = _int_env("WORKSHOP_LOG_SWEEP_S", 120)  # how often the sweeper runs (0 = off)
 
@@ -148,8 +148,12 @@ _STATE_DIR = (
 # tree to disk during a build is now an OPT-IN export (WORKSHOP_WRITE_DISK=1), off
 # by default: the Repo/OUTPUT browser reads straight from the database, and an
 # explicit "Download .zip" exports on demand.
-_WRITE_DISK = (os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower()
-               in ("1", "true", "yes", "on"))
+_WRITE_DISK = os.environ.get("WORKSHOP_WRITE_DISK", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 # State-changing routes (start a build → real model spend) are
 # guarded. A shared token (FOUNDRY_WORKSHOP_TOKEN) gates them when the server is
@@ -185,6 +189,8 @@ def _authorize_mutation(headers: Any, token: str | None) -> str | None:
         if not hmac.compare_digest(provided, token):
             return "missing or invalid workshop token"
     return None
+
+
 _MAX_VIEW_BYTES = 1_000_000  # cap a single file served to the in-page viewer
 
 
@@ -246,8 +252,7 @@ def _resume_overrides(
         n = _settings.optional_number(body["time_cap_minutes"], "time_cap_minutes")
         time_cap = 0.0 if n is None else n
         if not 0 <= time_cap <= _settings.MAX_TIME_CAP_MIN:
-            raise ValueError(
-                f"time_cap_minutes must be 0 (no cap) to {_settings.MAX_TIME_CAP_MIN}")
+            raise ValueError(f"time_cap_minutes must be 0 (no cap) to {_settings.MAX_TIME_CAP_MIN}")
     return token_cap, max_fix, time_cap
 
 
@@ -266,7 +271,8 @@ def build_status(p: Project) -> str:
 
 
 _TITLE_LEAD = re.compile(
-    r"^(please\s+)?((build|make|create|write|implement)(\s+me)?\s+)?(an?\s+|the\s+)?", re.I)
+    r"^(please\s+)?((build|make|create|write|implement)(\s+me)?\s+)?(an?\s+|the\s+)?", re.I
+)
 
 
 def request_title(request: str, limit: int = 48) -> str:
@@ -307,7 +313,8 @@ def parse_ticket_tiers(raw: Any) -> dict[str, str]:
     if not isinstance(raw, Mapping):
         return {}
     return {
-        str(k): str(v).upper() for k, v in raw.items()
+        str(k): str(v).upper()
+        for k, v in raw.items()
         if str(k) in _TICKET_DIFFICULTIES and str(v).upper() in ("T1", "T2", "T3")
     }
 
@@ -325,9 +332,7 @@ class Project:
     token_cap: int | None = None  # stop the build cleanly after this many tokens
     workers: dict[str, int] = field(default_factory=parse_workers)  # per-specialty limits
     ticket_tiers: dict[str, str] = field(default_factory=dict)  # difficulty -> tier overrides
-    created_at: str = field(
-        default_factory=lambda: datetime.now(UTC).isoformat()
-    )
+    created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     # The retained, append-only event log + a Condition every viewer waits on.
     # A single shared queue would let two streams STEAL each other's events; a log
     # lets many devices each tail it at their own cursor, and a late/reconnecting
@@ -336,8 +341,8 @@ class Project:
     log: list[dict[str, Any]] = field(default_factory=list)
     cond: threading.Condition = field(default_factory=threading.Condition)
     ended: bool = False
-    ended_at: float | None = None    # monotonic time the build finished (for log sweeping)
-    log_trimmed: bool = False        # in-memory log trimmed to a tail; full history in the store
+    ended_at: float | None = None  # monotonic time the build finished (for log sweeping)
+    log_trimmed: bool = False  # in-memory log trimmed to a tail; full history in the store
     # Auto-resume budget for TRANSIENT provider failures (ProxyUnavailable — a
     # pause-and-escalate, not a build failure): the build backs off and resumes
     # from its durable checkpoint instead of dying, so an overnight run survives a
@@ -354,9 +359,9 @@ class Project:
     # worst it names the wrong lane while several run at once.
     act_room: str = ""
     act_agent: str = ""
-    act_last: float = 0.0            # monotonic time of the last emitted activity
-    act_count: int = 0               # emitted this step (capped; reset on each start)
-    act_text: str = ""               # last phrase (collapses immediate repeats)
+    act_last: float = 0.0  # monotonic time of the last emitted activity
+    act_count: int = 0  # emitted this step (capped; reset on each start)
+    act_text: str = ""  # last phrase (collapses immediate repeats)
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
@@ -397,10 +402,16 @@ _PERSIST_ON = {"project", "gate", "files", "halt", "release", "done"}
 def _build_record(p: Project) -> dict[str, Any]:
     """The catalog (DB) shape of a build."""
     return {
-        "id": p.id, "floor": p.floor, "request": p.request, "mode": p.mode,
-        "backend": p.backend, "adapter": p.adapter,
-        "slots": p.max_slots, "status": p.status,
-        "passed": p.passed, "gates": p.gates,
+        "id": p.id,
+        "floor": p.floor,
+        "request": p.request,
+        "mode": p.mode,
+        "backend": p.backend,
+        "adapter": p.adapter,
+        "slots": p.max_slots,
+        "status": p.status,
+        "passed": p.passed,
+        "gates": p.gates,
         "out_base": str(p.out_base) if p.out_base else None,
         "created_at": p.created_at,
     }
@@ -430,7 +441,7 @@ def _load_persisted() -> None:
     so it's closed out honestly: an `interrupted` marker is appended and the stream
     ends once the replay catches up."""
     try:
-        rows = _STORE.latest_per_floor()   # one row per project (its newest release)
+        rows = _STORE.latest_per_floor()  # one row per project (its newest release)
     except Exception:
         return
     with _LOCK:
@@ -438,7 +449,8 @@ def _load_persisted() -> None:
             try:
                 ob = row.get("out_base")
                 p = Project(
-                    id=str(row["id"]), request=str(row.get("request", "")),
+                    id=str(row["id"]),
+                    request=str(row.get("request", "")),
                     mode="assistant",  # gated/autonomous rows from old builds resume as assistant
                     floor=int(row.get("floor", 0)),
                     backend=str(row.get("backend", "mock")),
@@ -448,7 +460,7 @@ def _load_persisted() -> None:
                     created_at=str(row.get("created_at") or ""),
                 )
                 try:
-                    p.log = _STORE.events_of(p.id)   # the durable replay log
+                    p.log = _STORE.events_of(p.id)  # the durable replay log
                 except Exception:
                     p.log = []
                 # A resumed build's log keeps its earlier run's _end mid-log, so
@@ -466,8 +478,12 @@ def _load_persisted() -> None:
                 # would re-enter from START, re-plan without retiring the first plan's
                 # tickets and build both — so it is closed out like a legacy floor.
                 legacy_mode = str(row.get("mode") or "assistant") != "assistant"
-                if (was_running and not legacy_mode and not _paused_at_retired_checkpoint(p.log)
-                        and _has_durable_checkpoint(p.id)):
+                if (
+                    was_running
+                    and not legacy_mode
+                    and not _paused_at_retired_checkpoint(p.log)
+                    and _has_durable_checkpoint(p.id)
+                ):
                     # Durable state survived the restart → RESUME the build from its
                     # last checkpoint. Seed the dedup set so the resumed run doesn't
                     # re-emit the history already in the log.
@@ -477,23 +493,29 @@ def _load_persisted() -> None:
                         p.seen_uris = set()
                     p.status = "running"
                     p.ended = False
-                    threading.Thread(target=_gated_runner, args=(_run_factory, p),
-                                     kwargs={"resume": True}, daemon=True).start()
+                    threading.Thread(
+                        target=_gated_runner,
+                        args=(_run_factory, p),
+                        kwargs={"resume": True},
+                        daemon=True,
+                    ).start()
                 elif was_running:
                     # No recoverable checkpoint → close it out honestly (history kept,
                     # terminal markers appended on the same log so replays end cleanly).
                     p.status = "done"
-                    _emit(p, type="narrate",
-                          text="↻ Server restarted — this build was interrupted "
-                               "(its history is preserved; it can't be resumed).")
-                    _emit(p, type="halt", phase="interrupted",
-                          reason="server restarted mid-build")
+                    _emit(
+                        p,
+                        type="narrate",
+                        text="↻ Server restarted — this build was interrupted "
+                        "(its history is preserved; it can't be resumed).",
+                    )
+                    _emit(p, type="halt", phase="interrupted", reason="server restarted mid-build")
                     _emit(p, type="done", passed=False, phase="interrupted")
                     p.phase = "interrupted"
                     _close(p)
                 else:
                     p.status = "done"
-                    p.ended = True           # already terminal; a late connect ends at once
+                    p.ended = True  # already terminal; a late connect ends at once
             except Exception:
                 continue
         _FLOOR[0] = max(_FLOOR[0], _STORE.max_floor())
@@ -609,13 +631,27 @@ def _evidence_files(pid: str) -> dict[str, bytes]:
     repo = _read_repo_cached(pid)
     p = _PROJECTS.get(pid)
     checks = (
-        [{"name": c.name, "status": c.status, "ok": c.ok,
-          "advisory": c.advisory, "findings": list(c.findings)} for c in repo.checks]
-        if repo else
-        [{"name": n, "status": str(g.get("status", "")).split(".")[-1].lower(),
-          "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
-          "advisory": bool(g.get("advisory")), "findings": []}
-         for n, g in (p.gates.items() if p else [])]
+        [
+            {
+                "name": c.name,
+                "status": c.status,
+                "ok": c.ok,
+                "advisory": c.advisory,
+                "findings": list(c.findings),
+            }
+            for c in repo.checks
+        ]
+        if repo
+        else [
+            {
+                "name": n,
+                "status": str(g.get("status", "")).split(".")[-1].lower(),
+                "ok": str(g.get("status", "")).split(".")[-1].lower() == "pass",
+                "advisory": bool(g.get("advisory")),
+                "findings": [],
+            }
+            for n, g in (p.gates.items() if p else [])
+        ]
     )
     if not checks:
         return {}
@@ -684,26 +720,43 @@ def _floor_insight(p: Project) -> dict[str, Any]:
     shipped floor), plus its meter — for the insight panel."""
     log = _STORE.events_of(p.id) if p.log_trimmed else list(p.log)
     meter = insight.last_meter(log)
-    out: dict[str, Any] = {"id": p.id, "status": p.status, "phase": p.phase,
-                           "passed": p.passed, "meter": meter, "halt": None, "card": None}
+    out: dict[str, Any] = {
+        "id": p.id,
+        "status": p.status,
+        "phase": p.phase,
+        "passed": p.passed,
+        "meter": meter,
+        "halt": None,
+        "card": None,
+    }
     if p.status != "done" or not p.ended:
         return out
     state = insight.durable_state(_STATE_DIR, p.id)
     if p.passed:
         manifest = insight.find_manifest(
-            [p.out_base, p.out_base / "code" if p.out_base else None], p.id)
+            [p.out_base, p.out_base / "code" if p.out_base else None], p.id
+        )
         out["card"] = insight.run_card(
-            manifest=manifest, stack=(state or {}).get("stack"),
-            tickets=insight.tickets_from_log(log), meter=meter)
+            manifest=manifest,
+            stack=(state or {}).get("stack"),
+            tickets=insight.tickets_from_log(log),
+            meter=meter,
+        )
         return out
     halt = next((e for e in reversed(log) if e.get("type") == "halt"), {})
     repo = _read_repo_cached(p.id)
     out["halt"] = insight.halt_report(
         phase=p.phase or str(halt.get("phase") or "halted"),
-        reason=str(halt.get("reason") or ""), token_cap=p.token_cap,
+        reason=str(halt.get("reason") or ""),
+        token_cap=p.token_cap,
         time_cap_s=_time_cap_s(p),
-        max_fix_attempts=p.max_fix_attempts, resumable=_resumable(p, log), state=state,
-        gates=p.gates, meter=meter, draft_files=len(repo.files) if repo else 0)
+        max_fix_attempts=p.max_fix_attempts,
+        resumable=_resumable(p, log),
+        state=state,
+        gates=p.gates,
+        meter=meter,
+        draft_files=len(repo.files) if repo else 0,
+    )
     return out
 
 
@@ -733,9 +786,9 @@ def take_activity(p: Project, text: str, now: float | None = None) -> str | None
         return None
     t = time.monotonic() if now is None else now
     if line == p.act_text or p.act_count >= _ACT_MAX_PER_STEP:
-        return None                       # an immediate repeat, or this step said enough
+        return None  # an immediate repeat, or this step said enough
     if p.act_last and (t - p.act_last) < _ACT_MIN_GAP:
-        return None                       # too soon after the last one
+        return None  # too soon after the last one
     p.act_last, p.act_count, p.act_text = t, p.act_count + 1, line
     return line
 
@@ -749,8 +802,7 @@ def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
     """
     t = time.monotonic() if now is None else now
     items = sorted(p.inflight.values(), key=lambda it: it[1])
-    parts = [f"{label} ({max(1, round((t - started) / 60))} min)"
-             for label, started in items[:cap]]
+    parts = [f"{label} ({max(1, round((t - started) / 60))} min)" for label, started in items[:cap]]
     if len(items) > cap:
         parts.append(f"+{len(items) - cap} more")
     return " · ".join(parts)
@@ -765,21 +817,23 @@ def _emit(p: Project, **event: Any) -> None:
     if event.get("type") == "gate":
         name = str(event.get("name", ""))
         if name:
-            p.gates[name] = {"status": event.get("status"),
-                             "attested": event.get("attested", True),
-                             "advisory": event.get("advisory", False)}
+            p.gates[name] = {
+                "status": event.get("status"),
+                "attested": event.get("attested", True),
+                "advisory": event.get("advisory", False),
+            }
     with p.cond:
         seq = len(p.log)
         p.log.append(event)
         if event.get("type") == "_end":
             p.ended = True
-            p.ended_at = time.monotonic()   # start the grace clock for log trimming
-        p.cond.notify_all()       # wake EVERY connected stream (not just one)
+            p.ended_at = time.monotonic()  # start the grace clock for log trimming
+        p.cond.notify_all()  # wake EVERY connected stream (not just one)
     # Durably back the log so a reconnect/restart can replay the whole story.
     with contextlib.suppress(Exception):
         _STORE.append_event(p.id, seq, event)
     if event.get("type") in _PERSIST_ON:
-        _persist(p)   # catalog the build's metadata on each state change
+        _persist(p)  # catalog the build's metadata on each state change
 
 
 def _close(p: Project) -> None:
@@ -796,15 +850,14 @@ def _trim_finished_logs() -> None:
     build so a late viewer replays from the store instead of the trimmed tail."""
     now = time.monotonic()
     for p in list(_PROJECTS.values()):
-        if (not p.ended or p.log_trimmed or p.ended_at is None
-                or now - p.ended_at < _LOG_GRACE_S):
+        if not p.ended or p.log_trimmed or p.ended_at is None or now - p.ended_at < _LOG_GRACE_S:
             continue
         with p.cond:
-            if not p.ended:        # resumed since the check above
+            if not p.ended:  # resumed since the check above
                 continue
             if len(p.log) > _LOG_TAIL:
                 p.log = p.log[-_LOG_TAIL:]
-            p.log_trimmed = True   # stream now replays this build's history from the store
+            p.log_trimmed = True  # stream now replays this build's history from the store
 
 
 def _log_sweeper() -> None:
@@ -860,11 +913,17 @@ def _choose_stack(p: Project) -> tuple[str, str] | None:
             "additionalProperties": False,
         }
         result = _build_proxy(p.backend).complete(
-            "principal_architect", "T2", _STACK_SOP,  # one structural pick; Sonnet is ample
-            [{"role": "user",
-              "content": (f"REQUEST:\n{p.request}"
-                          f"\n\nINSTALLED STACKS (pick one):\n{menu}")}],
-            purpose="ideation", schema=schema,
+            "principal_architect",
+            "T2",
+            _STACK_SOP,  # one structural pick; Sonnet is ample
+            [
+                {
+                    "role": "user",
+                    "content": (f"REQUEST:\n{p.request}\n\nINSTALLED STACKS (pick one):\n{menu}"),
+                }
+            ],
+            purpose="ideation",
+            schema=schema,
         )
         parsed = result.parsed if isinstance(result.parsed, dict) else None
         if parsed is None:
@@ -895,16 +954,19 @@ def _hook_rate_limit_waits() -> None:
         return
 
     def _on_wait(wait_s: float, resume_epoch: float, explicit: bool) -> None:
-        if wait_s < 120:                     # short backoff blips stay invisible
+        if wait_s < 120:  # short backoff blips stay invisible
             return
         hhmm = time.strftime("%H:%M", time.localtime(resume_epoch))
         with _LOCK:
             running = [q for q in _PROJECTS.values() if q.status == "running"]
         for q in running:
             _emit(q, type="limitwait", seconds=int(wait_s), until=int(resume_epoch))
-            _emit(q, type="narrate",
-                  text=f"⏸ Provider usage limit reached — the build is waiting it "
-                       f"out and resumes ~{hhmm}. Nothing is lost.")
+            _emit(
+                q,
+                type="narrate",
+                text=f"⏸ Provider usage limit reached — the build is waiting it "
+                f"out and resumes ~{hhmm}. Nothing is lost.",
+            )
 
     _mpp.on_rate_limit_wait = _on_wait
 
@@ -925,12 +987,15 @@ def _gated_runner(runner, p: Project, **kwargs: Any) -> None:
         p.status = "queued"
         _persist(p)
         insight.QUEUE.join(p.id)
-        _emit(p, type="narrate",
-              text="⏳ All build slots are busy — queued. Starting as soon as one frees…")
+        _emit(
+            p,
+            type="narrate",
+            text="⏳ All build slots are busy — queued. Starting as soon as one frees…",
+        )
         _announce_queue()
         try:
             while True:
-                if p.cancel.is_set():          # stopped while queued: never takes a slot
+                if p.cancel.is_set():  # stopped while queued: never takes a slot
                     insight.QUEUE.leave(p.id)
                     _finish_stopped(p)
                     return
@@ -965,9 +1030,12 @@ def _time_cap_s(p: Project) -> float | None:
 
 def _run_metered(runner, p: Project, kwargs: Mapping[str, Any]) -> None:
     """Run the build with its live token/time meter streaming to the floor."""
-    insight.start_meter(p.id, insight.MeterWatch(
-        _STATE_DIR, p.id, lambda ev: _emit(p, **ev),
-        caps=lambda: (p.token_cap, _time_cap_s(p))))
+    insight.start_meter(
+        p.id,
+        insight.MeterWatch(
+            _STATE_DIR, p.id, lambda ev: _emit(p, **ev), caps=lambda: (p.token_cap, _time_cap_s(p))
+        ),
+    )
     try:
         runner(p, **kwargs)
     finally:
@@ -978,8 +1046,7 @@ def _finish_stopped(p: Project) -> None:
     """Close out a build the operator stopped or paused; its checkpoint stays resumable."""
     kind = p.stop_kind or "stopped"
     verb = "Paused" if kind == "paused" else "Stopped"
-    _emit(p, type="narrate",
-          text=f"⏸ {verb} at a checkpoint — Resume picks up where it left off.")
+    _emit(p, type="narrate", text=f"⏸ {verb} at a checkpoint — Resume picks up where it left off.")
     _emit(p, type="halt", phase=kind, reason=f"{kind} by the operator")
     _emit(p, type="done", passed=False, phase=kind)
     p.phase = kind
@@ -1031,8 +1098,11 @@ def _base_tree(base: Project) -> dict[str, bytes] | None:
 
 
 def _disk_tree(code: Path) -> dict[str, bytes]:
-    return {str(f.relative_to(code)): f.read_bytes()
-            for f in sorted(code.rglob("*")) if f.is_file() and not f.is_symlink()}
+    return {
+        str(f.relative_to(code)): f.read_bytes()
+        for f in sorted(code.rglob("*"))
+        if f.is_file() and not f.is_symlink()
+    }
 
 
 def _run_factory(p: Project, resume: bool = False) -> None:
@@ -1048,25 +1118,42 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     _hook_rate_limit_waits()
 
     if resume:
-        _emit(p, type="narrate",
-              text="↻ Resuming — picking up from the last checkpoint…")
+        _emit(p, type="narrate", text="↻ Resuming — picking up from the last checkpoint…")
     else:
-        _emit(p, type="project", id=p.id, request=p.request, mode=p.mode, floor=p.floor,
-              backend=p.backend, slots=p.max_slots, workers=p.workers,
-              ticket_tiers=p.ticket_tiers, token_cap=p.token_cap,
-              max_fix_attempts=p.max_fix_attempts, build=p.build, profile=p.profile)
+        _emit(
+            p,
+            type="project",
+            id=p.id,
+            request=p.request,
+            mode=p.mode,
+            floor=p.floor,
+            backend=p.backend,
+            slots=p.max_slots,
+            workers=p.workers,
+            ticket_tiers=p.ticket_tiers,
+            token_cap=p.token_cap,
+            max_fix_attempts=p.max_fix_attempts,
+            build=p.build,
+            profile=p.profile,
+        )
         if p.build.get("base_floor"):
-            _emit(p, type="narrate", text=f"✎ Change of floor {p.build['base_floor']} "
-                                          f"on Floor {p.floor}: {p.request!r}")
+            _emit(
+                p,
+                type="narrate",
+                text=f"✎ Change of floor {p.build['base_floor']} on Floor {p.floor}: {p.request!r}",
+            )
         else:
             _emit(p, type="narrate", text=f"📋 New project on Floor {p.floor}: {p.request!r}")
         _emit(p, type="narrate", text=f"🏭 Mode: {p.mode}. The crew reports for duty…")
         if p.backend != "mock":
             # Real backends: the first graph node is one long model call, and node
             # telemetry only streams as nodes COMPLETE — warn that the quiet is normal.
-            _emit(p, type="narrate",
-                  text="🧠 Drafting has begun — real model calls can be quiet for "
-                       "several minutes; rooms light up as each step lands.")
+            _emit(
+                p,
+                type="narrate",
+                text="🧠 Drafting has begun — real model calls can be quiet for "
+                "several minutes; rooms light up as each step lands.",
+            )
     # The build ALWAYS opens with product/intake work, but live node telemetry only
     # fires as nodes COMPLETE — seat the product team NOW so the floor shows the
     # work already grinding instead of an all-lounge office.
@@ -1080,19 +1167,20 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         chosen = _choose_stack(p)
         if chosen:
             p.profile = chosen[0]
-            _emit(p, type="profile", profile=p.profile)   # a resume after a restart keeps it
-            _emit(p, type="active", room="plan", agent="Planner",
-                  live=True)
-            _emit(p, type="narrate",
-                  text=f"🏗 Planner chose the stack: {chosen[0]}"
-                       + (f" — {chosen[1]}" if chosen[1] else ""))
+            _emit(p, type="profile", profile=p.profile)  # a resume after a restart keeps it
+            _emit(p, type="active", room="plan", agent="Planner", live=True)
+            _emit(
+                p,
+                type="narrate",
+                text=f"🏗 Planner chose the stack: {chosen[0]}"
+                + (f" — {chosen[1]}" if chosen[1] else ""),
+            )
 
     # LIVE per-node telemetry: as each real graph node executes, seat its agent at
     # the desk in real time; as it finishes, surface what it produced (artifacts,
     # tickets, org chart, journal). Emitted immediately so the floor reflects the
     # build actually grinding.
-    def progress(node: str, scope: str, *, phase: str = "finish",
-                 result: object = None) -> None:
+    def progress(node: str, scope: str, *, phase: str = "finish", result: object = None) -> None:
         if phase == "start" and scope == "factory" and node in STAGE_FOR_NODE:
             room, label = STAGE_FOR_NODE[node]
             _emit(p, type="stage", room=room, label=label)
@@ -1119,7 +1207,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     def _emit_node_output(result: Mapping[str, Any]) -> None:
         for out in events_for_node_output(result, p.seen_uris, p.ticket_tiers):
             _emit(p, **out)
-        with contextlib.suppress(Exception):   # persist the dedup set so a resume won't replay
+        with contextlib.suppress(Exception):  # persist the dedup set so a resume won't replay
             _STORE.add_seen(p.id, p.seen_uris)
 
     def task_cb(ev: Mapping[str, Any]) -> None:
@@ -1135,8 +1223,13 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             return
         _emit(p, type="act", room=p.act_room, agent=p.act_agent, text=line)
         if p.act_count == _ACT_MAX_PER_STEP:
-            _emit(p, type="act", room=p.act_room, agent=p.act_agent,
-                  text="… (still working; further tool calls not listed)")
+            _emit(
+                p,
+                type="act",
+                room=p.act_room,
+                agent=p.act_agent,
+                text="… (still working; further tool calls not listed)",
+            )
 
     # The code lives in the durable CAS — the build needs NO output directory. We
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
@@ -1163,21 +1256,26 @@ def _run_factory(p: Project, resume: bool = False) -> None:
             if quiet_min in (5, 15, 30):
                 busy = waiting_on(p)
                 if busy:
-                    text = (f"⏳ Still working — {busy}. Agentic steps report only when "
-                            "they finish, so a long quiet stretch here is normal.")
+                    text = (
+                        f"⏳ Still working — {busy}. Agentic steps report only when "
+                        "they finish, so a long quiet stretch here is normal."
+                    )
                 else:
-                    text = (f"⏳ No step has started or finished in {quiet_min} min "
-                            "and nothing is reported in flight.")
+                    text = (
+                        f"⏳ No step has started or finished in {quiet_min} min "
+                        "and nothing is reported in flight."
+                    )
                 if quiet_min >= 15:
-                    text += (f" It has been {quiet_min} min — if this keeps up check "
-                             "the server terminal, and that the backend CLI answers "
-                             "(e.g. `claude -p \"hi\"`) on the host.")
+                    text += (
+                        f" It has been {quiet_min} min — if this keeps up check "
+                        "the server terminal, and that the backend CLI answers "
+                        '(e.g. `claude -p "hi"`) on the host.'
+                    )
                 _emit(p, type="narrate", text=text)
                 last_len = len(p.log)
 
     if p.backend != "mock":
-        threading.Thread(target=_quiet_watchdog, daemon=True,
-                         name=f"quiet-watchdog-{p.id}").start()
+        threading.Thread(target=_quiet_watchdog, daemon=True, name=f"quiet-watchdog-{p.id}").start()
     try:
         try:
             result = run(
@@ -1186,16 +1284,16 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 workers=p.workers,
                 ticket_tiers=p.ticket_tiers or None,
                 progress_cb=progress,
-                activity_cb=activity,         # what the agent is doing INSIDE a step
+                activity_cb=activity,  # what the agent is doing INSIDE a step
                 mode=p.mode,
-                backend=p.backend,            # real backend per project (not always mock)
-                adapter=p.adapter,            # coding substrate (stub/raw-react)
-                max_slots=p.max_slots,        # IC-pool parallelism (Wave C) + budget tree (Wave D)
+                backend=p.backend,  # real backend per project (not always mock)
+                adapter=p.adapter,  # coding substrate (stub/raw-react)
+                max_slots=p.max_slots,  # IC-pool parallelism (Wave C) + budget tree (Wave D)
                 token_cap=p.token_cap,
                 max_fix_attempts=p.max_fix_attempts,
-                cancel=p.cancel,              # Stop / Pause: halts at the next checkpoint
-                thread_id=p.id,               # UNIQUE per project — no cross-floor collision
-                state_dir=_STATE_DIR,         # durable: build survives + resumes past a restart
+                cancel=p.cancel,  # Stop / Pause: halts at the next checkpoint
+                thread_id=p.id,  # UNIQUE per project — no cross-floor collision
+                state_dir=_STATE_DIR,  # durable: build survives + resumes past a restart
                 output_dir=str(code_dir) if code_dir else None,
                 # The code stays in the store, but the BUILD-MANIFEST (run/test
                 # commands, models, tokens) is the floor's run card.
@@ -1227,14 +1325,17 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         if transient and p.autoresume_left > 0 and _has_durable_checkpoint(p.id):
             idx = 6 - p.autoresume_left
             p.autoresume_left -= 1
-            wait = min(3600, 300 * (2**idx))     # 5,10,20,40,60,60 min
+            wait = min(3600, 300 * (2**idx))  # 5,10,20,40,60,60 min
             resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
-            _emit(p, type="narrate",
-                  text=f"⏸ Provider unavailable ({exc}). Auto-resuming from the last "
-                       f"checkpoint ~{resume_at} — nothing is lost.")
+            _emit(
+                p,
+                type="narrate",
+                text=f"⏸ Provider unavailable ({exc}). Auto-resuming from the last "
+                f"checkpoint ~{resume_at} — nothing is lost.",
+            )
             _emit(p, type="limitwait", seconds=int(wait), until=int(time.time() + wait))
-            _persist(p)                          # status stays "running": a restart resumes too
-            if p.cancel.wait(wait):              # Stop / Pause during the back-off
+            _persist(p)  # status stays "running": a restart resumes too
+            if p.cancel.wait(wait):  # Stop / Pause during the back-off
                 _finish_stopped(p)
                 return
             with _LOCK:
@@ -1282,17 +1383,22 @@ def _run_factory(p: Project, resume: bool = False) -> None:
     # is materialized from the CAS — no output directory required.
     _invalidate_repo(p.id)
     repo = _read_repo_cached(p.id)
-    n_files = len(repo.files) if repo is not None else (
-        sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0
+    n_files = (
+        len(repo.files)
+        if repo is not None
+        else (sum(1 for f in p.out_base.rglob("*") if f.is_file()) if p.out_base else 0)
     )
     if n_files:
         _emit(p, type="files", count=n_files)
-        _emit(p, type="narrate",
-              text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.")
+        _emit(
+            p,
+            type="narrate",
+            text=f"📂 {n_files} file(s) in the repo — open REPO to browse the store.",
+        )
     p.passed = bool(result.passed)
     p.phase = "passed" if result.passed else (result.phase or "halted")
     p.status = "done"
-    _persist(p)              # catalog the FINAL status/passed (after they're set)
+    _persist(p)  # catalog the FINAL status/passed (after they're set)
     _close(p)
 
 
@@ -1322,7 +1428,7 @@ class Handler(BaseHTTPRequestHandler):
             return insight.read_json_body(self.headers, self.rfile)
         except insight.BodyError as exc:
             if exc.status == 413:
-                self.close_connection = True   # the unread body would desync keep-alive
+                self.close_connection = True  # the unread body would desync keep-alive
             raise
 
     # -- sign-in ---------------------------------------------------------------
@@ -1394,11 +1500,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         ctype = {
-            ".html": "text/html", ".js": "application/javascript",
-            ".css": "text/css", ".png": "image/png", ".ico": "image/x-icon",
+            ".html": "text/html",
+            ".js": "application/javascript",
+            ".css": "text/css",
+            ".png": "image/png",
+            ".ico": "image/x-icon",
             # A manifest served as octet-stream is silently ignored by the
             # browser, and the home-screen shortcut falls back to a screenshot.
-            ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml",
+            ".webmanifest": "application/manifest+json",
+            ".svg": "image/svg+xml",
         }.get(target.suffix, "application/octet-stream")
         data = target.read_bytes()
         self.send_response(200)
@@ -1417,8 +1527,14 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/", "/index.html", "/login.html"):
                 self._serve_static("login.html")
                 return
-            if path in ("/icon.svg", "/icon-180.png", "/icon-192.png",
-                        "/icon-512.png", "/manifest.webmanifest", "/favicon.ico"):
+            if path in (
+                "/icon.svg",
+                "/icon-180.png",
+                "/icon-192.png",
+                "/icon-512.png",
+                "/manifest.webmanifest",
+                "/favicon.ico",
+            ):
                 self._serve_static(path)
                 return
             self._json(401, {"error": "sign in"})
@@ -1438,7 +1554,7 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_static("index.html")
             return
         if path.startswith("/static/"):
-            self._serve_static(path[len("/static/"):])
+            self._serve_static(path[len("/static/") :])
             return
         if path == "/api/projects":
             self._list_projects()
@@ -1452,8 +1568,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/settings":
             backend = _server_backend()
-            self._json(200, _settings.client_view(_settings.load(_settings_path(), backend),
-                                                  backend))
+            self._json(
+                200, _settings.client_view(_settings.load(_settings_path(), backend), backend)
+            )
             return
         if path.startswith("/api/files/"):
             self._list_files(path.rsplit("/", 1)[-1])
@@ -1490,7 +1607,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         files = [
             {"path": str(f.relative_to(base)), "size": f.stat().st_size}
-            for f in sorted(base.rglob("*")) if f.is_file()
+            for f in sorted(base.rglob("*"))
+            if f.is_file()
         ]
         self._json(200, {"files": files, "source": "disk", **_draft_label(pid)})
 
@@ -1554,7 +1672,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             tree = {
                 str(f.relative_to(base)): f.read_bytes()
-                for f in sorted(base.rglob("*")) if f.is_file()
+                for f in sorted(base.rglob("*"))
+                if f.is_file()
             }
             name = base.name
         # Export-time sidecar: ship the attested gate verdicts
@@ -1665,8 +1784,7 @@ class Handler(BaseHTTPRequestHandler):
             p.cancel.set()
         verb = "Pause" if kind == "paused" else "Stop"
         _emit(p, type="stopping", kind=kind)
-        _emit(p, type="narrate",
-              text=f"⏸ {verb} requested — halting at the next checkpoint…")
+        _emit(p, type="narrate", text=f"⏸ {verb} requested — halting at the next checkpoint…")
         self._json(200, {"ok": True, "kind": kind})
 
     def _resume(self, pid: str) -> None:
@@ -1680,8 +1798,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
-        from_checkpoint = _has_durable_checkpoint(pid)   # a DB probe: not under _LOCK
-        spent = insight.read_ledger(_STATE_DIR, pid)[1]   # the time cap counts all of it
+        from_checkpoint = _has_durable_checkpoint(pid)  # a DB probe: not under _LOCK
+        spent = insight.read_ledger(_STATE_DIR, pid)[1]  # the time cap counts all of it
         with _LOCK:
             p = _PROJECTS.get(pid)
             if p is None:
@@ -1702,13 +1820,18 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if time_cap and time_cap * 60 <= spent:
                 # A cap at or under the time already spent would stop it again at once.
-                self._json(400, {"error": f"time_cap_minutes must be more than the "
-                                          f"{spent / 60:.1f} minutes already spent"})
+                self._json(
+                    400,
+                    {
+                        "error": f"time_cap_minutes must be more than the "
+                        f"{spent / 60:.1f} minutes already spent"
+                    },
+                )
                 return
             if time_cap is not None:
                 p.build = {**p.build, "time_cap_minutes": time_cap or None}
             if token_cap is not None:
-                p.token_cap = token_cap or None      # 0 lifts the cap
+                p.token_cap = token_cap or None  # 0 lifts the cap
             if max_fix is not None:
                 p.max_fix_attempts = max_fix
             p.cancel = threading.Event()
@@ -1719,7 +1842,7 @@ class Handler(BaseHTTPRequestHandler):
             p.autoresume_left = 6
             p.status = "running"
             with p.cond:
-                if p.log_trimmed:                    # seq numbering needs the full log back
+                if p.log_trimmed:  # seq numbering needs the full log back
                     p.log = _STORE.events_of(p.id)
                     p.log_trimmed = False
                 p.ended = False
@@ -1727,15 +1850,27 @@ class Handler(BaseHTTPRequestHandler):
         with contextlib.suppress(Exception):
             p.seen_uris |= _STORE.seen_of(p.id)  # don't re-emit what the floor already showed
         minutes = p.build.get("time_cap_minutes")
-        _emit(p, type="resumed", token_cap=p.token_cap, max_fix_attempts=p.max_fix_attempts,
-              time_cap_minutes=minutes)
+        _emit(
+            p,
+            type="resumed",
+            token_cap=p.token_cap,
+            max_fix_attempts=p.max_fix_attempts,
+            time_cap_minutes=minutes,
+        )
         cap = f"a {p.token_cap:,}-token cap" if p.token_cap else "no token cap"
         clock = f", a {minutes:g}-minute time cap" if minutes else ""
-        _emit(p, type="narrate",
-              text=f"▶ Resumed with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).")
+        _emit(
+            p,
+            type="narrate",
+            text=f"▶ Resumed with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).",
+        )
         _persist(p)
-        threading.Thread(target=_gated_runner, args=(_run_factory, p),
-                         kwargs={"resume": from_checkpoint}, daemon=True).start()
+        threading.Thread(
+            target=_gated_runner,
+            args=(_run_factory, p),
+            kwargs={"resume": from_checkpoint},
+            daemon=True,
+        ).start()
         self._json(200, {"ok": True, "from_checkpoint": from_checkpoint})
 
     def _delete_project(self, pid: str) -> None:
@@ -1746,7 +1881,7 @@ class Handler(BaseHTTPRequestHandler):
             if p is None:
                 self._json(404, {"error": "no such project"})
                 return
-            if not p.ended:          # running, queued, or still closing out
+            if not p.ended:  # running, queued, or still closing out
                 self._json(409, {"error": "this build is still running — stop it first"})
                 return
             del _PROJECTS[pid]
@@ -1755,8 +1890,11 @@ class Handler(BaseHTTPRequestHandler):
         _invalidate_repo(pid)
         if p.out_base is not None:
             base = p.out_base.resolve()
-            if base.is_dir() and base.is_relative_to(_OUTPUT_ROOT.resolve()) \
-                    and base != _OUTPUT_ROOT.resolve():
+            if (
+                base.is_dir()
+                and base.is_relative_to(_OUTPUT_ROOT.resolve())
+                and base != _OUTPUT_ROOT.resolve()
+            ):
                 shutil.rmtree(base, ignore_errors=True)
         self._json(200, {"ok": True})
 
@@ -1766,14 +1904,25 @@ class Handler(BaseHTTPRequestHandler):
         with _LOCK:
             projs = sorted(_PROJECTS.values(), key=lambda x: x.floor)
         rows = [
-            {"id": p.id, "floor": p.floor, "request": p.request,
-             "title": request_title(p.request), "mode": p.mode,
-             "backend": p.backend, "slots": p.max_slots, "status": p.status,
-             "passed": p.passed, "gates": p.gates, "phase": p.phase,
-             "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
-             "token_cap": p.token_cap, "max_fix_attempts": p.max_fix_attempts,
-             "build": p.build,
-             "queue": insight.QUEUE.position(p.id), "meter": insight.last_meter(p.log)}
+            {
+                "id": p.id,
+                "floor": p.floor,
+                "request": p.request,
+                "title": request_title(p.request),
+                "mode": p.mode,
+                "backend": p.backend,
+                "slots": p.max_slots,
+                "status": p.status,
+                "passed": p.passed,
+                "gates": p.gates,
+                "phase": p.phase,
+                "stopping": p.stop_kind if p.cancel.is_set() and not p.ended else "",
+                "token_cap": p.token_cap,
+                "max_fix_attempts": p.max_fix_attempts,
+                "build": p.build,
+                "queue": insight.QUEUE.position(p.id),
+                "meter": insight.last_meter(p.log),
+            }
             for p in projs
         ]
         self._json(200, {"projects": rows})
@@ -1806,13 +1955,19 @@ class Handler(BaseHTTPRequestHandler):
             hay = f"{p.request} {title}".casefold()
             if not all(w in hay for w in words):
                 continue
-            builds.append({
-                "id": p.id, "floor": p.floor, "request": p.request, "title": title,
-                "status": status, "phase": p.phase, "passed": p.passed,
-                "created_at": p.created_at,
-            })
-        builds.sort(key=lambda b: (b["created_at"], b["floor"]),
-                    reverse=want["sort"] == "newest")
+            builds.append(
+                {
+                    "id": p.id,
+                    "floor": p.floor,
+                    "request": p.request,
+                    "title": title,
+                    "status": status,
+                    "phase": p.phase,
+                    "passed": p.passed,
+                    "created_at": p.created_at,
+                }
+            )
+        builds.sort(key=lambda b: (b["created_at"], b["floor"]), reverse=want["sort"] == "newest")
         self._json(200, {"builds": builds, "total": len(projs), **want})
 
     def _save_settings(self) -> None:
@@ -1839,7 +1994,8 @@ class Handler(BaseHTTPRequestHandler):
         backend = _server_backend()
         try:
             opts = _settings.parse_build_options(
-                body, _settings.load(_settings_path(), backend), backend)
+                body, _settings.load(_settings_path(), backend), backend
+            )
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
@@ -1881,14 +2037,23 @@ class Handler(BaseHTTPRequestHandler):
         if base is not None:
             build.update(base_id=base.id, base_floor=base.floor)
         p = Project(
-            id=pid, request=request, mode="assistant", floor=floor,
-            backend=backend, adapter=adapter,
+            id=pid,
+            request=request,
+            mode="assistant",
+            floor=floor,
+            backend=backend,
+            adapter=adapter,
             out_base=_OUTPUT_ROOT / f"floor-{floor}",
-            max_slots=max_slots, token_cap=token_cap,
+            max_slots=max_slots,
+            token_cap=token_cap,
             workers=parse_workers(body.get("workers")),
-            ticket_tiers=(parse_ticket_tiers(body["ticket_tiers"]) if "ticket_tiers" in body
-                          else opts["ticket_tiers"]),
-            max_fix_attempts=opts["max_fix_attempts"], profile=opts["profile"],
+            ticket_tiers=(
+                parse_ticket_tiers(body["ticket_tiers"])
+                if "ticket_tiers" in body
+                else opts["ticket_tiers"]
+            ),
+            max_fix_attempts=opts["max_fix_attempts"],
+            profile=opts["profile"],
             build=build,
         )
         inputs = _OUTPUT_ROOT / f"floor-{floor}" / ".inputs"
@@ -1922,15 +2087,19 @@ class Handler(BaseHTTPRequestHandler):
         builds to finish (or reload) before clearing."""
         with _LOCK:
             active = [
-                p.id for p in _PROJECTS.values()
+                p.id
+                for p in _PROJECTS.values()
                 if p.status in ("running", "queued") and not p.ended
             ]
             if active:
-                self._json(409, {
-                    "error": f"{len(active)} build(s) still running — let them "
-                             "finish (or reload), then clear.",
-                    "running": active,
-                })
+                self._json(
+                    409,
+                    {
+                        "error": f"{len(active)} build(s) still running — let them "
+                        "finish (or reload), then clear.",
+                        "running": active,
+                    },
+                )
                 return
             _PROJECTS.clear()
             _FLOOR[0] = 0
@@ -1953,7 +2122,7 @@ class Handler(BaseHTTPRequestHandler):
 
         start = (parse_qs(urlparse(self.path).query).get("from") or [""])[0]
         if not self.headers.get("Last-Event-ID") and start.isdigit():
-            cursor = int(start)   # a client reattaching after a Resume tails from here
+            cursor = int(start)  # a client reattaching after a Resume tails from here
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -1968,13 +2137,13 @@ class Handler(BaseHTTPRequestHandler):
                 for idx in range(cursor, len(history)):
                     ev = history[idx]
                     if ev.get("type") == "_end" and idx + 1 < len(history):
-                        continue                 # an earlier run's end; the build resumed
+                        continue  # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()
                         return
                     self.wfile.write(f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode())
-                self.wfile.write(b"event: end\ndata: {}\n\n")   # caught up; build is over
+                self.wfile.write(b"event: end\ndata: {}\n\n")  # caught up; build is over
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
@@ -1984,12 +2153,12 @@ class Handler(BaseHTTPRequestHandler):
                 with p.cond:
                     while len(p.log) <= cursor and not p.ended:
                         if not p.cond.wait(timeout=15):
-                            break          # idle → fall through to a keep-alive
+                            break  # idle → fall through to a keep-alive
                     batch = p.log[cursor:]
                     total = len(p.log)
                     ended = p.ended
                 if not batch:
-                    if ended:              # caught up AND the build is over
+                    if ended:  # caught up AND the build is over
                         self.wfile.write(b"event: end\ndata: {}\n\n")
                         self.wfile.flush()
                         return
@@ -2001,14 +2170,12 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 for idx, ev in enumerate(batch, start=cursor):
                     if ev.get("type") == "_end" and (idx + 1 < total or not ended):
-                        continue                 # an earlier run's end; the build resumed
+                        continue  # an earlier run's end; the build resumed
                     if ev.get("type") == "_end":
                         self.wfile.write(f"id: {idx}\nevent: end\ndata: {{}}\n\n".encode())
                         self.wfile.flush()
                         return
-                    self.wfile.write(
-                        f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode()
-                    )
+                    self.wfile.write(f"id: {idx}\ndata: {json.dumps(ev)}\n\n".encode())
                 cursor += len(batch)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -2038,18 +2205,23 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
         print("\n  ⚠  No .env found — set one up so your backend + key are configured:")
         print("       cp foundry.mac.env.example .env    # Mac  (Linux: foundry.linux.env.example)")
         print("       …then edit .env (token/key) and start again.\n")
-    Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)   # durable factory state
+    Path(_STATE_DIR).mkdir(parents=True, exist_ok=True)  # durable factory state
     if _auth.enabled():
         _auth.ensure_seeded()
         if _auth.must_change():
-            print(f"\n  🔑 Sign in as {_auth.username()!r} / {_auth.SEED_PASSWORD!r} — "
-                  "you'll be made to change it before any build can start.\n")
+            print(
+                f"\n  🔑 Sign in as {_auth.username()!r} / {_auth.SEED_PASSWORD!r} — "
+                "you'll be made to change it before any build can start.\n"
+            )
     else:
-        print("\n  ⚠  FOUNDRY_AUTH=off — the Workshop is open to anyone who can "
-              "reach this port, and it spends money.\n")
-    _load_persisted()   # rehydrate floors (+ resume any interrupted build) from disk
-    if _LOG_SWEEP_S > 0:   # bound RAM on a long-lived server: trim finished logs
+        print(
+            "\n  ⚠  FOUNDRY_AUTH=off — the Workshop is open to anyone who can "
+            "reach this port, and it spends money.\n"
+        )
+    _load_persisted()  # rehydrate floors (+ resume any interrupted build) from disk
+    if _LOG_SWEEP_S > 0:  # bound RAM on a long-lived server: trim finished logs
         threading.Thread(target=_log_sweeper, daemon=True).start()
+
     class _QuietServer(ThreadingHTTPServer):
         def handle_error(self, request, client_address):
             # Phones/tabs drop SSE streams constantly (backgrounding, reload) —
@@ -2077,8 +2249,10 @@ def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
         if _AUTH_TOKEN:
             print("      🔒 a FOUNDRY_WORKSHOP_TOKEN is required for builds (good).\n")
         else:
-            print("      ⚠ no FOUNDRY_WORKSHOP_TOKEN set — set one to require auth for"
-                  " state-changing requests on an exposed network.\n")
+            print(
+                "      ⚠ no FOUNDRY_WORKSHOP_TOKEN set — set one to require auth for"
+                " state-changing requests on an exposed network.\n"
+            )
     else:
         # Localhost default: the Origin/CSRF guard still blocks a malicious page.
         print(f"      auth: {'token required' if _AUTH_TOKEN else 'localhost-only + CSRF guard'}")

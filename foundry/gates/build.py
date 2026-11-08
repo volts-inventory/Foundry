@@ -62,6 +62,7 @@ def commands_digest(**commands: object) -> str:
     """Short digest of a gate's effective commands, for its reuse-key version."""
     return content_digest({k: v for k, v in sorted(commands.items())})[:16]
 
+
 _EXCERPT_LINES = 40
 _LINE_CHARS = 200
 _EXCERPT_CHARS = 4000
@@ -81,7 +82,8 @@ _MYPY_FOUND = re.compile(
 )
 _MYPY_NAME_DEFINED = re.compile(
     r"^(?P<path>[^\s:]+\.pyi?):(?P<line>\d+)(?::\d+)?: error: "
-    r'Name "(?P<name>\w+)" is not defined\s+\[name-defined\]', re.MULTILINE
+    r'Name "(?P<name>\w+)" is not defined\s+\[name-defined\]',
+    re.MULTILINE,
 )
 
 
@@ -100,12 +102,16 @@ def build_findings(
         from .pydeps import install_failure_is_project, unavailable_requirement_hints
 
         if install_failure_is_project(stdout + stderr):
-            head += (" (the project's declared dependencies cannot be installed — FAIL: "
-                     "fix requirements.txt / pyproject.toml)")
+            head += (
+                " (the project's declared dependencies cannot be installed — FAIL: "
+                "fix requirements.txt / pyproject.toml)"
+            )
             hints = unavailable_requirement_hints(stdout + stderr, workdir)
         else:
-            head += (" (dependency install failed on the network, the index or the host "
-                     "— an ERROR, never latched)")
+            head += (
+                " (dependency install failed on the network, the index or the host "
+                "— an ERROR, never latched)"
+            )
     elif step == "install":
         head += (
             " (dependency install failed — an ERROR, never latched: if the output "
@@ -117,8 +123,10 @@ def build_findings(
 
         if _MYPY_FOUND.search(stdout + stderr):
             head += f" ({TYPECHECK_ONLY}: the compile steps before mypy passed)"
-        hints = (*undeclared_import_hints(stdout + stderr, workdir),
-                 *forward_annotation_hints(stdout + stderr, workdir))
+        hints = (
+            *undeclared_import_hints(stdout + stderr, workdir),
+            *forward_annotation_hints(stdout + stderr, workdir),
+        )
     tail = output_tail(stdout, stderr, workdir)
     return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
 
@@ -136,11 +144,14 @@ def forward_annotation_hints(output: str, workdir: Path) -> tuple[str, ...]:
         if not src.is_relative_to(root) or not src.is_file():
             continue
         rel = src.relative_to(root).as_posix()
-        if _quoted_only(src.read_text(encoding="utf-8", errors="replace"), name,
-                        int(m.group("line"))):
-            hint = (f"{rel}:{m.group('line')}: `{name}` is used only in a quoted annotation: "
-                    "import it under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) "
-                    "in that module")
+        if _quoted_only(
+            src.read_text(encoding="utf-8", errors="replace"), name, int(m.group("line"))
+        ):
+            hint = (
+                f"{rel}:{m.group('line')}: `{name}` is used only in a quoted annotation: "
+                "import it under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) "
+                "in that module"
+            )
             if hint not in hints:
                 hints.append(hint)
     return tuple(hints)
@@ -153,8 +164,11 @@ def _quoted_only(source: str, name: str, line: int) -> bool:
         for tok in tokenize.generate_tokens(io.StringIO(source).readline):
             if tok.type == tokenize.NAME and tok.string == name:
                 return False
-            if (tok.type == tokenize.STRING and tok.start[0] <= line <= tok.end[0]
-                    and word.search(tok.string)):
+            if (
+                tok.type == tokenize.STRING
+                and tok.start[0] <= line <= tok.end[0]
+                and word.search(tok.string)
+            ):
                 quoted_here = True
     except (tokenize.TokenError, SyntaxError):
         return False
@@ -218,7 +232,9 @@ class BuildGate:
         # v2 = commands run in the confined sandbox: never reuse a pre-sandbox verdict.
         # The command digest: a cached verdict never outlives a change of commands.
         self.scanner_rule_version = "build-cmd-v4:" + commands_digest(
-            cmd=list(self.cmd), install_cmd=self.install_cmd, profile=profile_name,
+            cmd=list(self.cmd),
+            install_cmd=self.install_cmd,
+            profile=profile_name,
             pip_install=list(pyenv.requirements) if pyenv is not None else None,
             import_scan=sorted(first_party) if python else None,
         )
@@ -243,9 +259,7 @@ class BuildGate:
                     exit_codes=codes,
                     stdout=out,
                     stderr=err,
-                    findings=build_findings(
-                        rc, out, err, self._pyenv.scratch, step="pip install"
-                    ),
+                    findings=build_findings(rc, out, err, self._pyenv.scratch, step="pip install"),
                     structured=structured,
                     seal_key=self._seal_key,
                 )
@@ -269,7 +283,9 @@ class BuildGate:
                     seal_key=self._seal_key,
                 )
         rc, b_out, b_err = ground_untrusted(
-            self.cmd, workdir, timeout_s=self._timeout_s,
+            self.cmd,
+            workdir,
+            timeout_s=self._timeout_s,
             extra_env=self._pyenv.run_env() if self._pyenv is not None else None,
             binds=self._pyenv.binds if self._pyenv is not None else (),
         )
@@ -278,7 +294,8 @@ class BuildGate:
             from .pydeps import _NO_MODULE, undeclared_import_findings, undeclared_imports
 
             missing = undeclared_imports(
-                workdir, first_party=self._first_party,
+                workdir,
+                first_party=self._first_party,
                 site=Path(self._pyenv.site) if self._pyenv is not None else None,
             )
             if missing:
@@ -286,10 +303,14 @@ class BuildGate:
                 # The build's own ModuleNotFoundError already got its hint.
                 named = {m.split(".", 1)[0] for m in _NO_MODULE.findall(b_out + b_err)}
                 scan = undeclared_import_findings(
-                    {k: v for k, v in missing.items() if rc == 0 or k not in named}, workdir)
+                    {k: v for k, v in missing.items() if rc == 0 or k not in named}, workdir
+                )
                 if rc == 0:
-                    findings = (f"{UNDECLARED_IMPORTS} — FAIL: the gates install only the "
-                                "declared dependencies, so these imports fail there:", *scan)
+                    findings = (
+                        f"{UNDECLARED_IMPORTS} — FAIL: the gates install only the "
+                        "declared dependencies, so these imports fail there:",
+                        *scan,
+                    )
                 else:
                     findings = (*findings, *scan)
         return observe(

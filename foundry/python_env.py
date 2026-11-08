@@ -110,8 +110,12 @@ def _seed_pip(python: str, purelib: Path) -> None:
         return
     detail = "the interpreter ships no ensurepip"
     if bundled is not None:
-        r = subprocess.run([python, "-m", "ensurepip", "--default-pip"],
-                           capture_output=True, text=True, timeout=300)
+        r = subprocess.run(
+            [python, "-m", "ensurepip", "--default-pip"],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
         if r.returncode == 0:
             return
         detail = f"`python -m ensurepip` failed: {r.stderr.strip()[-300:]}"

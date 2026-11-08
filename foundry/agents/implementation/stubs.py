@@ -50,7 +50,8 @@ _FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
 _IFACE_AFFIX = re.compile(
-    r"^(?:I(?=[A-Z][a-z])|Abstract(?=[A-Z]))|(?<=[a-z0-9])(?:Interface|Protocol|ABC)$")
+    r"^(?:I(?=[A-Z][a-z])|Abstract(?=[A-Z]))|(?<=[a-z0-9])(?:Interface|Protocol|ABC)$"
+)
 
 
 def impl_name(cls: str, taken: Iterable[str] = ()) -> str:
@@ -66,10 +67,23 @@ def impl_name(cls: str, taken: Iterable[str] = ()) -> str:
 # Bases and decorators of a class the contracts file defines in full: subclassing an
 # Enum with members is a TypeError, a @final class cannot be subclassed, and moving
 # a data type's method bodies into an unused subclass changes what the type does.
-_DATA_BASES = frozenset({"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ReprEnum",
-                         "NamedTuple", "TypedDict", "BaseModel", "Struct"})
-_DATA_DECORATORS = frozenset({"dataclass", "final", "define", "frozen", "mutable", "attrs",
-                              "s", "dataclass_json"})
+_DATA_BASES = frozenset(
+    {
+        "Enum",
+        "IntEnum",
+        "StrEnum",
+        "Flag",
+        "IntFlag",
+        "ReprEnum",
+        "NamedTuple",
+        "TypedDict",
+        "BaseModel",
+        "Struct",
+    }
+)
+_DATA_DECORATORS = frozenset(
+    {"dataclass", "final", "define", "frozen", "mutable", "attrs", "s", "dataclass_json"}
+)
 
 
 def _tail(expr: ast.expr) -> str:
@@ -94,8 +108,9 @@ def _data_classes(text: str) -> set[str]:
         for n in nodes:
             if n.name in out:
                 continue
-            if ({_tail(d) for d in n.decorator_list} & _DATA_DECORATORS
-                    or {_tail(b) for b in n.bases} & (_DATA_BASES | out)):
+            if {_tail(d) for d in n.decorator_list} & _DATA_DECORATORS or {
+                _tail(b) for b in n.bases
+            } & (_DATA_BASES | out):
                 out.add(n.name)
                 grew = True
     return out
@@ -114,8 +129,12 @@ def is_stub(text: str) -> bool:
         body = list(fn.body)
         if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             body = body[1:]
-        return (len(body) == 1 and isinstance(body[0], ast.Raise) and body[0].exc is not None
-                and _tail(body[0].exc) == "NotImplementedError")
+        return (
+            len(body) == 1
+            and isinstance(body[0], ast.Raise)
+            and body[0].exc is not None
+            and _tail(body[0].exc) == "NotImplementedError"
+        )
 
     return bool(fns) and all(raises(f) for f in fns)
 
@@ -199,8 +218,11 @@ def _names_in(node: ast.AST) -> set[str]:
 def _signature_names(fn: _FuncDef) -> set[str]:
     a = fn.args
     parts: list[ast.AST] = [*a.defaults, *(d for d in a.kw_defaults if d is not None)]
-    parts += [x.annotation for x in (*a.posonlyargs, *a.args, *a.kwonlyargs,
-                                     *(v for v in (a.vararg, a.kwarg) if v)) if x.annotation]
+    parts += [
+        x.annotation
+        for x in (*a.posonlyargs, *a.args, *a.kwonlyargs, *(v for v in (a.vararg, a.kwarg) if v))
+        if x.annotation
+    ]
     if fn.returns is not None:
         parts.append(fn.returns)
     out: set[str] = set()
@@ -213,15 +235,17 @@ def _stub_def(fn: _FuncDef, *, method: bool) -> _FuncDef | None:
     """``fn`` with a ``raise NotImplementedError`` body, or None when a parameter
     or the return is unannotated (``__init__`` returns None)."""
     decorators: list[ast.expr] = [
-        d for d in fn.decorator_list
+        d
+        for d in fn.decorator_list
         if method and isinstance(d, ast.Name) and d.id in _KEPT_DECORATORS
     ]
     static = any(isinstance(d, ast.Name) and d.id == "staticmethod" for d in decorators)
     a = fn.args
     params = [*a.posonlyargs, *a.args]
     receiver = params[:1] if method and not static and params else []
-    rest = [p for p in (*params[len(receiver):], *a.kwonlyargs,
-                        *(v for v in (a.vararg, a.kwarg) if v))]
+    rest = [
+        p for p in (*params[len(receiver) :], *a.kwonlyargs, *(v for v in (a.vararg, a.kwarg) if v))
+    ]
     if any(p.annotation is None for p in rest):
         return None
     returns = fn.returns
@@ -242,22 +266,26 @@ def _snake(name: str) -> str:
 
 def _is_test(path: str) -> bool:
     p = PurePosixPath(path)
-    return (p.name.startswith("test_") or p.name.endswith("_test.py")
-            or p.name == "conftest.py" or "tests" in p.parts)
+    return (
+        p.name.startswith("test_")
+        or p.name.endswith("_test.py")
+        or p.name == "conftest.py"
+        or "tests" in p.parts
+    )
 
 
 def _target_file(ticket: Ticket, key: str, contract_files: Iterable[str]) -> str | None:
     """The one module of ``ticket`` that implements ``key`` (a class or function
     name): its only source file, else the one whose name is a word of ``key``."""
     skip = set(contract_files)
-    py = [f for f in ticket.files
-          if f.endswith(".py") and f not in skip and not _is_test(f)]
+    py = [f for f in ticket.files if f.endswith(".py") and f not in skip and not _is_test(f)]
     modules = [f for f in py if PurePosixPath(f).name != "__init__.py"] or py
     if len(modules) == 1:
         return modules[0]
     words = _snake(key).split("_")
-    hits = [f for f in modules
-            if PurePosixPath(f).stem in words or PurePosixPath(f).stem == _snake(key)]
+    hits = [
+        f for f in modules if PurePosixPath(f).stem in words or PurePosixPath(f).stem == _snake(key)
+    ]
     return hits[0] if len(hits) == 1 else None
 
 
@@ -330,32 +358,42 @@ def python_skeleton(
                 continue
             body = _parse(contract.signature)
             if body is None or not any(isinstance(n, (ast.ClassDef, *_FUNCS)) for n in body):
-                out.concerns.append(f"Contract {cname}: its signature is not Python code; "
-                                    f"left to ticket {ticket.id}.")
+                out.concerns.append(
+                    f"Contract {cname}: its signature is not Python code; "
+                    f"left to ticket {ticket.id}."
+                )
                 continue
-            carried = {(a.asname or a.name).split(".")[0]: ast.unparse(n)
-                       for n in body if isinstance(n, (ast.Import, ast.ImportFrom))
-                       for a in n.names}
+            carried = {
+                (a.asname or a.name).split(".")[0]: ast.unparse(n)
+                for n in body
+                if isinstance(n, (ast.Import, ast.ImportFrom))
+                for a in n.names
+            }
             known = set(declared) | set(carried) | set(_PRELUDE) | _BUILTINS
             of_class = cname.rpartition(".")[0]
             for node in body:
                 got = _members(node, of_class, contract_classes, data)
                 if got is None:
                     held = node.name if isinstance(node, ast.ClassDef) else of_class
-                    if held in data and (isinstance(node, _FUNCS) or (
+                    if held in data and (
+                        isinstance(node, _FUNCS)
+                        or (
                             isinstance(node, ast.ClassDef)
-                            and any(isinstance(m, _FUNCS) for m in node.body))):
+                            and any(isinstance(m, _FUNCS) for m in node.body)
+                        )
+                    ):
                         out.concerns.append(
                             f"Contract {cname}: {held} is a data type the contracts file "
-                            f"defines in full; not stubbed.")
+                            f"defines in full; not stubbed."
+                        )
                     continue
                 cls, defs = got
                 target_path = _target_file(ticket, cls or defs[0].name, contract_texts)
                 if target_path is None or target_path in present:
-                    why = ("it already exists" if target_path
-                           else "no single module of the ticket")
-                    out.concerns.append(f"Contract {cname}: not stubbed ({why}); left to "
-                                        f"ticket {ticket.id}.")
+                    why = "it already exists" if target_path else "no single module of the ticket"
+                    out.concerns.append(
+                        f"Contract {cname}: not stubbed ({why}); left to ticket {ticket.id}."
+                    )
                     continue
                 mod = modules.setdefault(target_path, _Module(owner=ticket.id))
                 if mod.owner != ticket.id:
@@ -363,20 +401,30 @@ def python_skeleton(
                 kept: list[_FuncDef] = []
                 for d in defs:
                     stub = _stub_def(d, method=bool(cls))
-                    names = set() if stub is None else _signature_names(stub).union(
-                        *(_names_in(x) for x in stub.decorator_list))
+                    names = (
+                        set()
+                        if stub is None
+                        else _signature_names(stub).union(
+                            *(_names_in(x) for x in stub.decorator_list)
+                        )
+                    )
                     if stub is None or not names <= known | ({impl_of(cls)} if cls else set()):
-                        why = ("is not fully annotated" if stub is None else
-                               "uses " + ", ".join(sorted(names - known))
-                               + ", which neither the contracts file nor the standard "
-                               "library defines")
-                        out.concerns.append(f"Contract {cname}: {d.name} {why}; its stub "
-                                            f"is left to ticket {ticket.id}.")
+                        why = (
+                            "is not fully annotated"
+                            if stub is None
+                            else "uses "
+                            + ", ".join(sorted(names - known))
+                            + ", which neither the contracts file nor the standard "
+                            "library defines"
+                        )
+                        out.concerns.append(
+                            f"Contract {cname}: {d.name} {why}; its stub "
+                            f"is left to ticket {ticket.id}."
+                        )
                         continue
                     kept.append(stub)
                     mod.names |= names
-                    mod.imports |= {carried[n] for n in names if n in carried
-                                    and n not in declared}
+                    mod.imports |= {carried[n] for n in names if n in carried and n not in declared}
                 target = mod.classes.setdefault(cls, []) if cls else mod.functions
                 have = {s.name for s in target}
                 target.extend(s for s in kept if s.name not in have)
@@ -395,8 +443,12 @@ def python_skeleton(
                 froms.setdefault(declared[name], []).append(name)
             elif name in _PRELUDE:
                 plain.add(_PRELUDE[name])
-        head = ["from __future__ import annotations", "", *sorted(plain),
-                *(f"from {m} import {', '.join(ns)}" for m, ns in sorted(froms.items()))]
+        head = [
+            "from __future__ import annotations",
+            "",
+            *sorted(plain),
+            *(f"from {m} import {', '.join(ns)}" for m, ns in sorted(froms.items())),
+        ]
         chunks: list[str] = []
         for cls, methods in mod.classes.items():
             node = ast.parse(f"class {impl_of(cls)}({cls}):\n    pass").body[0]

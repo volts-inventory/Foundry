@@ -59,9 +59,16 @@ def presets(backend: str, local_url: str, local_model: str) -> dict[str, dict[st
     """Each mode's level table, as the Settings panel prefills it."""
     models = _cloud_models(backend)
     return {
-        mode: {t: lvl.as_dict() for t, lvl in preset_levels(
-            mode, cloud_backend=backend, cloud_models=models,
-            local_url=local_url, local_model=local_model).items()}
+        mode: {
+            t: lvl.as_dict()
+            for t, lvl in preset_levels(
+                mode,
+                cloud_backend=backend,
+                cloud_models=models,
+                local_url=local_url,
+                local_model=local_model,
+            ).items()
+        }
         for mode in MODEL_MODES
     }
 
@@ -105,16 +112,21 @@ def validate(raw: Any, backend: str) -> dict[str, Any]:
         if not isinstance(levels, Mapping) or set(levels) != set(LEVEL_TIERS):
             raise ValueError(f"levels must set exactly {', '.join(LEVEL_TIERS)}")
         # One local server: every local level points at local_url.
-        levels = {t: ({k: v for k, v in lv.items() if k != "base_url"}
-                      if isinstance(lv, Mapping) else lv) for t, lv in levels.items()}
+        levels = {
+            t: ({k: v for k, v in lv.items() if k != "base_url"} if isinstance(lv, Mapping) else lv)
+            for t, lv in levels.items()
+        }
         table = parse_levels(levels, cloud_backends=_backends(), local_url=out["local_url"])
         out["levels"] = {t: table[t].as_dict() for t in LEVEL_TIERS}
     else:
         out["levels"] = presets(backend, out["local_url"], out["local_model"])[mode]
     if "ticket_tiers" in raw:
         tiers = raw["ticket_tiers"]
-        if (not isinstance(tiers, Mapping) or set(tiers) != set(DIFFICULTIES)
-                or any(v not in LEVEL_TIERS for v in tiers.values())):
+        if (
+            not isinstance(tiers, Mapping)
+            or set(tiers) != set(DIFFICULTIES)
+            or any(v not in LEVEL_TIERS for v in tiers.values())
+        ):
             raise ValueError("ticket_tiers must map trivial, standard and complex to T1-T3")
         out["ticket_tiers"] = {d: str(tiers[d]) for d in DIFFICULTIES}
     return out

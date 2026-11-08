@@ -55,24 +55,38 @@ def runs(monkeypatch) -> list[dict[str, Any]]:
         sig.bind(*args, **kwargs)
         spec = kwargs.get("spec")
         base = kwargs.get("base_dir")
-        calls.append({**kwargs,
-                      "_spec_text": Path(spec).read_text(encoding="utf-8") if spec else None,
-                      "_base_files": sorted(str(p.relative_to(base)) for p in Path(base).rglob("*")
-                                            if p.is_file()) if base else None})
-        return SimpleNamespace(passed=True, phase="passed", mode="assistant",
-                               artifact_uri=None, gate_statuses={})
+        calls.append(
+            {
+                **kwargs,
+                "_spec_text": Path(spec).read_text(encoding="utf-8") if spec else None,
+                "_base_files": sorted(
+                    str(p.relative_to(base)) for p in Path(base).rglob("*") if p.is_file()
+                )
+                if base
+                else None,
+            }
+        )
+        return SimpleNamespace(
+            passed=True, phase="passed", mode="assistant", artifact_uri=None, gate_statuses={}
+        )
 
     monkeypatch.setattr(foundry.cli, "run", spy)
     return calls
 
 
-def _call(env: Any, method: str, path: str, body: Any = None,
-          headers: dict[str, str] | None = None, raw: bytes | None = None
-          ) -> tuple[int, dict[str, Any]]:
+def _call(
+    env: Any,
+    method: str,
+    path: str,
+    body: Any = None,
+    headers: dict[str, str] | None = None,
+    raw: bytes | None = None,
+) -> tuple[int, dict[str, Any]]:
     conn = http.client.HTTPConnection("127.0.0.1", env.port, timeout=30)
     data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
-    conn.request(method, path, body=data,
-                 headers={"Content-Type": "application/json", **(headers or {})})
+    conn.request(
+        method, path, body=data, headers={"Content-Type": "application/json", **(headers or {})}
+    )
     resp = conn.getresponse()
     out = json.loads(resp.read() or b"{}")
     conn.close()
@@ -96,6 +110,7 @@ def _build(env: Any, runs: list[dict[str, Any]], **body: Any) -> tuple[Project, 
 
 # --- settings ------------------------------------------------------------------ #
 
+
 def test_default_settings_are_cloud_with_the_preset_table(env):
     code, got = _call(env, "GET", "/api/settings")
     assert code == 200
@@ -112,9 +127,13 @@ def test_default_settings_are_cloud_with_the_preset_table(env):
 def test_saved_settings_persist_and_become_the_defaults_for_new_builds(env, runs):
     preset = _call(env, "GET", "/api/settings")[1]["presets"]["hybrid"]
     levels = {**preset, "T1": {"backend": "anthropic", "model": "claude-custom-1"}}
-    body = {"model_mode": "hybrid", "levels": levels,
-            "ticket_tiers": {"trivial": "T2", "standard": "T2", "complex": "T1"},
-            "local_url": "http://127.0.0.1:9999/v1", "local_model": "qwen/qwen3.6-27b"}
+    body = {
+        "model_mode": "hybrid",
+        "levels": levels,
+        "ticket_tiers": {"trivial": "T2", "standard": "T2", "complex": "T1"},
+        "local_url": "http://127.0.0.1:9999/v1",
+        "local_model": "qwen/qwen3.6-27b",
+    }
     code, got = _call(env, "POST", "/api/settings", body)
     assert code == 200, got
     assert (env.tmp / "out" / "settings.json").is_file()
@@ -127,7 +146,7 @@ def test_saved_settings_persist_and_become_the_defaults_for_new_builds(env, runs
     assert kw["levels"]["T1"] == {"backend": "anthropic", "model": "claude-custom-1"}
     assert kw["local_url"] == "http://127.0.0.1:9999/v1"
     assert kw["local_model"] == "qwen/qwen3.6-27b"
-    assert kw["max_fix_attempts"] == 3                       # the hybrid default
+    assert kw["max_fix_attempts"] == 3  # the hybrid default
     assert kw["ticket_tiers"] == {"trivial": "T2", "standard": "T2", "complex": "T1"}
     assert p.build["model_mode"] == "hybrid" and p.build["levels_custom"] is True
 
@@ -139,18 +158,21 @@ def test_an_unedited_preset_is_sent_as_the_mode_alone(env, runs):
     assert kw["max_fix_attempts"] == 3
 
 
-@pytest.mark.parametrize("body", [
-    {"model_mode": "turbo"},
-    {"local_url": "file:///etc/passwd"},
-    {"local_url": "http://"},
-    {"local_model": "bad model id"},
-    {"levels": {"T1": {"backend": "mock", "model": "m"}}},                 # tiers missing
-    {"levels": {t: {"backend": "nope", "model": "m"} for t in ("T1", "T2", "T3")}},
-    {"levels": {t: {"backend": "mock", "model": "a b"} for t in ("T1", "T2", "T3")}},
-    {"ticket_tiers": {"trivial": "T4", "standard": "T2", "complex": "T1"}},
-    {"ticket_tiers": {"trivial": "T3"}},
-    [1, 2],
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"model_mode": "turbo"},
+        {"local_url": "file:///etc/passwd"},
+        {"local_url": "http://"},
+        {"local_model": "bad model id"},
+        {"levels": {"T1": {"backend": "mock", "model": "m"}}},  # tiers missing
+        {"levels": {t: {"backend": "nope", "model": "m"} for t in ("T1", "T2", "T3")}},
+        {"levels": {t: {"backend": "mock", "model": "a b"} for t in ("T1", "T2", "T3")}},
+        {"ticket_tiers": {"trivial": "T4", "standard": "T2", "complex": "T1"}},
+        {"ticket_tiers": {"trivial": "T3"}},
+        [1, 2],
+    ],
+)
 def test_bad_settings_are_refused_and_nothing_is_saved(env, body):
     code, got = _call(env, "POST", "/api/settings", body)
     assert code == 400, got
@@ -165,10 +187,19 @@ def test_an_unreadable_settings_file_falls_back_to_defaults(env):
 
 # --- advanced form fields ---------------------------------------------------------- #
 
+
 def test_every_advanced_field_reaches_run(env, runs):
-    p, kw = _build(env, runs, max_fix_attempts=7, time_cap_minutes=45, profile="go",
-                   scope="demo", cost_cap_usd=2.5, spec="# Spec\nbe excellent",
-                   spec_name="../../brief.md")
+    p, kw = _build(
+        env,
+        runs,
+        max_fix_attempts=7,
+        time_cap_minutes=45,
+        profile="go",
+        scope="demo",
+        cost_cap_usd=2.5,
+        spec="# Spec\nbe excellent",
+        spec_name="../../brief.md",
+    )
     assert kw["max_fix_attempts"] == 7
     assert kw["time_cap_minutes"] == 45
     assert kw["profile"] == "go"
@@ -183,24 +214,41 @@ def test_every_advanced_field_reaches_run(env, runs):
 
 
 def test_blank_advanced_fields_mean_the_defaults(env, runs):
-    _, kw = _build(env, runs, max_fix_attempts="", time_cap_minutes="", cost_cap_usd=None,
-                   spec="   ")
+    _, kw = _build(
+        env, runs, max_fix_attempts="", time_cap_minutes="", cost_cap_usd=None, spec="   "
+    )
     assert kw["max_fix_attempts"] == 3
     assert kw["time_cap_minutes"] is None and kw["cost_cap_microusd"] is None
     assert kw["profile"] == "auto" and kw["scope"] == "auto"
     assert kw.get("spec") is None
 
 
-@pytest.mark.parametrize("field,value", [
-    ("max_fix_attempts", -1), ("max_fix_attempts", 21), ("max_fix_attempts", 2.5),
-    ("max_fix_attempts", True), ("max_fix_attempts", "x"),
-    ("time_cap_minutes", 0), ("time_cap_minutes", -5), ("time_cap_minutes", 10**6),
-    ("time_cap_minutes", "soon"), ("time_cap_minutes", "nan"),
-    ("cost_cap_usd", 0), ("cost_cap_usd", -1), ("cost_cap_usd", 10**9), ("cost_cap_usd", [1]),
-    ("profile", "cobol"), ("profile", 3), ("scope", "huge"),
-    ("spec", 42), ("spec", ["/etc/passwd"]),
-    ("model_mode", "turbo"), ("local_url", "ftp://x"),
-])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_fix_attempts", -1),
+        ("max_fix_attempts", 21),
+        ("max_fix_attempts", 2.5),
+        ("max_fix_attempts", True),
+        ("max_fix_attempts", "x"),
+        ("time_cap_minutes", 0),
+        ("time_cap_minutes", -5),
+        ("time_cap_minutes", 10**6),
+        ("time_cap_minutes", "soon"),
+        ("time_cap_minutes", "nan"),
+        ("cost_cap_usd", 0),
+        ("cost_cap_usd", -1),
+        ("cost_cap_usd", 10**9),
+        ("cost_cap_usd", [1]),
+        ("profile", "cobol"),
+        ("profile", 3),
+        ("scope", "huge"),
+        ("spec", 42),
+        ("spec", ["/etc/passwd"]),
+        ("model_mode", "turbo"),
+        ("local_url", "ftp://x"),
+    ],
+)
 def test_bad_advanced_values_get_400_and_start_nothing(env, runs, field, value):
     code, got = _call(env, "POST", "/api/projects", {"request": "x", field: value})
     assert code == 400, got
@@ -230,12 +278,22 @@ def test_an_oversized_body_is_refused_unread(env, runs):
 
 
 def test_a_restart_restores_a_floors_build_options(env):
-    p = Project(id="r1", request="r", mode="assistant", floor=1,
-                out_base=env.tmp / "out" / "floor-1")
-    build = {"model_mode": "hybrid", "levels": {"T1": {"backend": "mock", "model": "m"}},
-             "levels_custom": True, "local_url": "http://h:1/v1", "local_model": "m",
-             "time_cap_minutes": 5, "scope": "demo", "cost_cap_microusd": 9, "spec": True,
-             "base_id": "b0", "base_floor": 3}
+    p = Project(
+        id="r1", request="r", mode="assistant", floor=1, out_base=env.tmp / "out" / "floor-1"
+    )
+    build = {
+        "model_mode": "hybrid",
+        "levels": {"T1": {"backend": "mock", "model": "m"}},
+        "levels_custom": True,
+        "local_url": "http://h:1/v1",
+        "local_model": "m",
+        "time_cap_minutes": 5,
+        "scope": "demo",
+        "cost_cap_microusd": 9,
+        "spec": True,
+        "base_id": "b0",
+        "base_floor": 3,
+    }
     p.log = [{"type": "project", "build": build, "profile": "go"}]
     server._restore_controls(p)
     assert p.profile == "go"
@@ -248,40 +306,60 @@ def test_a_restart_restores_a_floors_build_options(env):
 
 # --- local server check ------------------------------------------------------------- #
 
+
 def test_local_check_reports_reachability_and_served_models(env, monkeypatch):
     seen: list[tuple[str, Any]] = []
 
     def fake(url, *, model=None, **_kw):
         seen.append((url, model))
-        return LocalServerStatus(url=url, reachable=True, models=("a/qwen", "b"), model=model,
-                                 model_served=model in ("a/qwen", "b"))
+        return LocalServerStatus(
+            url=url,
+            reachable=True,
+            models=("a/qwen", "b"),
+            model=model,
+            model_served=model in ("a/qwen", "b"),
+        )
 
     monkeypatch.setattr(local_transport, "check_local_server", fake)
-    code, got = _call(env, "POST", "/api/settings/local-check",
-                      {"url": "http://127.0.0.1:1234/v1/", "model": "a/qwen"})
+    code, got = _call(
+        env,
+        "POST",
+        "/api/settings/local-check",
+        {"url": "http://127.0.0.1:1234/v1/", "model": "a/qwen"},
+    )
     assert code == 200
     assert got["reachable"] is True and got["models"] == ["a/qwen", "b"]
     assert got["model_served"] is True
     assert seen == [("http://127.0.0.1:1234/v1", "a/qwen")]
 
 
-@pytest.mark.parametrize("body", [
-    {"url": "file:///etc/passwd"}, {"url": "gopher://x"}, {"url": ""}, {"url": 5},
-    {"url": "http://x/" + "a" * 600}, {"url": "http://x", "model": "bad id"}, ["x"],
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"url": "file:///etc/passwd"},
+        {"url": "gopher://x"},
+        {"url": ""},
+        {"url": 5},
+        {"url": "http://x/" + "a" * 600},
+        {"url": "http://x", "model": "bad id"},
+        ["x"],
+    ],
+)
 def test_local_check_validates_the_url_before_any_request(env, monkeypatch, body):
     called: list[Any] = []
-    monkeypatch.setattr(local_transport, "check_local_server",
-                        lambda *a, **k: called.append(a))
+    monkeypatch.setattr(local_transport, "check_local_server", lambda *a, **k: called.append(a))
     code, _ = _call(env, "POST", "/api/settings/local-check", body)
     assert code == 400 and called == []
 
 
 def test_local_check_handles_an_unreachable_server(env, monkeypatch):
     monkeypatch.setattr(
-        local_transport, "check_local_server",
+        local_transport,
+        "check_local_server",
         lambda url, *, model=None, **_: LocalServerStatus(
-            url=url, reachable=False, error="connection refused", model=model))
+            url=url, reachable=False, error="connection refused", model=model
+        ),
+    )
     code, got = _call(env, "POST", "/api/settings/local-check", {"url": "http://127.0.0.1:9/v1"})
     assert code == 200
     assert got["reachable"] is False and got["error"] == "connection refused"
@@ -290,13 +368,22 @@ def test_local_check_handles_an_unreachable_server(env, monkeypatch):
 
 # --- change a build -------------------------------------------------------------- #
 
+
 def _shipped(env: Any, pid: str, floor: int, passed: bool = True) -> Project:
     out = env.tmp / "out" / f"floor-{floor}"
     (out / "code" / "src").mkdir(parents=True)
     (out / "code" / "src" / "app.py").write_text("print('hi')\n")
     (out / "code" / "README.md").write_text("# app\n")
-    p = Project(id=pid, request="the app", mode="assistant", floor=floor, status="done",
-                ended=True, passed=passed, out_base=out)
+    p = Project(
+        id=pid,
+        request="the app",
+        mode="assistant",
+        floor=floor,
+        status="done",
+        ended=True,
+        passed=passed,
+        out_base=out,
+    )
     server._PROJECTS[pid] = p
     server._FLOOR[0] = max(server._FLOOR[0], floor)
     return p
@@ -304,8 +391,9 @@ def _shipped(env: Any, pid: str, floor: int, passed: bool = True) -> Project:
 
 def test_change_a_build_resolves_the_base_tree_server_side(env, runs):
     _shipped(env, "base1", 1)
-    p, kw = _build(env, runs, request="add a dark mode", base_id="base1",
-                   base_dir="/etc", out_base="/tmp/evil")
+    p, kw = _build(
+        env, runs, request="add a dark mode", base_id="base1", base_dir="/etc", out_base="/tmp/evil"
+    )
     assert p.floor == 2
     assert Path(kw["base_dir"]) == env.tmp / "out" / "floor-2" / ".inputs" / "base"
     assert kw["_base_files"] == ["README.md", "src/app.py"]
@@ -358,9 +446,16 @@ def test_change_refuses_unknown_and_unshipped_floors(env, runs):
 
 
 def test_change_refuses_a_shipped_floor_with_no_readable_tree(env, runs):
-    server._PROJECTS["gone"] = Project(id="gone", request="r", mode="assistant", floor=1,
-                                      status="done", ended=True, passed=True,
-                                      out_base=env.tmp / "out" / "floor-1")
+    server._PROJECTS["gone"] = Project(
+        id="gone",
+        request="r",
+        mode="assistant",
+        floor=1,
+        status="done",
+        ended=True,
+        passed=True,
+        out_base=env.tmp / "out" / "floor-1",
+    )
     code, _ = _call(env, "POST", "/api/projects", {"request": "x", "base_id": "gone"})
     assert code == 409 and runs == []
 
@@ -373,14 +468,14 @@ def test_write_tree_refuses_a_path_that_escapes(tmp_path):
 
 # --- the guard on the new routes ----------------------------------------------------- #
 
+
 @pytest.mark.parametrize("path", ["/api/settings", "/api/settings/local-check"])
 def test_new_routes_enforce_csrf_token_and_sign_in(env, monkeypatch, path):
     # No body: the guard answers before reading one, and an unread body would be
     # parsed as the connection's next request.
     body = None
     called: list[Any] = []
-    monkeypatch.setattr(local_transport, "check_local_server",
-                        lambda *a, **k: called.append(a))
+    monkeypatch.setattr(local_transport, "check_local_server", lambda *a, **k: called.append(a))
     evil = {"Origin": "http://evil.example", "Host": f"127.0.0.1:{env.port}"}
     code, got = _call(env, "POST", path, body, headers=evil)
     assert code == 403 and "CSRF" in got["error"]

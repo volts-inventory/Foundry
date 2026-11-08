@@ -65,8 +65,11 @@ def test_recorded_catch_all_run_is_flagged(tmp_path: Path) -> None:
 def test_step_text_must_match_the_trusted_feature(tmp_path: Path) -> None:
     wd = _workdir(tmp_path)
     trusted = trusted_scenarios(wd)
-    trusted[REF + "AC-1"] = [("given", "an empty list"), ("when", 'I add "eggs"'),
-                             ("then", "the list has 1 item")]
+    trusted[REF + "AC-1"] = [
+        ("given", "an empty list"),
+        ("when", 'I add "eggs"'),
+        ("then", "the list has 1 item"),
+    ]
     trusted[REF + "AC-4"] = [("when", t) for _, t in trusted[REF + "AC-4"]]  # keyword type
     out, _ = scenario_outcomes(_envelopes("mixed"), trusted, wd)
     assert out[REF + "AC-1"] == "unmatched"
@@ -95,13 +98,17 @@ def test_any_failed_attempt_decides_the_scenario(tmp_path: Path) -> None:
     envs = _envelopes("mixed")
     # Replay AC-2's failed attempt under AC-1's test case: a retried pass is not a pass.
     ac1_pickle = next(e["pickle"]["id"] for e in envs if e.get("pickle", {}).get("name") == "AC-1")
-    case = next(e["testCase"] for e in envs
-                if e.get("testCase", {}).get("pickleId") == ac1_pickle)
+    case = next(e["testCase"] for e in envs if e.get("testCase", {}).get("pickleId") == ac1_pickle)
     envs.append({"testCaseStarted": {"id": "retry-0", "testCaseId": case["id"], "attempt": 1}})
-    envs.append({"testStepFinished": {
-        "testCaseStartedId": "retry-0", "testStepId": case["testSteps"][0]["id"],
-        "testStepResult": {"status": "FAILED"},
-    }})
+    envs.append(
+        {
+            "testStepFinished": {
+                "testCaseStartedId": "retry-0",
+                "testStepId": case["testSteps"][0]["id"],
+                "testStepResult": {"status": "FAILED"},
+            }
+        }
+    )
     out, _ = scenario_outcomes(envs, trusted_scenarios(wd), wd)
     assert out[REF + "AC-1"] == "failed"
 
@@ -144,8 +151,9 @@ def test_probes_are_random_with_no_fixed_literal_to_dodge() -> None:
     assert len({len(p) for r in runs for p in r}) > 5
     assert all(len(p.split(" ")) == 4 for p in cucumber.make_probes(4))
     # A matcher that accepts everything except the old fixed probe literals.
-    dodge = {"d": {"pattern": {"type": "REGULAR_EXPRESSION",
-                               "source": r"^(?!.*Zq-9 !)(?!wV\? ).*$"}}}
+    dodge = {
+        "d": {"pattern": {"type": "REGULAR_EXPRESSION", "source": r"^(?!.*Zq-9 !)(?!wV\? ).*$"}}
+    }
     got, _ = cucumber._catch_all_ids(dodge, {}, cucumber.make_probes())
     assert got == {"d"}
 
@@ -154,8 +162,9 @@ def _rebind(envs: list[dict[str, Any]], scenario: str, step_type: str, def_id: s
     """Bind ``scenario``'s ``step_type`` step(s) to step definition ``def_id``."""
     pickle = next(e["pickle"] for e in envs if e.get("pickle", {}).get("name") == scenario)
     ids = {s["id"] for s in pickle["steps"] if s["type"] == step_type}
-    case = next(e["testCase"] for e in envs
-                if e.get("testCase", {}).get("pickleId") == pickle["id"])
+    case = next(
+        e["testCase"] for e in envs if e.get("testCase", {}).get("pickleId") == pickle["id"]
+    )
     for ts in case["testSteps"]:
         if ts.get("pickleStepId") in ids:
             ts["stepDefinitionIds"] = [def_id]
@@ -164,8 +173,15 @@ def _rebind(envs: list[dict[str, Any]], scenario: str, step_type: str, def_id: s
 def test_a_catch_all_then_step_alone_grades_the_scenario_catch_all(tmp_path: Path) -> None:
     wd = _workdir(tmp_path)
     envs = _envelopes("mixed")
-    envs.insert(0, {"stepDefinition": {
-        "id": "any", "pattern": {"type": "CUCUMBER_EXPRESSION", "source": "{}"}}})
+    envs.insert(
+        0,
+        {
+            "stepDefinition": {
+                "id": "any",
+                "pattern": {"type": "CUCUMBER_EXPRESSION", "source": "{}"},
+            }
+        },
+    )
     _rebind(envs, "AC-1", "Outcome", "any")  # Given/When stay specific
     _rebind(envs, "AC-4", "Context", "any")  # a catch-all Given alone is not enough
     out, _ = scenario_outcomes(envs, trusted_scenarios(wd), wd)
@@ -260,9 +276,12 @@ def test_gate_report_rewritten_after_runner_exit_is_rejected(tmp_path: Path) -> 
     # test command runs; the digest taken at runner exit catches it.
     bad = FIXTURES / "mixed.ndjson"
     gate = TestGate(
-        cmd=("sleep", "1.5"), min_passed=0,
-        bdd_cmd=(f'cp {bad} "$FOUNDRY_BDD_REPORT"; '
-                 f'(sleep 0.5; cp {good} "$FOUNDRY_BDD_REPORT") >/dev/null 2>&1 &'),
+        cmd=("sleep", "1.5"),
+        min_passed=0,
+        bdd_cmd=(
+            f'cp {bad} "$FOUNDRY_BDD_REPORT"; '
+            f'(sleep 0.5; cp {good} "$FOUNDRY_BDD_REPORT") >/dev/null 2>&1 &'
+        ),
     )
     obs = gate.execute(wd)
     assert set(obs.structured[BDD_KEY].values()) == {"missing"}
@@ -316,8 +335,12 @@ def _all_passing(dest: Path) -> None:
 def test_gate_checks_step_text_and_digest_is_deterministic(tmp_path: Path) -> None:
     good = tmp_path / "good.ndjson"
     _all_passing(good)
-    wd = _workdir(tmp_path, (FIXTURES / "T1.feature").read_text().replace(
-        "    When I remove \"milk\"\n", "    When I add \"milk\"\n"))
+    wd = _workdir(
+        tmp_path,
+        (FIXTURES / "T1.feature")
+        .read_text()
+        .replace('    When I remove "milk"\n', '    When I add "milk"\n'),
+    )
     # AC-3 now reads 'I add "milk"' in the trusted file but the report ran 'I remove'.
     gate = _gate_with(f'cp {good} "$FOUNDRY_BDD_REPORT"')
     a, b = gate.execute(wd), gate.execute(wd)
@@ -372,9 +395,17 @@ def cucumber_js(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("cucumber-js")
     try:
         proc = subprocess.run(
-            ["npm", "install", "--no-audit", "--no-fund", "--prefix", str(root),
-             f"@cucumber/cucumber@{_CUCUMBER_VERSION}"],
-            capture_output=True, timeout=300,
+            [
+                "npm",
+                "install",
+                "--no-audit",
+                "--no-fund",
+                "--prefix",
+                str(root),
+                f"@cucumber/cucumber@{_CUCUMBER_VERSION}",
+            ],
+            capture_output=True,
+            timeout=300,
         )
     except subprocess.TimeoutExpired:
         pytest.skip("npm install of @cucumber/cucumber timed out")
@@ -461,7 +492,8 @@ def test_cucumber_js_tampered_report(tmp_path: Path, cucumber_js: Path) -> None:
 
 
 def test_cucumber_js_report_written_elsewhere(tmp_path: Path, cucumber_js: Path) -> None:
-    gate, obs = _run_js(_js_project(tmp_path, cucumber_js), _RUN.replace(
-        "$FOUNDRY_BDD_REPORT", "own-report.ndjson"))
+    gate, obs = _run_js(
+        _js_project(tmp_path, cucumber_js), _RUN.replace("$FOUNDRY_BDD_REPORT", "own-report.ndjson")
+    )
     assert set(obs.structured[BDD_KEY].values()) == {"missing"}
     assert gate.decide(obs) is GateStatus.FAIL

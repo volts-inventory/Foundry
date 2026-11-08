@@ -137,7 +137,8 @@ def read_base(base: Path | str) -> BaseView:
     manifest = _manifest(root)
     contracts = tuple(
         {k: str(c.get(k, "")) for k in ("name", "kind", "signature")}
-        for c in manifest.get("contracts") or () if isinstance(c, dict)
+        for c in manifest.get("contracts") or ()
+        if isinstance(c, dict)
     )
     contracts_files: dict[str, str] = {}
     for rel in manifest.get("contracts_files") or ():
@@ -183,8 +184,7 @@ def render_base_view(view: BaseView) -> str:
     if view.contracts:
         lines.append("Existing interface contracts (already implemented in the tree):")
         lines += [
-            f"- {c['name']} ({c['kind']}): {c['signature']}".rstrip(": ")
-            for c in view.contracts
+            f"- {c['name']} ({c['kind']}): {c['signature']}".rstrip(": ") for c in view.contracts
         ]
     budget = [_VIEW_TEXT_CAP]
     for rel, text in view.contracts_files.items():

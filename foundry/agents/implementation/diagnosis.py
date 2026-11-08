@@ -82,16 +82,17 @@ class Diagnosis:
             "DIAGNOSIS FROM A REVIEWER (a stronger model read the failure and the "
             "files; apply it — make these edits first, then re-run `verify`):",
             f"root cause: {self.root_cause}",
-            *((f"files to edit: {', '.join(self.files_to_edit)}",) if self.files_to_edit
-              else ()),
+            *((f"files to edit: {', '.join(self.files_to_edit)}",) if self.files_to_edit else ()),
             *(f"edit {i}: {e}" for i, e in enumerate(self.edits, 1)),
             *(f"do not: {d}" for d in self.do_not),
             "[end of diagnosis]",
         )
 
     def summary(self) -> str:
-        return (f"{self.root_cause[:300]} | files: {', '.join(self.files_to_edit) or '-'}"
-                f" | {len(self.edits)} edit(s)")
+        return (
+            f"{self.root_cause[:300]} | files: {', '.join(self.files_to_edit) or '-'}"
+            f" | {len(self.edits)} edit(s)"
+        )
 
 
 def _enabled() -> bool:
@@ -138,12 +139,14 @@ def _parse(
 ) -> Diagnosis | None:
     """Keep what names a real path: one in the tree or in ``allowed`` (a ticket's
     own files, which may not exist yet). Anything else is dropped."""
+
     def real(path: Any) -> str | None:
         p = str(path or "").strip().removeprefix("./")
         return p if p and (tree.get(p) is not None or p in allowed) else None
 
-    files = tuple(dict.fromkeys(p for f in raw.get("files_to_edit") or ()
-                                if (p := real(f)) is not None))
+    files = tuple(
+        dict.fromkeys(p for f in raw.get("files_to_edit") or () if (p := real(f)) is not None)
+    )
     edits: list[str] = []
     for e in raw.get("edits") or ():
         if not isinstance(e, dict) or (path := real(e.get("file"))) is None:
@@ -159,8 +162,7 @@ def _parse(
         root_cause=root or "(not stated)",
         files_to_edit=files,
         edits=tuple(edits[:_MAX_EDITS]),
-        do_not=tuple(d for x in (raw.get("do_not") or ())[:_MAX_DO_NOT]
-                     if (d := _clean(x, 300))),
+        do_not=tuple(d for x in (raw.get("do_not") or ())[:_MAX_DO_NOT] if (d := _clean(x, 300))),
     )
 
 
@@ -180,13 +182,19 @@ def diagnose(
     content = "\n\n".join(["FAILURE SUMMARY:", text, *_files_block(files, tree, summary)])
     try:
         completion = rt.proxy.complete(
-            NODE_ID, tier, _SOP, [{"role": "user", "content": content}],
-            purpose="ideation", schema=_SCHEMA,
+            NODE_ID,
+            tier,
+            _SOP,
+            [{"role": "user", "content": content}],
+            purpose="ideation",
+            schema=_SCHEMA,
         )
         got = _parse(completion.parsed or {}, tree, allowed)
     except Exception as exc:  # advisory: a spent cap is re-hit by the next cloud call
-        progress.log(f"diagnosis for {label} unavailable, proceeding without it: "
-                     f"{type(exc).__name__}: {str(exc)[:200]}")
+        progress.log(
+            f"diagnosis for {label} unavailable, proceeding without it: "
+            f"{type(exc).__name__}: {str(exc)[:200]}"
+        )
         return None
     if got is None:
         progress.log(f"diagnosis for {label} came back empty, proceeding without it")

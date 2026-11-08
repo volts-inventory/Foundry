@@ -170,7 +170,8 @@ def read_repo(thread_id: str, state_dir: str | Path, *, backend: str | None = No
         state = _load_final_state(thread_id, backends)
         checks = _gate_checks(state)
         resolve, resolve_blob = _materialization_seam(
-            backend != _MOCK_BACKEND, store=cast("ArtifactStore", backends.cas),
+            backend != _MOCK_BACKEND,
+            store=cast("ArtifactStore", backends.cas),
             diff_body=_PASSING_DIFF,
         )
         blobs: dict[str, bytes] = {}

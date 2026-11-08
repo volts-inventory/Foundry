@@ -96,8 +96,7 @@ def test_a_run_stopped_at_its_cap_still_writes_its_latest_tree(
     monkeypatch.setattr("foundry.agents.quality.reviewer.review", capped)
     out = tmp_path / "generated"
     with pytest.raises(TimeCapExceeded) as caught:
-        run("build a tiny URL-shortener service", thread_id="cli-out-capped",
-            output_dir=str(out))
+        run("build a tiny URL-shortener service", thread_id="cli-out-capped", output_dir=str(out))
 
     assert "VALUE = 42" in (out / "app.py").read_text(encoding="utf-8")
     status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
@@ -121,8 +120,9 @@ def test_a_manifest_write_failure_never_changes_the_build_result(
 
     monkeypatch.setattr("foundry.cli.write_manifest", boom)
     out = tmp_path / "generated"
-    result = run("build a tiny URL-shortener service", thread_id="cli-out-manifest-fail",
-                 output_dir=str(out))
+    result = run(
+        "build a tiny URL-shortener service", thread_id="cli-out-manifest-fail", output_dir=str(out)
+    )
     assert result.passed is True and (out / "app.py").is_file()
     assert not (out / "BUILD-MANIFEST.json").exists()
 

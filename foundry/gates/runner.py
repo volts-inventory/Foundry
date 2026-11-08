@@ -248,7 +248,7 @@ def _user_command(argv: str | bytes | list[str] | tuple[str, ...]) -> str:
         if args[i] == "-c" and args[i - 1] in _SHELLS:
             return args[i + 1]
     if "--" in args:
-        args = args[len(args) - args[::-1].index("--"):]
+        args = args[len(args) - args[::-1].index("--") :]
     return shlex.join(args)
 
 

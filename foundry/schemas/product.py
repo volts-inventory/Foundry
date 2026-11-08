@@ -126,8 +126,10 @@ class CriteriaCritique(FrozenModel):
         requires ``o.strip()`` truthy) — the materialize decision and the gate
         decision apply the SAME rule to a degenerate omission list."""
         return any(
-            o.strip() for o in (
-                *self.security_abuse_omissions, *self.contract_findings,
+            o.strip()
+            for o in (
+                *self.security_abuse_omissions,
+                *self.contract_findings,
                 *self.coverage_findings,
             )
         )

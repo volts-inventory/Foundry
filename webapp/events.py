@@ -139,6 +139,8 @@ def _room_for_scope(scope: str) -> str:
         if room:
             return room
     return ""
+
+
 # INFRA steps — real graph nodes with no desk to sit at. They used to be invisible:
 # most are registered on the TOP-LEVEL graph, where the stream namespace is empty, so
 # `scope` was "" and the event was dropped entirely. That silence covered the slowest
@@ -159,18 +161,29 @@ _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
     "review": ("gate", "running the REVIEW gate", None),
     # fix-forward retries: the longest silences in a real build — each is a full
     # agentic pass over the failing tree
-    "spec_fix": ("plan", "fix-forward — reworking the spec after a gate failure",
-                 "spec rework finished"),
-    "build_test_fix": ("engineering", "fix-forward — rebuilding after a gate failure",
-                       "rebuild finished"),
+    "spec_fix": (
+        "plan",
+        "fix-forward — reworking the spec after a gate failure",
+        "spec rework finished",
+    ),
+    "build_test_fix": (
+        "engineering",
+        "fix-forward — rebuilding after a gate failure",
+        "rebuild finished",
+    ),
 }
 # Conditional-architecture agents that have no sprite on the floor — they still get a
 # step line so the log doesn't skip them. (agent name, room, running, done)
-_INFRA_NODE.update({
-    "domain_specialist": ("plan", "domain specialist reviewing the design",
-                          "domain review finished"),
-    "ux_design": ("plan", "UX pass over the interface", "UX pass finished"),
-})
+_INFRA_NODE.update(
+    {
+        "domain_specialist": (
+            "plan",
+            "domain specialist reviewing the design",
+            "domain review finished",
+        ),
+        "ux_design": ("plan", "UX pass over the interface", "UX pass finished"),
+    }
+)
 # A supervisor phase node STARTING opens a new stage on the floor: (room, banner).
 STAGE_FOR_NODE: dict[str, tuple[str, str]] = {
     "planner": ("plan", "Product & Design"),
@@ -239,7 +252,11 @@ def live_event_for_node(
             return None
         agent = ""
     ev: dict[str, Any] = {
-        "type": "active", "room": room, "agent": agent, "live": True, "phase": phase,
+        "type": "active",
+        "room": room,
+        "agent": agent,
+        "live": True,
+        "phase": phase,
     }
     if infra is not None:
         # A desk-less step: `step` is what the quest log prints (no agent box). The
@@ -270,7 +287,9 @@ def event_for_task(ev: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     specialty = str(ev.get("specialty", ""))
     return {
-        "type": "task", "phase": phase, "ticket_id": ticket_id,
+        "type": "task",
+        "phase": phase,
+        "ticket_id": ticket_id,
         "title": str(ev.get("title", "")),
         "specialty": specialty if specialty in _SPECIALTIES else "backend",
         "tier": str(ev.get("tier", "")),
@@ -292,11 +311,12 @@ def ticket_event(
     difficulty = str(d.get("difficulty") or "standard")
     specialty = str(d.get("specialty") or "backend")
     return {
-        "type": "ticket", "id": str(d["id"]), "title": str(d.get("title", "")),
+        "type": "ticket",
+        "id": str(d["id"]),
+        "title": str(d.get("title", "")),
         "specialty": specialty if specialty in _SPECIALTIES else "backend",
         "difficulty": difficulty,
-        "tier": (ticket_tiers or {}).get(difficulty)
-        or _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
+        "tier": (ticket_tiers or {}).get(difficulty) or _TIER_FOR_DIFFICULTY.get(difficulty, "T2"),
         "depends_on": [str(x) for x in (d.get("depends_on") or [])],
         "retired": bool(d.get("retired")),
     }
@@ -309,14 +329,16 @@ def journal_dicts(entries: Any) -> list[dict[str, Any]]:
         if isinstance(e, Mapping):
             out.append(dict(e))
             continue
-        out.append({
-            "node_id": str(getattr(e, "node_id", "")),
-            "role": str(getattr(e, "role", "")),
-            "summary": str(getattr(e, "summary", "")),
-            "assumptions": list(getattr(e, "assumptions", ()) or ()),
-            "concerns": list(getattr(e, "concerns", ()) or ()),
-            "confidence": getattr(e, "confidence", None),
-        })
+        out.append(
+            {
+                "node_id": str(getattr(e, "node_id", "")),
+                "role": str(getattr(e, "role", "")),
+                "summary": str(getattr(e, "summary", "")),
+                "assumptions": list(getattr(e, "assumptions", ()) or ()),
+                "concerns": list(getattr(e, "concerns", ()) or ()),
+                "confidence": getattr(e, "confidence", None),
+            }
+        )
     return out
 
 
@@ -336,29 +358,39 @@ def events_for_node_output(
     org = result.get("_org")
     if isinstance(org, Mapping) and "__org__" not in seen_uris:
         seen_uris.add("__org__")
-        out.append({
-            "type": "org",
-            "areas": [
-                {"area": str(a.get("area", "")), "leads": [str(x) for x in a.get("leads", [])]}
-                for a in org.get("areas", [])
-            ],
-            "domains": [
-                {"owner": str(d.get("owner", "")), "area": str(d.get("area", "")),
-                 "units": [str(u) for u in d.get("units", [])]}
-                for d in org.get("domains", [])
-            ],
-        })
+        out.append(
+            {
+                "type": "org",
+                "areas": [
+                    {"area": str(a.get("area", "")), "leads": [str(x) for x in a.get("leads", [])]}
+                    for a in org.get("areas", [])
+                ],
+                "domains": [
+                    {
+                        "owner": str(d.get("owner", "")),
+                        "area": str(d.get("area", "")),
+                        "units": [str(u) for u in d.get("units", [])],
+                    }
+                    for d in org.get("domains", [])
+                ],
+            }
+        )
 
     say_by_agent: dict[str, dict[str, str]] = {}
     for e in journal_dicts(result.get("agent_journal")):
-        agent, jroom = AGENT_BY_NODE.get(str(e.get("node_id", "")),
-                                         (str(e.get("role", "agent")).title(), "plan"))
+        agent, jroom = AGENT_BY_NODE.get(
+            str(e.get("node_id", "")), (str(e.get("role", "agent")).title(), "plan")
+        )
         concerns = [str(c) for c in (e.get("concerns") or []) if str(c).strip()]
-        say_by_agent.setdefault(agent, {
-            "agent": agent, "room": jroom,
-            "text": str(e.get("summary", "")).strip() or "Working…",
-            "concern": concerns[0] if concerns else "",
-        })
+        say_by_agent.setdefault(
+            agent,
+            {
+                "agent": agent,
+                "room": jroom,
+                "text": str(e.get("summary", "")).strip() or "Working…",
+                "concern": concerns[0] if concerns else "",
+            },
+        )
 
     # A node often emits MANY artifacts of one kind (e.g. 9 acceptance criteria);
     # numbering same-kind pickups (#1..#9) keeps the quest log readable.
@@ -379,14 +411,20 @@ def events_for_node_output(
             kind_seen[kind] += 1
             label = f"{label} #{kind_seen[kind]}"
         out.append({"type": "agent", "room": aroom, "agent": agent, "action": "work"})
-        detail = str(a.get("detail", ""))   # advisory content one-liner
+        detail = str(a.get("detail", ""))  # advisory content one-liner
         tk = ticket_event(detail, ticket_tiers) if kind == "ticket" else None
         if tk is not None:
             detail = f"{tk['id']} — {tk['title']}"
-        out.append({
-            "type": "artifact", "room": aroom, "agent": agent, "kind": kind,
-            "label": label, "detail": detail,
-        })
+        out.append(
+            {
+                "type": "artifact",
+                "room": aroom,
+                "agent": agent,
+                "kind": kind,
+                "label": label,
+                "detail": detail,
+            }
+        )
         if tk is not None:
             out.append(tk)
         say = say_by_agent.get(agent)
@@ -397,6 +435,7 @@ def events_for_node_output(
     # Gate verdicts as they land, so the HUD shows a mid-run FAIL -> fix -> PASS.
     # Advisory: the closing events carry the verdicts that decide the release.
     for g in result.get("gates") or ():
+
         def field(key: str, g: Any = g) -> Any:
             return g.get(key) if isinstance(g, Mapping) else getattr(g, key, None)
 
@@ -405,9 +444,16 @@ def events_for_node_output(
         if not name or key in seen_uris:
             continue
         seen_uris.add(key)
-        out.append({"type": "gate", "name": name, "status": _norm_status(field("status")),
-                    "attested": True, "advisory": True,
-                    "run_against": str(field("run_against") or "")})
+        out.append(
+            {
+                "type": "gate",
+                "name": name,
+                "status": _norm_status(field("status")),
+                "attested": True,
+                "advisory": True,
+                "run_against": str(field("run_against") or ""),
+            }
+        )
     return out
 
 
@@ -416,20 +462,48 @@ def events_for_result(result: dict[str, Any]) -> list[dict[str, Any]]:
     the chest opening (release) or the red door (halt)."""
     out: list[dict[str, Any]] = []
     for name, status in sorted((result.get("gate_statuses") or {}).items()):
-        out.append({"type": "gate", "name": name, "status": _norm_status(status),
-                    "attested": True, "advisory": False})
+        out.append(
+            {
+                "type": "gate",
+                "name": name,
+                "status": _norm_status(status),
+                "attested": True,
+                "advisory": False,
+            }
+        )
     if result.get("passed"):
-        out.append({"type": "release", "uri": result.get("artifact_uri") or "",
-                    "mode": result.get("mode", "assistant")})
+        out.append(
+            {
+                "type": "release",
+                "uri": result.get("artifact_uri") or "",
+                "mode": result.get("mode", "assistant"),
+            }
+        )
     else:
-        failing = [name.upper() for name, status in sorted(
-            (result.get("gate_statuses") or {}).items()) if _norm_status(status) != "pass"]
-        what = (f"the {', '.join(failing)} gate{'s' if len(failing) > 1 else ''} did not PASS"
-                if failing else "a gate did not PASS")
-        out.append({"type": "halt", "phase": result.get("phase", "unknown"),
-                    "reason": f"{what} — the build is held (fail-closed)"})
-    out.append({"type": "done", "passed": bool(result.get("passed")),
-                "phase": result.get("phase", "unknown")})
+        failing = [
+            name.upper()
+            for name, status in sorted((result.get("gate_statuses") or {}).items())
+            if _norm_status(status) != "pass"
+        ]
+        what = (
+            f"the {', '.join(failing)} gate{'s' if len(failing) > 1 else ''} did not PASS"
+            if failing
+            else "a gate did not PASS"
+        )
+        out.append(
+            {
+                "type": "halt",
+                "phase": result.get("phase", "unknown"),
+                "reason": f"{what} — the build is held (fail-closed)",
+            }
+        )
+    out.append(
+        {
+            "type": "done",
+            "passed": bool(result.get("passed")),
+            "phase": result.get("phase", "unknown"),
+        }
+    )
     return out
 
 

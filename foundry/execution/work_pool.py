@@ -110,6 +110,7 @@ __all__ = [
     "allocate_lineage_quotas",
 ]
 
+
 def allocate_lineage_quotas(weights: Mapping[str, int], global_cap_microusd: int) -> dict[str, int]:
     """Split a global micro-USD envelope across lineages proportional to ``weights``
     (the ticket path's lineage is the ticket's specialty).

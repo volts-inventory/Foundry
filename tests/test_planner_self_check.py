@@ -98,8 +98,7 @@ def test_the_in_node_revision_fixes_a_finding_without_a_gate_round_trip() -> Non
     assert critique.coverage_findings == () and critique.contract_findings == ()
     assert not critique.spec_gate_blocking()
     summary = writes["agent_journal"][0].summary
-    assert "Revised the plan once in-node after its own plan check: 1 -> 0 finding(s)." \
-        in summary
+    assert "Revised the plan once in-node after its own plan check: 1 -> 0 finding(s)." in summary
 
 
 def test_a_worse_revision_is_discarded() -> None:
@@ -111,8 +110,7 @@ def test_a_worse_revision_is_discarded() -> None:
 
     assert len(tx.requests) == 3  # one delta, then one full revision, never more
     assert _critique(cas, writes).coverage_findings == (
-        "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers lists "
-        "MH-1.",
+        "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers lists MH-1.",
     )
     assert "kept the original (1 finding(s); the revision had 2)" in (
         writes["agent_journal"][0].summary
@@ -161,8 +159,9 @@ def test_a_gate_replan_gets_its_own_in_node_rerun() -> None:
     node, tx, first = _first_pass(cas, gate_fix, check_fix)
     assert len(tx.requests) == 4  # a clean first pass: no in-node revision
 
-    second = node(_failed(first, "criterion E2-AC01: scenario has no then step"),
-                  config_for("r", step=5))
+    second = node(
+        _failed(first, "criterion E2-AC01: scenario has no then step"), config_for("r", step=5)
+    )
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
     assert "Plan check findings" in json.dumps(tx.requests[5])
     assert _critique(cas, second).coverage_findings == ()
@@ -176,17 +175,30 @@ def _two_implementers() -> dict[str, Any]:
     """The local-model mistakes the delta exists for: a scenario-less ticket that
     also implements a contract another ticket implements."""
     plan = _copy(PLAN)
-    plan["tickets"].append({
-        "id": "contracts-1", "title": "Contract types", "specialty": "backend",
-        "difficulty": "trivial", "depends_on": [], "files": ["todo/models.py"],
-        "implements": ["TodoStore.add"], "consumes": [], "scenarios": [],
-    })
+    plan["tickets"].append(
+        {
+            "id": "contracts-1",
+            "title": "Contract types",
+            "specialty": "backend",
+            "difficulty": "trivial",
+            "depends_on": [],
+            "files": ["todo/models.py"],
+            "implements": ["TodoStore.add"],
+            "consumes": [],
+            "scenarios": [],
+        }
+    )
     return plan
 
 
 def _delta(**ops: Any) -> dict[str, Any]:
-    return {"tickets": [], "remove_tickets": [], "remove_scenarios": [],
-            "criteria_review": {"missing": [], "security_abuse_omissions": []}, **ops}
+    return {
+        "tickets": [],
+        "remove_tickets": [],
+        "remove_scenarios": [],
+        "criteria_review": {"missing": [], "security_abuse_omissions": []},
+        **ops,
+    }
 
 
 _DROP_CONTRACTS_1 = _delta(remove_tickets=["contracts-1"])
@@ -219,19 +231,32 @@ def test_a_failed_plan_check_is_fixed_by_one_delta_call(
     critique = _critique(cas, writes)
     assert critique.contract_findings == () and critique.coverage_findings == ()
     assert [t.id for t in _bodies(cas, writes, "ticket")] == ["T-001", "T-002", "T-003"]
-    assert "Patched the plan in-node with one delta call after its own plan check: "\
+    assert (
+        "Patched the plan in-node with one delta call after its own plan check: "
         "2 -> 0 finding(s)." in writes["agent_journal"][0].summary
+    )
 
 
 def test_an_upsert_merges_into_a_shown_ticket_by_id() -> None:
     contracts_1 = _two_implementers()["tickets"][-1]
-    fix = _delta(tickets=[
-        {**PLAN["tickets"][0], "implements": ["TodoStore.list"], "scenarios": []},
-        {**contracts_1, "scenarios": [
-            {"id": "AC-010", "given": ["a todo"], "when": ["it is added"],
-             "then": ["it gets an id"], "security_abuse": False, "covers": []},
-        ]},
-    ])
+    fix = _delta(
+        tickets=[
+            {**PLAN["tickets"][0], "implements": ["TodoStore.list"], "scenarios": []},
+            {
+                **contracts_1,
+                "scenarios": [
+                    {
+                        "id": "AC-010",
+                        "given": ["a todo"],
+                        "when": ["it is added"],
+                        "then": ["it gets an id"],
+                        "security_abuse": False,
+                        "covers": [],
+                    },
+                ],
+            },
+        ]
+    )
     cas = ArtifactStore()
     rt, tx = runtime_for(_two_implementers(), fix, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
@@ -251,9 +276,16 @@ def test_an_upsert_of_a_summarized_ticket_falls_back(monkeypatch: pytest.MonkeyP
     # In a big plan MH-1's finding names no ticket, so T-002 goes only as a summary:
     # replacing it would overwrite fields and scenarios the model never saw.
     monkeypatch.setattr(planner, "_SHOW_ALL_TICKETS", 0)
-    fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
-        {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
-    ]}])
+    fix = _delta(
+        tickets=[
+            {
+                **PLAN["tickets"][1],
+                "scenarios": [
+                    {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
+                ],
+            }
+        ]
+    )
     rt, tx = runtime_for(_uncovered(), fix, PLAN)
     make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
@@ -261,17 +293,26 @@ def test_an_upsert_of_a_summarized_ticket_falls_back(monkeypatch: pytest.MonkeyP
 
 
 def test_a_small_plan_lets_the_delta_fix_a_ticket_no_finding_names() -> None:
-    fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
-        {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
-    ]}])
+    fix = _delta(
+        tickets=[
+            {
+                **PLAN["tickets"][1],
+                "scenarios": [
+                    {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
+                ],
+            }
+        ]
+    )
     rt, tx = runtime_for(_uncovered(), fix, PLAN)
     make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 2 and _is_delta(tx.requests[1])
 
 
 def _flagged(plan: dict[str, Any]) -> dict[str, Any]:
-    return {**plan, "criteria_review": {"missing": [],
-                                        "security_abuse_omissions": ["no rate limit"]}}
+    return {
+        **plan,
+        "criteria_review": {"missing": [], "security_abuse_omissions": ["no rate limit"]},
+    }
 
 
 def _by_sop(plan: dict[str, Any], delta: dict[str, Any], cas: ArtifactStore) -> Any:
@@ -292,11 +333,24 @@ def test_an_open_review_gap_skips_the_in_node_delta() -> None:
 
 def test_an_open_omission_skips_the_gate_delta() -> None:
     new_ticket = {
-        "id": "T-004", "title": "Rate limit", "specialty": "backend",
-        "difficulty": "standard", "depends_on": ["T-001"], "files": ["todo/limits.py"],
-        "implements": [], "consumes": [], "entrypoint": False, "scenarios": [
-            {"id": "AC-009", "given": ["100 adds"], "when": ["one more"],
-             "then": ["it is rejected"], "security_abuse": True, "covers": []},
+        "id": "T-004",
+        "title": "Rate limit",
+        "specialty": "backend",
+        "difficulty": "standard",
+        "depends_on": ["T-001"],
+        "files": ["todo/limits.py"],
+        "implements": [],
+        "consumes": [],
+        "entrypoint": False,
+        "scenarios": [
+            {
+                "id": "AC-009",
+                "given": ["100 adds"],
+                "when": ["one more"],
+                "then": ["it is rejected"],
+                "security_abuse": True,
+                "covers": [],
+            },
         ],
     }
     cas = ArtifactStore()
@@ -305,10 +359,16 @@ def test_an_open_omission_skips_the_gate_delta() -> None:
     first = node({"request": "x"}, config_for("r"))
     assert _critique(cas, first).security_abuse_omissions == ("no rate limit",)
     state: FactoryState = {
-        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
-        "gates": [_spec_verdict(GateStatus.FAIL, (
-            "criteria-completeness critic flagged a security/abuse omission",
-        ), epoch=1)],
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
+        "gates": [
+            _spec_verdict(
+                GateStatus.FAIL,
+                ("criteria-completeness critic flagged a security/abuse omission",),
+                epoch=1,
+            )
+        ],
     }
     second = node(state, config_for("r", step=5))
     assert not any(_is_delta(r) for r in tx.requests)
@@ -320,11 +380,25 @@ def test_work_dropped_at_a_cap_skips_the_delta(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(planner, "MAX_TICKETS", 3)
     plan = _uncovered()
-    plan["tickets"].append({**PLAN["tickets"][0], "id": "T-004", "files": ["todo/x.py"],
-                            "implements": [], "scenarios": []})
-    fix = _delta(tickets=[{**PLAN["tickets"][1], "scenarios": [
-        {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
-    ]}])
+    plan["tickets"].append(
+        {
+            **PLAN["tickets"][0],
+            "id": "T-004",
+            "files": ["todo/x.py"],
+            "implements": [],
+            "scenarios": [],
+        }
+    )
+    fix = _delta(
+        tickets=[
+            {
+                **PLAN["tickets"][1],
+                "scenarios": [
+                    {**PLAN["tickets"][1]["scenarios"][0], "covers": ["MH-1", "SC-1"]},
+                ],
+            }
+        ]
+    )
     cas = ArtifactStore()
     rt, tx = _by_sop(plan, fix, cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
@@ -348,9 +422,13 @@ def test_a_delta_leaving_a_finding_falls_back_to_the_full_replan() -> None:
 
 
 def test_an_unparseable_delta_falls_back_to_the_full_replan() -> None:
-    tx = MockTransport(completions=[
-        json.dumps(_two_implementers()), "no json here", json.dumps(PLAN),
-    ])
+    tx = MockTransport(
+        completions=[
+            json.dumps(_two_implementers()),
+            "no json here",
+            json.dumps(PLAN),
+        ]
+    )
     proxy = ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID), max_retries=0)
     cas = ArtifactStore()
     writes = make_planner_node(AgentRuntime(proxy=proxy, cas=cas))(
@@ -386,7 +464,9 @@ def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
         "(or fold it into the ticket whose behaviour it serves).",
     )
     state: FactoryState = {
-        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
         "gates": [_spec_verdict(GateStatus.FAIL, findings, epoch=1)],
     }
     second = node(state, config_for("r", step=5))
@@ -394,7 +474,11 @@ def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
     assert len(tx.requests) == 4 and _is_delta(tx.requests[3])
     assert "(T-001, contracts-1)" in json.dumps(tx.requests[3])
     assert {a.kind for a in second["artifacts"]} == {
-        "prd", "acceptance_criterion", "criteria_findings", "ticket", "ownership_map"
+        "prd",
+        "acceptance_criterion",
+        "criteria_findings",
+        "ticket",
+        "ownership_map",
     }
     critique = _critique(cas, second)
     assert not critique.spec_gate_blocking()
@@ -406,14 +490,21 @@ def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
 
 def test_a_gate_delta_leaving_an_omission_falls_back_to_the_full_replan() -> None:
     cas = ArtifactStore()
-    rt, tx = runtime_for(PLAN, _delta(
-        remove_scenarios=["AC-003"],
-        criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]},
-    ), PLAN, cas=cas)
+    rt, tx = runtime_for(
+        PLAN,
+        _delta(
+            remove_scenarios=["AC-003"],
+            criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]},
+        ),
+        PLAN,
+        cas=cas,
+    )
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
     state: FactoryState = {
-        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
         "gates": [_spec_verdict(GateStatus.FAIL, ("no rate-limit scenario",), epoch=1)],
     }
     node(state, config_for("r", step=5))
@@ -425,22 +516,35 @@ _SHOWN = {"A", "B"}
 
 
 def _item(tid: str, *scenarios: str, **extra: Any) -> dict[str, Any]:
-    return {"id": tid, "title": tid, "specialty": "backend", "depends_on": [],
-            "files": [f"{tid}.py"], "implements": [], "consumes": [],
-            "scenarios": [{"id": s, "given": ["g"], "when": ["w"], "then": ["t"]}
-                          for s in scenarios], **extra}
+    return {
+        "id": tid,
+        "title": tid,
+        "specialty": "backend",
+        "depends_on": [],
+        "files": [f"{tid}.py"],
+        "implements": [],
+        "consumes": [],
+        "scenarios": [{"id": s, "given": ["g"], "when": ["w"], "then": ["t"]} for s in scenarios],
+        **extra,
+    }
 
 
 def test_the_merge_replaces_moves_and_removes_by_id() -> None:
     items = [_item("A", "S1", "S2"), _item("B", "S3"), _item("C")]
-    merged = _merge_delta(items, _delta(
-        tickets=[
-            {**_item("B", "S1"), "title": "B2"},  # S1 moves here from A
-            _item("D", "S4"),
-            {**_item("contracts"), "title": "never the planner's own"},
-        ],
-        remove_tickets=["C"], remove_scenarios=["S2"],
-    ), frozenset(), _SHOWN)
+    merged = _merge_delta(
+        items,
+        _delta(
+            tickets=[
+                {**_item("B", "S1"), "title": "B2"},  # S1 moves here from A
+                _item("D", "S4"),
+                {**_item("contracts"), "title": "never the planner's own"},
+            ],
+            remove_tickets=["C"],
+            remove_scenarios=["S2"],
+        ),
+        frozenset(),
+        _SHOWN,
+    )
     assert merged is not None
     by_id = {i["id"]: i for i in merged}
     assert list(by_id) == ["A", "B", "D"]
@@ -450,9 +554,7 @@ def test_the_merge_replaces_moves_and_removes_by_id() -> None:
     assert items[0]["scenarios"][0]["id"] == "S1"  # the input is not mutated
 
     assert _merge_delta(items, _delta(), frozenset(), _SHOWN) is None  # changes nothing
-    assert _merge_delta(
-        items, _delta(remove_tickets=["A", "B", "C"]), frozenset(), _SHOWN
-    ) is None
+    assert _merge_delta(items, _delta(remove_tickets=["A", "B", "C"]), frozenset(), _SHOWN) is None
 
 
 def test_the_merge_refuses_to_edit_a_summarized_ticket() -> None:
@@ -469,7 +571,8 @@ def test_the_merge_refuses_to_edit_a_summarized_ticket() -> None:
 
 
 def test_a_refused_delta_logs_why(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
     items = [_item("A", "S1"), _item("B", "S2")]
@@ -485,20 +588,30 @@ def test_one_scenario_on_two_upserted_tickets_is_refused() -> None:
 
 def test_an_epic_delta_keeps_tickets_inside_known_epics() -> None:
     items = [{**_item("E1-T01"), "__epic__": "E1"}, {**_item("E2-T01"), "__epic__": "E2"}]
-    merged = _merge_delta(items, _delta(tickets=[
-        _item("E2-T02", "E2-AC09", depends_on=["E2-T01", "E1-T01"]),
-    ]), frozenset({"E1", "E2"}), {"E1-T01", "E2-T01"})
+    merged = _merge_delta(
+        items,
+        _delta(
+            tickets=[
+                _item("E2-T02", "E2-AC09", depends_on=["E2-T01", "E1-T01"]),
+            ]
+        ),
+        frozenset({"E1", "E2"}),
+        {"E1-T01", "E2-T01"},
+    )
     assert merged is not None
     new = merged[-1]
     assert new["__epic__"] == "E2" and new["depends_on"] == ["E2-T01"]
-    assert _merge_delta(
-        items, _delta(tickets=[_item("T-9")]), frozenset({"E1", "E2"}), set()
-    ) is None
+    assert (
+        _merge_delta(items, _delta(tickets=[_item("T-9")]), frozenset({"E1", "E2"}), set()) is None
+    )
 
 
 def test_a_contract_name_with_spaces_marks_its_tickets_affected() -> None:
-    items = [_item("A", implements=["POST /users"]), _item("B", consumes=["POST /users"]),
-             *(_item(f"C{n}") for n in range(8))]
+    items = [
+        _item("A", implements=["POST /users"]),
+        _item("B", consumes=["POST /users"]),
+        *(_item(f"C{n}") for n in range(8)),
+    ]
     finding = "Contract POST /users is implemented by 2 tickets; exactly one may."
     assert _affected([finding], items, ["POST /users"]) == {"A", "B"}
 
@@ -511,8 +624,13 @@ def test_a_small_plan_goes_to_the_delta_whole() -> None:
 
 def test_criteria_problems_mirror_the_spec_gate() -> None:
     def crit(cid: str, **extra: Any) -> AcceptanceCriterion:
-        fields: dict[str, Any] = {"id": cid, "text": "Given g", "oracle_hint": "o",
-                                  "security_abuse": True, "seq": _SEQ}
+        fields: dict[str, Any] = {
+            "id": cid,
+            "text": "Given g",
+            "oracle_hint": "o",
+            "security_abuse": True,
+            "seq": _SEQ,
+        }
         return AcceptanceCriterion(**{**fields, **extra})
 
     assert _structural_findings([crit("A", given=("g",), when=("w",), then=(" ",))]) == (
@@ -529,7 +647,9 @@ def test_a_rejected_gate_patch_mints_no_extra_ticket_seq() -> None:
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
     state: FactoryState = {
-        "request": "x", "artifacts": first["artifacts"], "scope_tier": first["scope_tier"],
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
         "gates": [_spec_verdict(GateStatus.FAIL, ("some finding",), epoch=1)],
     }
     second = node(state, config_for("r", step=5))
@@ -541,22 +661,41 @@ def test_a_rejected_gate_patch_mints_no_extra_ticket_seq() -> None:
 # ---- repairs ------------------------------------------------------------------------
 
 
-def _t(tid: str, *deps: str, entry: bool = False, test: bool = False,
-       implements: tuple[str, ...] = (), consumes: tuple[str, ...] = ()) -> Ticket:
-    return Ticket(id=tid, title=tid, depends_on=deps, entrypoint=entry,
-                  specialty=Specialty.TEST if test else Specialty.BACKEND,
-                  implements=implements, consumes=consumes, seq=_SEQ)
+def _t(
+    tid: str,
+    *deps: str,
+    entry: bool = False,
+    test: bool = False,
+    implements: tuple[str, ...] = (),
+    consumes: tuple[str, ...] = (),
+) -> Ticket:
+    return Ticket(
+        id=tid,
+        title=tid,
+        depends_on=deps,
+        entrypoint=entry,
+        specialty=Specialty.TEST if test else Specialty.BACKEND,
+        implements=implements,
+        consumes=consumes,
+        seq=_SEQ,
+    )
 
 
 def test_the_entrypoint_is_wired_to_every_feature_unless_that_closes_a_cycle() -> None:
     tickets = [
-        _t("A"), _t("B", "A"), _t("C"), _t("APP", "A", entry=True), _t("T", "APP", test=True),
+        _t("A"),
+        _t("B", "A"),
+        _t("C"),
+        _t("APP", "A", entry=True),
+        _t("T", "APP", test=True),
     ]
     out, concerns = _wire_entrypoint(tickets)
     by_id = {t.id: t for t in out}
     assert by_id["APP"].depends_on == ("A", "B", "C")  # never the test ticket
-    assert concerns == ["Ticket APP: added dependencies on feature ticket(s) B, C so the "
-                        "entrypoint wires every feature in."]
+    assert concerns == [
+        "Ticket APP: added dependencies on feature ticket(s) B, C so the "
+        "entrypoint wires every feature in."
+    ]
 
     cyclic = [_t("A", "APP"), _t("APP", entry=True)]
     out, concerns = _wire_entrypoint(cyclic)
@@ -566,20 +705,26 @@ def test_the_entrypoint_is_wired_to_every_feature_unless_that_closes_a_cycle() -
 def test_a_reader_is_ordered_after_the_one_ticket_writing_the_file_it_reads() -> None:
     # A local shop run built the repositories beside the models ticket they read:
     # one imported a ProductModel the models ticket never defined.
-    def t(tid: str, *deps: str, files: tuple[str, ...] = (),
-          reads: tuple[str, ...] = ()) -> Ticket:
+    def t(tid: str, *deps: str, files: tuple[str, ...] = (), reads: tuple[str, ...] = ()) -> Ticket:
         return _t(tid, *deps).model_copy(update={"files": files, "reads": reads})
 
     tickets = [
         t("contracts", files=("contracts.py",)),
         t("E1-T01", "contracts", files=("app/database.py",)),
         t("E1-T02", "contracts", "E1-T01", files=("app/models.py",)),
-        t("E2-T01", "contracts", "E1-T01", files=("app/repo.py",),
-          reads=("app/models.py", "contracts.py", "app/repo.py", "README.md")),
+        t(
+            "E2-T01",
+            "contracts",
+            "E1-T01",
+            files=("app/repo.py",),
+            reads=("app/models.py", "contracts.py", "app/repo.py", "README.md"),
+        ),
         t("E2-T02", "contracts", "E2-T01", files=("app/svc.py",), reads=("app/models.py",)),
         t("E3-T01", "contracts", files=("a.py", "b.py"), reads=("b.py", "shared.py")),
-        t("E3-T02", files=("shared.py",)), t("E3-T03", files=("shared.py",)),
-        t("E4-T01", "E4-T02", files=("x.py",)), t("E4-T02", files=("y.py",), reads=("x.py",)),
+        t("E3-T02", files=("shared.py",)),
+        t("E3-T03", files=("shared.py",)),
+        t("E4-T01", "E4-T02", files=("x.py",)),
+        t("E4-T02", files=("y.py",), reads=("x.py",)),
     ]
     out, concerns = _add_read_deps(tickets)
     deps = {o.id: o.depends_on for o in out}
@@ -587,8 +732,9 @@ def test_a_reader_is_ordered_after_the_one_ticket_writing_the_file_it_reads() ->
     assert deps["E2-T02"] == ("contracts", "E2-T01")  # already after it, through E2-T01
     assert deps["E3-T01"] == ("contracts",)  # its own file; a file with two writers
     assert deps["E4-T02"] == ()  # the edge would close a cycle
-    assert concerns == ["Ticket E2-T01: added a dependency on E1-T02, which writes "
-                        "app/models.py it reads."]
+    assert concerns == [
+        "Ticket E2-T01: added a dependency on E1-T02, which writes app/models.py it reads."
+    ]
     assert [o for o in out if o.id != "E2-T01"] == [o for o in tickets if o.id != "E2-T01"]
 
 
@@ -614,8 +760,11 @@ _SHADOWING = [  # `list` names a method, so the later `-> list[...]` is the meth
     {"name": "Todo", "kind": "type", "signature": "@dataclass\nclass Todo:\n    title: str"},
     {"name": "TodoStore.add", "kind": "function", "signature": "def add(self, t: Todo) -> int"},
     {"name": "TodoStore.list", "kind": "function", "signature": "def list(self) -> list[Todo]"},
-    {"name": "TodoStore.recent", "kind": "function",
-     "signature": "def recent(self, n: int) -> list[Todo]"},
+    {
+        "name": "TodoStore.recent",
+        "kind": "function",
+        "signature": "def recent(self, n: int) -> list[Todo]",
+    },
 ]
 
 
@@ -639,7 +788,8 @@ def test_a_contract_compile_error_feeds_the_in_node_revision(
         pytest.skip("mypy is not installed for python3 here")
     renamed = [
         {**i, "name": "TodoStore.list_all", "signature": "def list_all(self) -> list[Todo]"}
-        if i["name"] == "TodoStore.list" else i
+        if i["name"] == "TodoStore.list"
+        else i
         for i in _SHADOWING
     ]
     cas = ArtifactStore()
@@ -662,7 +812,7 @@ def test_a_contract_compile_error_left_after_the_revision_blocks(
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     findings = _critique(cas, writes).contract_findings
     assert findings == (
-        'Contract TodoStore.recent does not compile (mypy): Function '
+        "Contract TodoStore.recent does not compile (mypy): Function "
         '"contracts.TodoStore.list" is not valid as a type [valid-type]',
     )  # mypy is the authority when it ran: no duplicate heuristic finding
 
@@ -671,18 +821,20 @@ def test_python_assembly_and_type_errors(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("FOUNDRY_PLAN_COMPILE", "1")
     if not _mypy_here():
         pytest.skip("mypy is not installed for python3 here")
-    result = check_contracts([
-        ("Money", "Amount = Decimal"),
-        ("Repo", "class Repo(Protocol):\n    def get(self, id: UUID) -> Thing | None: ..."),
-        ("parse", "def parse(text: str) -> Amount"),
-        ("Prose", "this is prose"),
-    ], "python")
+    result = check_contracts(
+        [
+            ("Money", "Amount = Decimal"),
+            ("Repo", "class Repo(Protocol):\n    def get(self, id: UUID) -> Thing | None: ..."),
+            ("parse", "def parse(text: str) -> Amount"),
+            ("Prose", "this is prose"),
+        ],
+        "python",
+    )
     assert result.ran
     # An undefined name is an import the fragment can't carry: a concern, not a blocker.
     assert result.findings == ()
     assert result.concerns == (
-        "Contract Prose: its signature is not valid Python, so it was not compiled at "
-        "plan time.",
+        "Contract Prose: its signature is not valid Python, so it was not compiled at plan time.",
         'Contract Repo: Name "Thing" is not defined [name-defined] (the contracts ticket '
         "resolves imports)",
     )
@@ -692,13 +844,16 @@ def test_python_assembly_and_type_errors(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_typescript_contracts_compile_with_tsc(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOUNDRY_PLAN_COMPILE", "1")
-    result = check_contracts([
-        ("Todo", "interface Todo { id: string }"),
-        ("TodoStore.add", "add(todo: Todo): string"),
-        ("TodoStore.list", "list(): Todoo[]"),
-        ("Store", "class Store { get(id: string): Todo }"),
-        ("broken", "type X = ;"),
-    ], "typescript")
+    result = check_contracts(
+        [
+            ("Todo", "interface Todo { id: string }"),
+            ("TodoStore.add", "add(todo: Todo): string"),
+            ("TodoStore.list", "list(): Todoo[]"),
+            ("Store", "class Store { get(id: string): Todo }"),
+            ("broken", "type X = ;"),
+        ],
+        "typescript",
+    )
     if not result.ran:
         pytest.skip("tsc is not installed here")
     assert result.findings == ()
@@ -737,13 +892,18 @@ def test_an_unused_contract_is_a_concern_not_a_finding() -> None:
     plan["interfaces"].append({"name": "Unused", "spec": "x"})
     plan["tickets"][1]["implements"] = ["Unused"]
     plan["tickets"][1]["scenarios"] = []  # no scenario on its implementer
-    plan["tickets"].append({**_ticket("T-009", "backend"), "scenarios": [
-        {**_scn("AC-009", "MH-1", "SC-1"), "security_abuse": True}
-    ]})
+    plan["tickets"].append(
+        {
+            **_ticket("T-009", "backend"),
+            "scenarios": [{**_scn("AC-009", "MH-1", "SC-1"), "security_abuse": True}],
+        }
+    )
     cas = ArtifactStore()
     rt, _ = runtime_for(plan, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     critique = _critique(cas, writes)
     assert not any("Unused" in f for f in critique.contract_findings)
-    assert any(c.startswith("Contract Unused (implemented by T-002) has no consumer")
-               for c in writes["agent_journal"][0].concerns)
+    assert any(
+        c.startswith("Contract Unused (implemented by T-002) has no consumer")
+        for c in writes["agent_journal"][0].concerns
+    )

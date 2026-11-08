@@ -109,9 +109,7 @@ def test_store_roundtrips_adapter(tmp_path: Any) -> None:
     from webapp.store import BuildStore
 
     s = BuildStore(tmp_path / "cat.sqlite")
-    s.upsert(
-        {"id": "b1", "floor": 1, "backend": "mock", "adapter": "raw-react", "gates": {}}
-    )
+    s.upsert({"id": "b1", "floor": 1, "backend": "mock", "adapter": "raw-react", "gates": {}})
     row = dict(s._conn.execute("SELECT adapter FROM builds WHERE id='b1'").fetchone())
     assert row["adapter"] == "raw-react"
 
@@ -121,9 +119,10 @@ def test_activity_callback_reaches_the_agentic_adapter(proxy: Any) -> None:
     listener and the agentic substrate must actually receive it, or a long step stays
     silent. Without one, the adapter is in its original non-streaming shape."""
     seen: list[str] = []
-    adapter = make_coding_adapter("claude-code", proxy=proxy, thread_id="t",
-                                  activity_cb=seen.append)
-    adapter._pump_activity(                     # one stream-json assistant line
+    adapter = make_coding_adapter(
+        "claude-code", proxy=proxy, thread_id="t", activity_cb=seen.append
+    )
+    adapter._pump_activity(  # one stream-json assistant line
         '{"type":"assistant","message":{"content":'
         '[{"type":"tool_use","name":"Bash","input":{"command":"pytest -q"}}]}}'
     )
@@ -131,4 +130,4 @@ def test_activity_callback_reaches_the_agentic_adapter(proxy: Any) -> None:
 
     plain = make_coding_adapter("claude-code", proxy=proxy, thread_id="t")
     assert plain._on_activity is None
-    plain._pump_activity('{"type":"assistant","message":{"content":[]}}')   # no-op
+    plain._pump_activity('{"type":"assistant","message":{"content":[]}}')  # no-op

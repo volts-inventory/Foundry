@@ -109,9 +109,9 @@ class BudgetController:
         self._non_convergence_escalated = False
 
     # -- superstep-boundary authorization ---------------------------------
-    def authorize_superstep(self, ledger: BudgetLedger, requested: SuperstepRequest) -> (
-        BudgetDecision
-    ):
+    def authorize_superstep(
+        self, ledger: BudgetLedger, requested: SuperstepRequest
+    ) -> BudgetDecision:
         """Check caps BEFORE dispatch (arch §6) — never called inside a node."""
         projected_total = ledger.spend_microusd + requested.est_spend_microusd
         if projected_total > self.caps.total_microusd:

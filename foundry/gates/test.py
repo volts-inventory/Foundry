@@ -117,12 +117,17 @@ _at = next((i for i, p in enumerate(sys.path) if os.path.realpath(p) in _sp), le
 sys.path[_at:_at] = [p for p in os.environ.get("{BUILD_SITE_ENV}", "").split(os.pathsep) if p]
 sys.executable = os.environ.get("{BUILD_PYTHON_ENV}") or sys.executable
 """
-_ISOLATED_PYTEST_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + """\
+_ISOLATED_PYTEST_BOOTSTRAP = (
+    _BOOTSTRAP_PREAMBLE
+    + """\
 from pytest import console_main
-""" + ADD_BUILD_SITE + """\
+"""
+    + ADD_BUILD_SITE
+    + """\
 sys.path.insert(0, wd)
 sys.exit(console_main())
 """
+)
 
 # Env keys handing the BDD bootstrap its gate-owned channel; it pops them before any
 # workdir code runs. The report path is in a fresh temp dir OUTSIDE the workdir and is
@@ -138,7 +143,9 @@ _BDD_EXPECTED_ENV = "FOUNDRY_BDD_EXPECTED"
 # executed through pytest-bdd and returned; hook calls (which test code can fire by
 # hand) never mark anything executed. The report is written after pytest returns, then
 # the process ``_exit``s so no agent atexit code runs after it; stdout is not consulted.
-_ISOLATED_PYTEST_BDD_BOOTSTRAP = _BOOTSTRAP_PREAMBLE + f"""\
+_ISOLATED_PYTEST_BDD_BOOTSTRAP = (
+    _BOOTSTRAP_PREAMBLE
+    + f"""\
 import importlib, json, pytest
 import pytest_bdd.plugin
 _bdd_scenario = importlib.import_module("pytest_bdd.scenario")
@@ -233,6 +240,7 @@ sys.stdout.flush()
 sys.stderr.flush()
 os._exit(int(_rc))
 """
+)
 
 _STEP_KEYWORDS = {"Given": "given", "When": "when", "Then": "then"}
 
@@ -288,7 +296,7 @@ def read_bdd_report(path: Path, nonce: str) -> dict[str, str] | None:
 _BDD_WHY = {
     "missing": (
         "was not executed — bind that exact gate-owned file with pytest-bdd "
-        "`scenarios(\"<relative path from the step module to it>\")` called in a test "
+        '`scenarios("<relative path from the step module to it>")` called in a test '
         "module pytest collects, tests/test_<name>.py (a conftest.py or a module not "
         "named test_*.py is never collected as a test module; a copy of the feature or "
         "a .feature file of your own is ignored by the gate), and implement every "
@@ -345,9 +353,9 @@ _PYTEST_EXIT_WHY = {
     2: "pytest was interrupted",
     3: "pytest hit an internal error",
     4: "pytest usage error — a conftest.py that fails to import, a bad pytest.ini "
-       "option or an unknown command-line flag stops the run before any test",
+    "option or an unknown command-line flag stops the run before any test",
     5: "no test modules collected: add tests/test_<name>.py (pytest collects only "
-       "test_*.py modules, never conftest.py) holding the tests",
+    "test_*.py modules, never conftest.py) holding the tests",
 }
 
 
@@ -372,9 +380,7 @@ def bdd_findings(
 _COLLECT_ERROR = re.compile(r"^(?:_+ )?ERROR (?:collecting )?(\S+?\.py)\b", re.MULTILINE)
 
 
-def uncollected_binding_reasons(
-    output: str, workdir: Path, refs: list[str]
-) -> dict[str, str]:
+def uncollected_binding_reasons(output: str, workdir: Path, refs: list[str]) -> dict[str, str]:
     """Scenario ref -> why it never ran, for each of ``refs`` whose feature file a
     step module binds that pytest failed to import (``ERROR collecting <module>``).
     The generic "bind that file" advice sent a fixer rewriting a binding that was in
@@ -434,8 +440,9 @@ _QUOTED = re.compile(r"'([^'\\\n]{3,80})'")
 
 
 def _is_test_module(name: str) -> bool:
-    return name == "conftest.py" or (name.endswith(".py") and (
-        name.startswith("test_") or name.endswith("_test.py")))
+    return name == "conftest.py" or (
+        name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
+    )
 
 
 def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
@@ -444,12 +451,16 @@ def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
     as the process), so the test passes when its module runs alone and fails after
     another test wrote the same row: rerunning it alone shows nothing to fix. The
     line names the test modules that write the colliding statement's values."""
-    keys = list(dict.fromkeys(next(g for g in m.groups() if g)
-                              for m in _UNIQUE_VIOLATION.finditer(output)))
+    keys = list(
+        dict.fromkeys(next(g for g in m.groups() if g) for m in _UNIQUE_VIOLATION.finditer(output))
+    )
     if not keys:
         return ()
-    values = list(dict.fromkeys(v for m in _SQL_PARAMETERS.finditer(output)
-                                for v in _QUOTED.findall(m.group(1))))
+    values = list(
+        dict.fromkeys(
+            v for m in _SQL_PARAMETERS.finditer(output) for v in _QUOTED.findall(m.group(1))
+        )
+    )
     root = Path(workdir)
     writers: dict[str, list[str]] = {}
     for path in sorted(root.rglob("*.py")) if values else ():
@@ -474,11 +485,15 @@ def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
             "runs alone, and fails after another test inserted the same value"
         )
         if shared:
-            line += (". The colliding insert's values are also written by other test "
-                     "modules: " + "; ".join(shared[:3]))
-        out.append(line + ". Fix the isolation, not the value alone: an autouse fixture "
-                   "in conftest.py that gives every test an empty database (drop and "
-                   "re-create the schema, or delete every row, before each test)")
+            line += (
+                ". The colliding insert's values are also written by other test "
+                "modules: " + "; ".join(shared[:3])
+            )
+        out.append(
+            line + ". Fix the isolation, not the value alone: an autouse fixture "
+            "in conftest.py that gives every test an empty database (drop and "
+            "re-create the schema, or delete every row, before each test)"
+        )
     return tuple(out)
 
 
@@ -488,9 +503,7 @@ def _unexpanded_report_paths(workdir: Path) -> list[str]:
     root = Path(workdir)
     marks = (f"${_BDD_REPORT_ENV}", f"${{{_BDD_REPORT_ENV}}}")
     return sorted(
-        p.relative_to(root).as_posix()
-        for p in root.rglob("*")
-        if any(m in p.name for m in marks)
+        p.relative_to(root).as_posix() for p in root.rglob("*") if any(m in p.name for m in marks)
     )
 
 
@@ -515,8 +528,9 @@ def conftest_binding_note(workdir: Path) -> str | None:
         except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
             continue
         # A real call only: a comment or docstring naming `scenarios(...)` binds nothing.
-        if any(isinstance(n, ast.Call) and _called_name(n.func) == "scenarios"
-               for n in ast.walk(tree)):
+        if any(
+            isinstance(n, ast.Call) and _called_name(n.func) == "scenarios" for n in ast.walk(tree)
+        ):
             hits.append(rel)
     if not hits:
         return None
@@ -589,8 +603,9 @@ def shadowed_scenario_notes(workdir: Path, refs: list[str]) -> tuple[str, ...]:
             start = next((i for i, n in enumerate(body) if _calls_scenarios(n)), None)
             if start is None:
                 continue
-            hits = sorted({name for n in body[start + 1:] for name in _rebound_names(n)}
-                          & set(wanted))
+            hits = sorted(
+                {name for n in body[start + 1 :] for name in _rebound_names(n)} & set(wanted)
+            )
             for name in hits:
                 out.append(
                     f"{rel} defines `{name}` after its `scenarios(...)` call, but "
@@ -640,8 +655,11 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     which ids the fix loop sees failing, nor which ticket it blames. Without
     ``summary_ids`` (another runner's output) every id-shaped line is quoted."""
     lines = stdout.splitlines()
-    start = max((i for i, raw in enumerate(lines) if _SUMMARY_HEADER.match(raw.strip())),
-                default=None) if summary_ids else None
+    start = (
+        max((i for i, raw in enumerate(lines) if _SUMMARY_HEADER.match(raw.strip())), default=None)
+        if summary_ids
+        else None
+    )
     keep: list[str] = []
     summary: list[str] = []
     for i, raw in enumerate(lines):
@@ -708,20 +726,29 @@ def _step_def(module: str, d: ast.expr) -> _StepDef | None:
         arg = arg.args[0]
     if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
         return None
-    target = next((k.value.value for k in d.keywords if k.arg == "target_fixture"
-                   and isinstance(k.value, ast.Constant) and isinstance(k.value.value, str)),
-                  None)
-    return _StepDef(module, kind, arg.value, literal and "{" not in arg.value, target,
-                    d.lineno, parser)
+    target = next(
+        (
+            k.value.value
+            for k in d.keywords
+            if k.arg == "target_fixture"
+            and isinstance(k.value, ast.Constant)
+            and isinstance(k.value.value, str)
+        ),
+        None,
+    )
+    return _StepDef(
+        module, kind, arg.value, literal and "{" not in arg.value, target, d.lineno, parser
+    )
 
 
 def _required_params(node: ast.FunctionDef | ast.AsyncFunctionDef) -> tuple[str, ...]:
     a = node.args
     positional = [*a.posonlyargs, *a.args]
-    required = positional[:len(positional) - len(a.defaults)]
-    return (*(p.arg for p in required),
-            *(p.arg for p, dflt in zip(a.kwonlyargs, a.kw_defaults, strict=True)
-              if dflt is None))
+    required = positional[: len(positional) - len(a.defaults)]
+    return (
+        *(p.arg for p in required),
+        *(p.arg for p, dflt in zip(a.kwonlyargs, a.kw_defaults, strict=True) if dflt is None),
+    )
 
 
 def _parse_module(root: Path, rel: str) -> ast.Module | None:
@@ -736,10 +763,17 @@ def _module_step_defs(rel: str, tree: ast.Module) -> list[_StepDef]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             params = _required_params(node)
-            reads = frozenset(n.id for b in node.body for n in ast.walk(b)
-                              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
-            out.extend(replace(s, function=node.name, params=params, reads=reads)
-                       for d in node.decorator_list if (s := _step_def(rel, d)))
+            reads = frozenset(
+                n.id
+                for b in node.body
+                for n in ast.walk(b)
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+            )
+            out.extend(
+                replace(s, function=node.name, params=params, reads=reads)
+                for d in node.decorator_list
+                if (s := _step_def(rel, d))
+            )
     return out
 
 
@@ -770,8 +804,9 @@ def _feature_steps(root: Path, features: Iterable[str]) -> set[str] | None:
     return out
 
 
-def _unset_target_note(name: str, defs: list[_StepDef], steps: set[str] | None,
-                       features: Sequence[str]) -> str | None:
+def _unset_target_note(
+    name: str, defs: list[_StepDef], steps: set[str] | None, features: Sequence[str]
+) -> str | None:
     """Why the step that names ``target_fixture=name`` never ran: a later definition
     with the same text replaces it, or no feature step line reads its text."""
     setters = [d for d in defs if d.target == name]
@@ -780,7 +815,7 @@ def _unset_target_note(name: str, defs: list[_StepDef], steps: set[str] | None,
         if same[-1] is not s:
             targets = ", ".join(f"`{d.target}`" if d.target else "none" for d in same)
             return (
-                f"step argument `{name}` is never set: `@{s.kind}(\"{s.text}\")` is defined "
+                f'step argument `{name}` is never set: `@{s.kind}("{s.text}")` is defined '
                 f"{len(same)} times ({s.module}; target_fixture {targets}) and pytest-bdd "
                 "runs only the LAST definition of a step text, so the step that sets "
                 f"`{name}` never runs — scenarios that share a step line share one step "
@@ -793,18 +828,31 @@ def _unset_target_note(name: str, defs: list[_StepDef], steps: set[str] | None,
         return None
     s = setters[0]
     close = get_close_matches(s.text, sorted(steps), n=1, cutoff=0.6)
-    shared = next((d.target for d in reversed(defs) if close and d.kind == s.kind
-                   and d.text == close[0] and d.module == s.module and d.target), None)
+    shared = next(
+        (
+            d.target
+            for d in reversed(defs)
+            if close
+            and d.kind == s.kind
+            and d.text == close[0]
+            and d.module == s.module
+            and d.target
+        ),
+        None,
+    )
     return (
-        f"step argument `{name}` is never set: only `@{s.kind}(\"{s.text}\")` in "
-        f"{s.module} sets it (target_fixture=\"{name}\"), and no step line in "
-        f"{', '.join(features)} reads \"{s.text}\", so that step definition never runs — "
+        f'step argument `{name}` is never set: only `@{s.kind}("{s.text}")` in '
+        f'{s.module} sets it (target_fixture="{name}"), and no step line in '
+        f'{", ".join(features)} reads "{s.text}", so that step definition never runs — '
         "a step definition's text must equal the feature's step line exactly (the "
         ".feature file is gate-owned: change the step definition, never the feature)"
-        + (f"; the nearest step line is \"{close[0]}\"" if close else "")
-        + (f", whose step definition sets `{shared}`: scenarios that share a step line "
-           f"share its one step definition, so take `{shared}` as the parameter instead"
-           if shared else "")
+        + (f'; the nearest step line is "{close[0]}"' if close else "")
+        + (
+            f", whose step definition sets `{shared}`: scenarios that share a step line "
+            f"share its one step definition, so take `{shared}` as the parameter instead"
+            if shared
+            else ""
+        )
     )
 
 
@@ -824,11 +872,12 @@ def step_argument_hints(
         defs = _step_defs(root, binding_modules(root, set(feats)))
         steps = _feature_steps(root, feats)
     return tuple(
-        _unset_target_note(name, defs, steps, feats) or (
+        _unset_target_note(name, defs, steps, feats)
+        or (
             f"step argument `{name}` is not provided (fixture '{name}' not found): "
             "pytest-bdd fills a step function's parameter only from the step text via "
-            f"`parsers.parse(\"... {{{name}}} ...\")`, from `target_fixture=\"{name}\"` on "
-            f"an earlier step (`@given(\"...\", target_fixture=\"{name}\")` whose function "
+            f'`parsers.parse("... {{{name}}} ...")`, from `target_fixture="{name}"` on '
+            f'an earlier step (`@given("...", target_fixture="{name}")` whose function '
             f"returns the value), or from a pytest fixture named `{name}`; a step's plain "
             "`return` passes nothing on"
         )
@@ -858,26 +907,47 @@ def _duplicate_notes(defs: Iterable[_StepDef]) -> tuple[str, ...]:
     for d in defs:
         groups.setdefault((d.module, d.kind, d.text), []).append(d)
     out = [
-        f"`@{kind}(\"{text}\")` is defined {len(same)} times in {module} (lines "
+        f'`@{kind}("{text}")` is defined {len(same)} times in {module} (lines '
         f"{', '.join(str(d.line) for d in same)}): pytest-bdd runs only the LAST "
         "definition of a step text, for every scenario whose step line reads it, so "
         "the earlier ones never run and a scenario written against one of them gets "
         "the last one's behaviour (an attribute it never set, an exception it does "
         "not catch) — define each step text once, in a form right for every scenario "
         "that uses the line"
-        for (module, kind, text), same in groups.items() if len(same) > 1
+        for (module, kind, text), same in groups.items()
+        if len(same) > 1
     ]
     return tuple(out[:_DUPLICATE_NOTES_MAX])
 
 
 # Fixtures pytest (and pytest-bdd) provide without a definition in the project.
-_BUILTIN_FIXTURES = frozenset({
-    "request", "pytestconfig", "cache", "capsys", "capsysbinary", "capfd", "capfdbinary",
-    "caplog", "monkeypatch", "recwarn", "tmp_path", "tmp_path_factory", "tmpdir",
-    "tmpdir_factory", "record_property", "record_xml_attribute",
-    "record_testsuite_property", "doctest_namespace", "pytester", "testdir",
-    "datatable", "docstring", "mocker",
-})
+_BUILTIN_FIXTURES = frozenset(
+    {
+        "request",
+        "pytestconfig",
+        "cache",
+        "capsys",
+        "capsysbinary",
+        "capfd",
+        "capfdbinary",
+        "caplog",
+        "monkeypatch",
+        "recwarn",
+        "tmp_path",
+        "tmp_path_factory",
+        "tmpdir",
+        "tmpdir_factory",
+        "record_property",
+        "record_xml_attribute",
+        "record_testsuite_property",
+        "doctest_namespace",
+        "pytester",
+        "testdir",
+        "datatable",
+        "docstring",
+        "mocker",
+    }
+)
 _FEATURE_NAME = re.compile(r"[\w.-]+\.feature\b")
 
 
@@ -902,12 +972,24 @@ def _fixture_names(tree: ast.Module) -> tuple[set[str], bool]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for d in node.decorator_list:
                 call = d.func if isinstance(d, ast.Call) else d
-                if (call.id if isinstance(call, ast.Name)
-                        else call.attr if isinstance(call, ast.Attribute) else "") != "fixture":
+                if (
+                    call.id
+                    if isinstance(call, ast.Name)
+                    else call.attr
+                    if isinstance(call, ast.Attribute)
+                    else ""
+                ) != "fixture":
                     continue
-                alias = next((k.value.value for k in getattr(d, "keywords", ())
-                              if k.arg == "name" and isinstance(k.value, ast.Constant)
-                              and isinstance(k.value.value, str)), None)
+                alias = next(
+                    (
+                        k.value.value
+                        for k in getattr(d, "keywords", ())
+                        if k.arg == "name"
+                        and isinstance(k.value, ast.Constant)
+                        and isinstance(k.value.value, str)
+                    ),
+                    None,
+                )
                 names.add(alias or node.name)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for a in node.names:
@@ -931,12 +1013,12 @@ def _unmatched_notes(defs: Iterable[_StepDef], features: Mapping[str, str]) -> l
             continue
         close = get_close_matches(d.text, sorted(candidates), n=1, cutoff=0.6)
         out.append(
-            f"`@{d.kind}(\"{d.text}\")` ({d.module}:{d.line}) matches no {d.kind.title()} "
+            f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}) matches no {d.kind.title()} '
             f"step line of {', '.join(features)}, so it never runs — a step definition's "
             "text must equal the feature's step line exactly (a `parsers.parse` field "
             "stands for the varying part; the .feature file is gate-owned: change the "
             "step definition, never the feature)"
-            + (f"; the nearest {d.kind.title()} line is \"{close[0]}\"" if close else "")
+            + (f'; the nearest {d.kind.title()} line is "{close[0]}"' if close else "")
         )
     return out
 
@@ -944,8 +1026,7 @@ def _unmatched_notes(defs: Iterable[_StepDef], features: Mapping[str, str]) -> l
 _PLACEHOLDER = re.compile(r"<[^<>]+>")
 
 
-def _literal_placeholder_notes(defs: Iterable[_StepDef],
-                               features: Mapping[str, str]) -> list[str]:
+def _literal_placeholder_notes(defs: Iterable[_StepDef], features: Mapping[str, str]) -> list[str]:
     """A step function that reads a field captured from a plain Scenario's
     ``<name>``: no Examples row fills it, so the step gets the literal text (the
     local notes run: ``PUT /notes/<id>`` hit no note, and three fix passes chased
@@ -966,11 +1047,11 @@ def _literal_placeholder_notes(defs: Iterable[_StepDef],
             hit = {k: v for k, v in got.items() if k in d.reads and _PLACEHOLDER.search(v)}
             if not hit:
                 continue
-            args = ", ".join(f"`{k}` = \"{v}\"" for k, v in hit.items())
+            args = ", ".join(f'`{k}` = "{v}"' for k, v in hit.items())
             out.append(
-                f"`@{d.kind}(\"{d.text}\")` ({d.module}:{d.line}) reads {args}: {ref} "
+                f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}) reads {args}: {ref} '
                 f"is a plain Scenario (no Examples table), so `<...>` in its step line "
-                f"\"{line}\" is literal text that pytest-bdd passes as is, never a value "
+                f'"{line}" is literal text that pytest-bdd passes as is, never a value '
                 "it fills — a URL or query built from it names no real record. Use the "
                 "value an earlier step of the scenario created instead (the id of the "
                 "record its Given step saved, kept in context or a target_fixture), and "
@@ -984,17 +1065,20 @@ def _unprovided_notes(defs: Sequence[_StepDef], provided: set[str]) -> list[str]
     targets = {d.target for d in defs if d.target}
     out: list[str] = []
     for d in defs:
-        own = set(parse_fields(d.text)) if d.parser in ("parse", "cfparse") else (
-            set(re.findall(r"\(\?P<(\w+)>", d.text)) if d.parser == "re" else set())
+        own = (
+            set(parse_fields(d.text))
+            if d.parser in ("parse", "cfparse")
+            else (set(re.findall(r"\(\?P<(\w+)>", d.text)) if d.parser == "re" else set())
+        )
         if d.parser not in ("", "parse", "cfparse", "re"):
             continue
         for p in d.params:
             if p in own or p in targets or p in provided or p in _BUILTIN_FIXTURES:
                 continue
             out.append(
-                f"step argument `{p}` of {d.function} (`@{d.kind}(\"{d.text}\")`, "
+                f'step argument `{p}` of {d.function} (`@{d.kind}("{d.text}")`, '
                 f"{d.module}:{d.line}) is provided by nothing: it is not a `{{{p}}}` field "
-                "of the step text, no step sets `target_fixture=\"" + p + "\"`, and no "
+                'of the step text, no step sets `target_fixture="' + p + '"`, and no '
                 f"fixture named `{p}` exists — pytest-bdd fails every scenario that runs "
                 "this step; a step's plain `return` passes nothing on"
             )
@@ -1014,7 +1098,10 @@ def _conftest_fixtures(root: Path) -> tuple[set[str], list[_StepDef]]:
 
 
 def step_module_notes(
-    workdir: Path, module: str, *, params: bool = True,
+    workdir: Path,
+    module: str,
+    *,
+    params: bool = True,
     conftest: tuple[set[str], list[_StepDef]] | None = None,
 ) -> tuple[str, ...]:
     """Static (AST-only, nothing runs) findings on one pytest-bdd step module under
@@ -1032,14 +1119,18 @@ def step_module_notes(
     except (OSError, UnicodeDecodeError):
         return ()
     defs = sorted(_module_step_defs(module, tree), key=lambda s: s.line)
-    out = [*_duplicate_notes(defs), *(_unmatched_notes(defs, features) if features else ()),
-           *_literal_placeholder_notes(defs, features)]
+    out = [
+        *_duplicate_notes(defs),
+        *(_unmatched_notes(defs, features) if features else ()),
+        *_literal_placeholder_notes(defs, features),
+    ]
     if params:
         fixtures, star = _fixture_names(tree)
         names, shared = conftest if conftest is not None else _conftest_fixtures(root)
         if not star:
             out += _unprovided_notes(
-                defs, fixtures | names | {d.target for d in shared if d.target})
+                defs, fixtures | names | {d.target for d in shared if d.target}
+            )
     return tuple(out)
 
 
@@ -1052,9 +1143,12 @@ def static_step_notes(
         return ()
     root = Path(workdir)
     shared = _conftest_fixtures(root) if params else None
-    out = [n for m in binding_modules(root, feats)
-           for n in step_module_notes(root, m, params=params, conftest=shared)]
-    return tuple(out[:_DUPLICATE_NOTES_MAX * 2])
+    out = [
+        n
+        for m in binding_modules(root, feats)
+        for n in step_module_notes(root, m, params=params, conftest=shared)
+    ]
+    return tuple(out[: _DUPLICATE_NOTES_MAX * 2])
 
 
 def parse_pytest_summary(stdout: str) -> dict[str, int]:
@@ -1105,9 +1199,7 @@ class TestGate:
         # them (a profile-pinned foreign harness can't run pytest-bdd).
         self.bdd_cmd = bdd_cmd or None
         self._runs_bdd = cmd is None and self.bdd_cmd is None
-        self.cmd = cmd or (
-            sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short"
-        )
+        self.cmd = cmd or (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short")
         self.min_passed = min_passed
         # The held-out-mutant + behavioral-invariance discriminator: a green
         # pytest run is NECESSARY but NOT SUFFICIENT — a vacuous/gamed-green
@@ -1129,8 +1221,11 @@ class TestGate:
         self.scope = scope
         # The command digest: a cached verdict never outlives a change of commands.
         self.scanner_rule_version = "test-harness-v3:" + commands_digest(
-            cmd=list(self.cmd), bdd_cmd=self.bdd_cmd, stack_harness=stack_harness,
-            profile=profile_name, scope=sorted(scope) if scope is not None else None,
+            cmd=list(self.cmd),
+            bdd_cmd=self.bdd_cmd,
+            stack_harness=stack_harness,
+            profile=profile_name,
+            scope=sorted(scope) if scope is not None else None,
         )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
@@ -1172,7 +1267,10 @@ class TestGate:
         if self._pyenv is not None:
             binds = (*binds, *self._pyenv.binds)
         return ground_untrusted(
-            cmd, workdir, extra_env=self._env(workdir, extra_env), binds=binds,
+            cmd,
+            workdir,
+            extra_env=self._env(workdir, extra_env),
+            binds=binds,
             timeout_s=self._timeout_s,
         )
 
@@ -1213,7 +1311,7 @@ class TestGate:
             from .profiles import bdd_runner_hint
 
             hint = bdd_runner_hint(self.profile_name.removeprefix("stack:")) or (
-                "e.g. cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\""
+                'e.g. cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
             )
             rc, out, err = run
             notes = [
@@ -1228,7 +1326,7 @@ class TestGate:
                     f"the bdd command wrote its report to {', '.join(literal)} — a path "
                     f"literally named after ${_BDD_REPORT_ENV}: the variable was not "
                     "expanded, most likely because it sits in single quotes; quote it "
-                    f"with double quotes (\"${_BDD_REPORT_ENV}\") so the shell expands it"
+                    f'with double quotes ("${_BDD_REPORT_ENV}") so the shell expands it'
                 )
             return {ref: "missing" for ref in sorted(trusted)}, tuple(notes)
         return cucumber.scenario_outcomes(envelopes, trusted, workdir)
@@ -1268,8 +1366,15 @@ class TestGate:
             # Only the step modules that bind a scoped feature file run, and one
             # module that fails to import does not hide the others' scenarios.
             targets = binding_modules(workdir, {r.split("::", 1)[0] for r in trusted})
-            cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BDD_BOOTSTRAP, "-q", "--tb=short",
-                   "--continue-on-collection-errors", *targets)
+            cmd = (
+                sys.executable,
+                "-c",
+                _ISOLATED_PYTEST_BDD_BOOTSTRAP,
+                "-q",
+                "--tb=short",
+                "--continue-on-collection-errors",
+                *targets,
+            )
             if targets:
                 rc, out, err, executed = self._ground_bdd(workdir, cmd, trusted)
             else:
@@ -1291,13 +1396,17 @@ class TestGate:
             from .pydeps import undeclared_import_hints
 
             bound = {r.split("::", 1)[0] for r in trusted}
-            findings = (*undeclared_import_hints(out + err, workdir),
-                        *shared_state_hints(out, workdir),
-                        *(step_argument_hints(out, workdir, bound)
-                          if trusted and not self.bdd_cmd else ()),
-                        *(static_step_notes(workdir, bound, params=False)
-                          if trusted and not self.bdd_cmd else ()),
-                        *failure_findings(out))
+            findings = (
+                *undeclared_import_hints(out + err, workdir),
+                *shared_state_hints(out, workdir),
+                *(step_argument_hints(out, workdir, bound) if trusted and not self.bdd_cmd else ()),
+                *(
+                    static_step_notes(workdir, bound, params=False)
+                    if trusted and not self.bdd_cmd
+                    else ()
+                ),
+                *failure_findings(out),
+            )
             why = None if self.stack_harness else _PYTEST_EXIT_WHY.get(rc)
             if why is not None and rc == _NO_TESTS_COLLECTED and trusted:
                 why += " and binding the feature files with pytest-bdd `scenarios(...)`"
@@ -1318,7 +1427,8 @@ class TestGate:
         # rides the sealed observation; zone B decides over it.
         if self._discriminator is not None and rc == 0:
             report = self._discriminator.evaluate(
-                workdir, site=self._pyenv.site if self._pyenv is not None else None,
+                workdir,
+                site=self._pyenv.site if self._pyenv is not None else None,
                 binds=self._pyenv.binds if self._pyenv is not None else (),
             )
             structured[DISCRIMINATOR_KEY] = report.model_dump(mode="json")
@@ -1330,8 +1440,9 @@ class TestGate:
             structured[BDD_KEY] = scenarios
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
-            bdd_failures = (failure_findings(bdd_out, limit=20, summary_ids=False)
-                            if bdd_rc != 0 else ())
+            bdd_failures = (
+                failure_findings(bdd_out, limit=20, summary_ids=False) if bdd_rc != 0 else ()
+            )
             rejected = any(n.startswith("BDD report rejected") for n in notes)
             if bdd_rc != 0 and not bdd_failures and not rejected:
                 # Not pytest-shaped output: the runner's own last words are the why
@@ -1359,10 +1470,13 @@ class TestGate:
             scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
             structured[BDD_KEY] = scenarios
             missing = [ref for ref, o in scenarios.items() if o == "missing"]
-            findings = (*shadowed_scenario_notes(workdir, missing),
-                        *bdd_findings(scenarios, why_ref=uncollected_binding_reasons(
-                            out, workdir, missing)),
-                        *findings)
+            findings = (
+                *shadowed_scenario_notes(workdir, missing),
+                *bdd_findings(
+                    scenarios, why_ref=uncollected_binding_reasons(out, workdir, missing)
+                ),
+                *findings,
+            )
             note = conftest_binding_note(workdir) if missing else None
             if note:
                 findings = (note, *findings)
@@ -1394,8 +1508,11 @@ class TestGate:
             # A per-wave check: the scoped scenarios alone decide (the rest of the
             # suite may need tickets not built yet; the final gate runs it all).
             scoped = obs.structured.get(BDD_KEY) or {}
-            return (GateStatus.PASS if scoped and all(v == "passed" for v in scoped.values())
-                    else GateStatus.FAIL)
+            return (
+                GateStatus.PASS
+                if scoped and all(v == "passed" for v in scoped.values())
+                else GateStatus.FAIL
+            )
         if self.stack_harness:
             if rc in MISSING_BINARY_EXIT_CODES:
                 return GateStatus.ERROR  # missing toolchain: infra, never latched

@@ -39,12 +39,16 @@ def _version(path: str) -> str:
     try:
         proc = subprocess.run(
             (path, *_VERSION_ARGS.get(name, ("--version",))),
-            capture_output=True, text=True, timeout=_VERSION_TIMEOUT_S, check=False,
+            capture_output=True,
+            text=True,
+            timeout=_VERSION_TIMEOUT_S,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
     lines = [
-        ln.strip() for ln in (proc.stdout.strip() or proc.stderr.strip()).splitlines()
+        ln.strip()
+        for ln in (proc.stdout.strip() or proc.stderr.strip()).splitlines()
         # The JVM prints JAVA_TOOL_OPTIONS ahead of its version.
         if ln.strip() and not ln.startswith("Picked up ")
     ]
@@ -64,15 +68,21 @@ def detect_toolchains(
         found = [next(((b, p) for b in group if (p := find(b))), None) for group in groups]
         hits = [h for h in found if h is not None]
         if len(hits) == len(groups):
-            out.append(Toolchain(
-                language=language,
-                binaries=tuple(b for b, _ in hits),
-                version=version(hits[0][1]),
-            ))
+            out.append(
+                Toolchain(
+                    language=language,
+                    binaries=tuple(b for b, _ in hits),
+                    version=version(hits[0][1]),
+                )
+            )
         elif language == "python" and which is None:
-            out.append(Toolchain(
-                language="python", binaries=("python3",), version=sys.version.split()[0],
-            ))
+            out.append(
+                Toolchain(
+                    language="python",
+                    binaries=("python3",),
+                    version=sys.version.split()[0],
+                )
+            )
     return tuple(out)
 
 

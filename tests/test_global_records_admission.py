@@ -13,8 +13,8 @@ NONCE = "nonce-xyz"
 
 def test_consume_nonce_semantics() -> None:
     records = GlobalRecords()
-    assert records.consume_nonce(NONCE, "verdict-A") is True   # first consume
-    assert records.consume_nonce(NONCE, "verdict-A") is True   # same identity: idempotent
+    assert records.consume_nonce(NONCE, "verdict-A") is True  # first consume
+    assert records.consume_nonce(NONCE, "verdict-A") is True  # same identity: idempotent
     assert records.consume_nonce(NONCE, "verdict-B") is False  # different identity: replay
 
 
@@ -29,6 +29,6 @@ def test_consume_nonce_is_atomic_across_shared_connections(tmp_path) -> None:
     # Two builds race to consume the SAME nonce with DIFFERENT verdict identities.
     ra = a.consume_nonce(NONCE, "verdict-A")
     rb = b.consume_nonce(NONCE, "verdict-B")
-    assert [ra, rb] == [True, False]                            # exactly one winner
+    assert [ra, rb] == [True, False]  # exactly one winner
     # The losing identity can never later "win" the consumed nonce.
     assert b.consume_nonce(NONCE, "verdict-B") is False

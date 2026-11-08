@@ -48,8 +48,13 @@ def env(tmp_path, monkeypatch):
     srv.shutdown()
 
 
-def _raw(env: Any, method: str, path: str, body: bytes | None = None,
-         headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], bytes]:
+def _raw(
+    env: Any,
+    method: str,
+    path: str,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, dict[str, str], bytes]:
     conn = http.client.HTTPConnection("127.0.0.1", env.port, timeout=60)
     conn.request(method, path, body=body, headers=headers or {})
     resp = conn.getresponse()
@@ -91,6 +96,7 @@ def _failing_gates(monkeypatch) -> None:
 
 # --- request bodies ----------------------------------------------------------- #
 
+
 def _body(raw: bytes, length: str | None = None) -> dict[str, Any]:
     headers = {"Content-Length": str(len(raw)) if length is None else length}
     return insight.read_json_body(headers, io.BytesIO(raw), limit=64)
@@ -115,25 +121,29 @@ def test_read_json_body_caps_size_and_names_bad_json() -> None:
 
 
 def test_post_routes_answer_bad_bodies_with_a_real_error(env, monkeypatch):
-    code, _, raw = _raw(env, "POST", "/api/projects", b'{"request": "x",',
-                        {"Content-Type": "application/json"})
+    code, _, raw = _raw(
+        env, "POST", "/api/projects", b'{"request": "x",', {"Content-Type": "application/json"}
+    )
     assert code == 400 and "invalid JSON" in json.loads(raw)["error"]
     monkeypatch.setattr(insight, "MAX_BODY_BYTES", 100)
-    code, _, raw = _raw(env, "POST", "/api/projects", b"{" + b" " * 200 + b"}",
-                        {"Content-Type": "application/json"})
+    code, _, raw = _raw(
+        env, "POST", "/api/projects", b"{" + b" " * 200 + b"}", {"Content-Type": "application/json"}
+    )
     assert code == 413 and "too large" in json.loads(raw)["error"]
     assert server._PROJECTS == {}
 
 
 # --- the live meter ------------------------------------------------------------ #
 
+
 def test_meter_watch_reads_the_ledger_and_emits_on_change(tmp_path) -> None:
     ledger = insight.ledger_path(tmp_path, "run-1")
     ledger.parent.mkdir(parents=True)
     ledger.write_text(json.dumps({"used": 100, "elapsed_s": 30.0}))
     got: list[dict[str, Any]] = []
-    watch = insight.MeterWatch(tmp_path, "run-1", got.append, caps=lambda: (1000, None),
-                               interval=0.02, min_gap=0)
+    watch = insight.MeterWatch(
+        tmp_path, "run-1", got.append, caps=lambda: (1000, None), interval=0.02, min_gap=0
+    )
     watch.start()
     assert got[0]["type"] == "meter" and got[0]["used"] == 100 and got[0]["cap"] == 1000
     assert got[0]["elapsed_s"] >= 30.0
@@ -145,7 +155,7 @@ def test_meter_watch_reads_the_ledger_and_emits_on_change(tmp_path) -> None:
     assert got[1]["used"] == 250 and final["used"] == 250
     n = len(got)
     time.sleep(0.1)
-    assert len(got) == n                       # stopped: nothing after the final reading
+    assert len(got) == n  # stopped: nothing after the final reading
 
 
 def test_a_build_streams_meter_events_and_done_carries_the_total(env):
@@ -164,11 +174,12 @@ def test_a_build_streams_meter_events_and_done_carries_the_total(env):
 
 # --- the build queue ------------------------------------------------------------ #
 
+
 def test_queued_floors_get_fifo_positions_and_start_in_order(env, monkeypatch):
     gate = threading.BoundedSemaphore(1)
     monkeypatch.setattr(server, "_BUILD_GATE", gate)
     monkeypatch.setattr(server, "_MAX_CONCURRENT_BUILDS", 1)
-    gate.acquire()                              # every slot busy
+    gate.acquire()  # every slot busy
     a = _new(env)
     b = _new(env)
     deadline = time.monotonic() + 10
@@ -183,8 +194,9 @@ def test_queued_floors_get_fifo_positions_and_start_in_order(env, monkeypatch):
     qa = [e["position"] for e in a.log if e["type"] == "queue"]
     qb = [e["position"] for e in b.log if e["type"] == "queue"]
     assert qa == [1, 0] and qb[0] == 2 and 1 in qb and qb[-1] == 0
-    first_meter = {q.id: next(i for i, e in enumerate(q.log) if e["type"] == "meter")
-                   for q in (a, b)}
+    first_meter = {
+        q.id: next(i for i, e in enumerate(q.log) if e["type"] == "meter") for q in (a, b)
+    }
     assert first_meter[a.id] > 0 and a.passed and b.passed
     assert insight.QUEUE.head() is None
 
@@ -212,10 +224,19 @@ def test_a_floor_stopped_while_queued_leaves_the_line(env, monkeypatch):
 
 # --- the halt panel ------------------------------------------------------------- #
 
+
 def _report(**kw: Any) -> dict[str, Any]:
-    base: dict[str, Any] = {"phase": "halted", "reason": "", "token_cap": None,
-                            "max_fix_attempts": 3, "resumable": True, "state": None,
-                            "gates": {}, "meter": None, "draft_files": 0}
+    base: dict[str, Any] = {
+        "phase": "halted",
+        "reason": "",
+        "token_cap": None,
+        "max_fix_attempts": 3,
+        "resumable": True,
+        "state": None,
+        "gates": {},
+        "meter": None,
+        "draft_files": 0,
+    }
     return insight.halt_report(**{**base, **kw})
 
 
@@ -224,8 +245,9 @@ def _kinds(r: dict[str, Any]) -> list[str]:
 
 
 def test_halt_report_says_what_to_do_for_each_phase() -> None:
-    tok = _report(phase="token_cap", token_cap=50_000,
-                  meter={"used": 51_234, "cap": 50_000, "elapsed_s": 12})
+    tok = _report(
+        phase="token_cap", token_cap=50_000, meter={"used": 51_234, "cap": 50_000, "elapsed_s": 12}
+    )
     assert tok["title"] == "Out of tokens" and "51,234 of its 50,000-token cap" in tok["cause"]
     raise_cap = tok["actions"][0]
     assert raise_cap["kind"] == "resume" and raise_cap["body"]["token_cap"] >= 100_000
@@ -234,12 +256,14 @@ def test_halt_report_says_what_to_do_for_each_phase() -> None:
 
     for phase in ("stopped", "paused"):
         r = _report(phase=phase)
-        assert r["actions"][0] == {"kind": "resume", "label": "Resume", "body": {},
-                                   "primary": True}
+        assert r["actions"][0] == {"kind": "resume", "label": "Resume", "body": {}, "primary": True}
         assert phase in r["cause"]
 
-    err = _report(phase="error", reason="Traceback (most recent call last):\n"
-                  "  File x\nValueError: the planner returned nothing")
+    err = _report(
+        phase="error",
+        reason="Traceback (most recent call last):\n"
+        "  File x\nValueError: the planner returned nothing",
+    )
     assert "Traceback" not in err["cause"] and "File x" in err["cause"]
     assert err["detail"].startswith("Traceback")
 
@@ -248,11 +272,12 @@ def test_halt_report_says_what_to_do_for_each_phase() -> None:
 
     timed = _report(phase="time_cap", meter={"used": 1, "cap": None, "elapsed_s": 3600})
     assert "1h 00m" in timed["cause"] and _kinds(timed) == ["resume", "resume", "retry"]
-    assert timed["actions"][0]["body"] == {"time_cap_minutes": 120}   # past the 60 spent
+    assert timed["actions"][0]["body"] == {"time_cap_minutes": 120}  # past the 60 spent
     assert "120 minutes" in timed["actions"][0]["label"]
     assert timed["actions"][1]["body"] == {"time_cap_minutes": 0}
-    capped = _report(phase="time_cap", time_cap_s=1800,
-                     meter={"used": 1, "cap": None, "elapsed_s": 1800})
+    capped = _report(
+        phase="time_cap", time_cap_s=1800, meter={"used": 1, "cap": None, "elapsed_s": 1800}
+    )
     assert capped["actions"][0]["body"] == {"time_cap_minutes": 60}
 
     stuck = _report(max_fix_attempts=20, draft_files=3)
@@ -270,15 +295,20 @@ def test_halt_report_reads_failing_gates_findings_and_fix_notes_from_state() -> 
     state = {
         "gates": [
             gate(name="test", status="GateStatus.FAIL", seq=seq(1), findings=("old",)),
-            gate(name="test", status="GateStatus.ERROR", seq=seq(5),
-                 findings=tuple(f"E{i}: " + "x" * 900 for i in range(9))),
+            gate(
+                name="test",
+                status="GateStatus.ERROR",
+                seq=seq(5),
+                findings=tuple(f"E{i}: " + "x" * 900 for i in range(9)),
+            ),
             gate(name="build", status="GateStatus.PASS", seq=seq(4), findings=()),
         ],
         "gate_triage": [
             gate(name="spec", produced_by="planner", explanation="advisory", seq=seq(1)),
             gate(name="test", produced_by="fixer", explanation="fixed the import", seq=seq(6)),
-            gate(name="ticket-failed", produced_by="tickets", explanation="T-002 failed",
-                 seq=seq(3)),
+            gate(
+                name="ticket-failed", produced_by="tickets", explanation="T-002 failed", seq=seq(3)
+            ),
         ],
         "budget": SimpleNamespace(fix_attempts_total=3),
     }
@@ -340,6 +370,7 @@ def test_insight_route_404s_and_a_running_floor_has_no_report(env, monkeypatch):
 
 # --- the run card --------------------------------------------------------------- #
 
+
 def test_a_shipped_floor_gets_run_instructions_from_its_manifest(env):
     p = _new(env)
     _wait_ended(p)
@@ -370,14 +401,23 @@ def test_run_card_falls_back_to_the_state_stack_and_reads_tickets() -> None:
         {"type": "task", "phase": "done", "ticket_id": "T-001"},
         {"type": "task", "phase": "failed", "ticket_id": "T-002"},
     ]
-    stack = SimpleNamespace(model_dump=lambda: {"language": "go", "test": "go test ./...",
-                                                "run": "", "install": "go mod download"})
-    card = insight.run_card(manifest=None, stack=stack,
-                            tickets=insight.tickets_from_log(log), meter=None)
+    stack = SimpleNamespace(
+        model_dump=lambda: {
+            "language": "go",
+            "test": "go test ./...",
+            "run": "",
+            "install": "go mod download",
+        }
+    )
+    card = insight.run_card(
+        manifest=None, stack=stack, tickets=insight.tickets_from_log(log), meter=None
+    )
     assert card["source"] == "state" and card["stack"] == "go"
     assert [s["label"] for s in card["steps"]] == ["Install", "Test"]
     assert [(t["id"], t["status"]) for t in card["tickets"]] == [
-        ("T-001", "done"), ("T-002", "failed")]
+        ("T-001", "done"),
+        ("T-002", "failed"),
+    ]
     assert insight.find_manifest([None], "x") is None
 
 
@@ -388,6 +428,7 @@ def test_find_manifest_ignores_another_runs_manifest(tmp_path) -> None:
 
 
 # --- the file viewer + the halt reason ------------------------------------------- #
+
 
 def test_a_file_over_the_view_cap_says_it_was_truncated(env, monkeypatch):
     p = _new(env)
@@ -402,12 +443,20 @@ def test_a_file_over_the_view_cap_says_it_was_truncated(env, monkeypatch):
 
 
 def test_halt_event_names_the_failing_gates() -> None:
-    evs = events_for_result({"passed": False, "phase": "halted",
-                             "gate_statuses": {"build": "GateStatus.PASS",
-                                               "test": "GateStatus.FAIL",
-                                               "smoke": "GateStatus.ERROR"}})
+    evs = events_for_result(
+        {
+            "passed": False,
+            "phase": "halted",
+            "gate_statuses": {
+                "build": "GateStatus.PASS",
+                "test": "GateStatus.FAIL",
+                "smoke": "GateStatus.ERROR",
+            },
+        }
+    )
     halt = next(e for e in evs if e["type"] == "halt")
     assert halt["reason"].startswith("the SMOKE, TEST gates did not PASS")
-    lone = next(e for e in events_for_result({"passed": False, "gate_statuses": {}})
-                if e["type"] == "halt")
+    lone = next(
+        e for e in events_for_result({"passed": False, "gate_statuses": {}}) if e["type"] == "halt"
+    )
     assert lone["reason"].startswith("a gate did not PASS")

@@ -38,12 +38,13 @@ def _project(**kw):
 
 # --- the durable event log --------------------------------------------------- #
 
+
 def test_store_event_log_roundtrip_and_idempotent(tmp_path):
     s = BuildStore(tmp_path / "db.sqlite")
     s.append_event("p1", 0, {"type": "stage", "room": "product"})
     s.append_event("p1", 1, {"type": "gate", "name": "spec"})
-    s.append_event("p2", 0, {"type": "stage"})           # a different build
-    s.append_event("p1", 1, {"type": "DIFFERENT"})        # replay of seq 1 — ignored
+    s.append_event("p2", 0, {"type": "stage"})  # a different build
+    s.append_event("p1", 1, {"type": "DIFFERENT"})  # replay of seq 1 — ignored
     log = s.events_of("p1")
     assert [e["type"] for e in log] == ["stage", "gate"]  # order + idempotency held
     assert s.events_of("p2") == [{"type": "stage"}]
@@ -54,7 +55,7 @@ def test_emit_appends_to_log_persists_and_marks_end(store):
     _emit(p, type="stage", room="product")
     _emit(p, type="gate", name="spec", status="pass")
     assert [e["type"] for e in p.log] == ["stage", "gate"]
-    assert p.gates["spec"]["status"] == "pass"            # HUD pill captured
+    assert p.gates["spec"]["status"] == "pass"  # HUD pill captured
     assert not p.ended
     _close(p)
     assert p.ended and p.log[-1]["type"] == "_end"
@@ -66,45 +67,55 @@ def test_emit_appends_to_log_persists_and_marks_end(store):
 
 
 def test_resume_cursor_from_last_event_id():
-    assert _resume_cursor(None) == 0                      # fresh viewer → full replay
+    assert _resume_cursor(None) == 0  # fresh viewer → full replay
     assert _resume_cursor("") == 0
-    assert _resume_cursor("2") == 3                       # reconnect → next event
-    assert _resume_cursor("not-a-number") == 0           # malformed → safe replay
+    assert _resume_cursor("2") == 3  # reconnect → next event
+    assert _resume_cursor("not-a-number") == 0  # malformed → safe replay
 
 
 # --- survive restart: replay history + honestly close interrupted builds ----- #
+
 
 def test_load_persisted_replays_finished_build(store, monkeypatch):
     # A finished build whose log was persisted (…, _end) before a restart.
     for i, ev in enumerate([{"type": "stage"}, {"type": "release"}, {"type": "_end"}]):
         store.append_event("done1", i, ev)
-    store.upsert({"id": "done1", "floor": 1, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "status": "done", "passed": True})
+    store.upsert(
+        {
+            "id": "done1",
+            "floor": 1,
+            "release_seq": 1,
+            "request": "r",
+            "mode": "assistant",
+            "status": "done",
+            "passed": True,
+        }
+    )
     monkeypatch.setattr(server, "_PROJECTS", {})
     server._load_persisted()
     p = server._PROJECTS["done1"]
     assert [e["type"] for e in p.log] == ["stage", "release", "_end"]
-    assert p.ended                      # a late viewer replays then ends at once
+    assert p.ended  # a late viewer replays then ends at once
 
 
 def test_finished_log_trimmed_but_store_keeps_full_history(store, monkeypatch):
     # A long-lived server trims finished builds' in-memory logs (RAM), but the FULL
     # history stays durable so a late viewer still replays the whole story.
     monkeypatch.setattr(server, "_LOG_TAIL", 2)
-    monkeypatch.setattr(server, "_LOG_GRACE_S", 0)     # eligible as soon as it ends
+    monkeypatch.setattr(server, "_LOG_GRACE_S", 0)  # eligible as soon as it ends
     running = _project()
     done = Project(id="p2", request="r", mode="assistant", floor=2)
     monkeypatch.setattr(server, "_PROJECTS", {"p1": running, "p2": done})
     for i in range(6):
-        _emit(running, type="narrate", text=f"e{i}")     # still running
+        _emit(running, type="narrate", text=f"e{i}")  # still running
         _emit(done, type="narrate", text=f"d{i}")
-    _close(done)                                          # appends _end, stamps ended_at
+    _close(done)  # appends _end, stamps ended_at
 
     server._trim_finished_logs()
 
-    assert not running.log_trimmed and len(running.log) == 6   # in-flight: untouched
-    assert done.log_trimmed and len(done.log) == 2             # finished: trimmed to tail
-    full = store.events_of("p2")                               # full story still durable
+    assert not running.log_trimmed and len(running.log) == 6  # in-flight: untouched
+    assert done.log_trimmed and len(done.log) == 2  # finished: trimmed to tail
+    full = store.events_of("p2")  # full story still durable
     assert len(full) == 7 and full[-1]["type"] == "_end"
 
 
@@ -114,20 +125,20 @@ def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
     # real process environment is never clobbered by the file.
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text(
-        "CLAUDE_CODE_OAUTH_TOKEN=\n"             # preset placeholder (empty)
-        "CLAUDE_CODE_OAUTH_TOKEN=real-token\n"   # appended later → should win
+        "CLAUDE_CODE_OAUTH_TOKEN=\n"  # preset placeholder (empty)
+        "CLAUDE_CODE_OAUTH_TOKEN=real-token\n"  # appended later → should win
         "FOUNDRY_MODEL_BACKEND=claude-cli\n"
         "WORKSHOP_PORT=9999\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("FOUNDRY_MODEL_BACKEND", raising=False)
-    monkeypatch.setenv("WORKSHOP_PORT", "8080")   # real env must win over the file
+    monkeypatch.setenv("WORKSHOP_PORT", "8080")  # real env must win over the file
     assert server._load_env_file() is True
     try:
-        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-token"   # last line wins
+        assert os.environ["CLAUDE_CODE_OAUTH_TOKEN"] == "real-token"  # last line wins
         assert os.environ["FOUNDRY_MODEL_BACKEND"] == "claude-cli"
-        assert os.environ["WORKSHOP_PORT"] == "8080"                   # real env preserved
+        assert os.environ["WORKSHOP_PORT"] == "8080"  # real env preserved
     finally:
         # _load_env_file() writes straight into os.environ. monkeypatch.delenv(
         # raising=False) on an already-absent var records nothing to restore, so
@@ -141,7 +152,7 @@ def test_load_env_file_last_line_wins_and_real_env_wins(tmp_path, monkeypatch):
 def test_seen_uris_roundtrip(tmp_path):
     s = BuildStore(tmp_path / "db.sqlite")
     s.add_seen("p1", {"cas://a", "cas://b"})
-    s.add_seen("p1", {"cas://b", "cas://c"})        # overlap is idempotent
+    s.add_seen("p1", {"cas://b", "cas://c"})  # overlap is idempotent
     assert s.seen_of("p1") == {"cas://a", "cas://b", "cas://c"}
     assert s.seen_of("other") == set()
 
@@ -163,25 +174,33 @@ def test_interrupted_build_resumes_to_completion(store, monkeypatch, tmp_path):
 
     # Simulate a crash mid-build: a durable run leaves its checkpoint behind.
     run("build a tiny url shortener", thread_id=tid, state_dir=state_dir, mode="assistant")
-    assert server._has_durable_checkpoint(tid) is True       # the probe sees it
+    assert server._has_durable_checkpoint(tid) is True  # the probe sees it
 
     # Catalog it as it would have been mid-flight: status 'running', a little history.
     store.append_event(tid, 0, {"type": "stage", "room": "product"})
-    store.upsert({"id": tid, "floor": 1, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "status": "running",
-                  "passed": False})
+    store.upsert(
+        {
+            "id": tid,
+            "floor": 1,
+            "release_seq": 1,
+            "request": "r",
+            "mode": "assistant",
+            "status": "running",
+            "passed": False,
+        }
+    )
 
     monkeypatch.setattr(server, "_PROJECTS", {})
-    server._load_persisted()                                  # → spawns the resume thread
+    server._load_persisted()  # → spawns the resume thread
     p = server._PROJECTS[tid]
-    assert p.status == "running"                              # resuming, not closed
+    assert p.status == "running"  # resuming, not closed
 
     deadline = time.monotonic() + 60
     while not p.ended and time.monotonic() < deadline:
         time.sleep(0.2)
     assert p.ended, "resumed build did not finish in time"
     types = [e["type"] for e in p.log]
-    assert "done" in types and types[-1] == "_end"           # ran to completion
+    assert "done" in types and types[-1] == "_end"  # ran to completion
     assert p.status == "done"
 
 
@@ -190,14 +209,23 @@ def test_load_persisted_closes_interrupted_build(store, monkeypatch):
     # out honestly (history kept, terminal interrupted markers appended).
     for i, ev in enumerate([{"type": "stage"}, {"type": "gate", "name": "spec"}]):
         store.append_event("run1", i, ev)
-    store.upsert({"id": "run1", "floor": 2, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "status": "running", "passed": False})
+    store.upsert(
+        {
+            "id": "run1",
+            "floor": 2,
+            "release_seq": 1,
+            "request": "r",
+            "mode": "assistant",
+            "status": "running",
+            "passed": False,
+        }
+    )
     monkeypatch.setattr(server, "_PROJECTS", {})
     server._load_persisted()
     p = server._PROJECTS["run1"]
     types = [e["type"] for e in p.log]
-    assert types[:2] == ["stage", "gate"]               # original history preserved
-    assert types[-1] == "_end" and "halt" in types       # closed out cleanly
+    assert types[:2] == ["stage", "gate"]  # original history preserved
+    assert types[-1] == "_end" and "halt" in types  # closed out cleanly
     assert p.ended and p.status == "done"
     # Idempotent across a SECOND restart: it now ends in _end, so it isn't reopened.
     before = len(server._STORE.events_of("run1"))
@@ -212,8 +240,17 @@ def test_floor_paused_at_a_retired_checkpoint_is_closed_not_rerun(store, monkeyp
     log = [{"type": "stage"}, {"type": "await_decision", "checkpoint": 1}]
     for i, ev in enumerate(log):
         store.append_event("pz1", i, ev)
-    store.upsert({"id": "pz1", "floor": 3, "release_seq": 1, "request": "r",
-                  "mode": "assistant", "status": "running", "passed": False})
+    store.upsert(
+        {
+            "id": "pz1",
+            "floor": 3,
+            "release_seq": 1,
+            "request": "r",
+            "mode": "assistant",
+            "status": "running",
+            "passed": False,
+        }
+    )
     monkeypatch.setattr(server, "_PROJECTS", {})
     monkeypatch.setattr(server, "_has_durable_checkpoint", lambda _tid: True)
 
@@ -229,6 +266,7 @@ def test_floor_paused_at_a_retired_checkpoint_is_closed_not_rerun(store, monkeyp
 
 
 # --- what a long silence is waiting on --------------------------------------- #
+
 
 def test_waiting_on_names_the_longest_running_steps_first():
     # The quiet-watchdog used to report only that nothing had landed. It now names the
@@ -256,6 +294,7 @@ def test_waiting_on_names_the_longest_running_steps_first():
 
 # --- live activity from inside a step (throttling) ---------------------------- #
 
+
 def test_activity_is_throttled_deduped_and_capped_per_step():
     # Every reported line is an SSE frame to every connected device, and an agentic pass
     # can fire tool calls many times a second — so the stream is bounded, not raw.
@@ -278,18 +317,20 @@ def test_activity_is_throttled_deduped_and_capped_per_step():
         if server.take_activity(p2, f"editing file{i}.py", now=1000.0 + i * 10) is not None:
             accepted += 1
     assert accepted == server._ACT_MAX_PER_STEP
-    p2.act_count, p2.act_text, p2.act_last = 0, "", 0.0        # what a step start does
+    p2.act_count, p2.act_text, p2.act_last = 0, "", 0.0  # what a step start does
     assert server.take_activity(p2, "editing again.py", now=9000.0) is not None
 
 
 def test_parse_workers_defaults_clamps_and_ignores_junk():
     assert server.parse_workers(None) == {"frontend": 4, "backend": 4, "data": 4, "test": 4}
-    got = server.parse_workers({"frontend": "5", "backend": -3, "data": "x", "test": 99,
-                                "bogus": 7})
+    got = server.parse_workers(
+        {"frontend": "5", "backend": -3, "data": "x", "test": 99, "bogus": 7}
+    )
     assert got == {"frontend": 5, "backend": 1, "data": 4, "test": 16}
     assert server.parse_workers({"frontend": 0})["frontend"] == 1  # 0 would strand tickets
     assert server.parse_ticket_tiers({"trivial": "t3", "standard": "T9", "x": "T1"}) == {
-        "trivial": "T3"}
+        "trivial": "T3"
+    }
 
 
 def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_path):
@@ -299,9 +340,16 @@ def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_p
 
     def run(request, *, task_cb, workers, ticket_tiers, progress_cb=None, **kw):
         seen.update(workers=workers, ticket_tiers=ticket_tiers)
-        task_cb({"phase": "start", "ticket_id": "T-001", "title": "x",
-                 "specialty": "data", "tier": "T2"})
-        raise RuntimeError("stop here")       # ends the build through the error path
+        task_cb(
+            {
+                "phase": "start",
+                "ticket_id": "T-001",
+                "title": "x",
+                "specialty": "data",
+                "tier": "T2",
+            }
+        )
+        raise RuntimeError("stop here")  # ends the build through the error path
 
     monkeypatch.setattr(foundry.cli, "run", run)
     monkeypatch.setattr(server, "_OUTPUT_ROOT", tmp_path / "out")
@@ -309,8 +357,15 @@ def test_run_gets_ticket_kwargs_and_task_events_stream(store, monkeypatch, tmp_p
     server._run_factory(p)
     assert seen["workers"]["data"] == 5 and seen["ticket_tiers"] == {"trivial": "T3"}
     assert [e for e in p.log if e["type"] == "task"] == [
-        {"type": "task", "phase": "start", "ticket_id": "T-001", "title": "x",
-         "specialty": "data", "tier": "T2"}]
+        {
+            "type": "task",
+            "phase": "start",
+            "ticket_id": "T-001",
+            "title": "x",
+            "specialty": "data",
+            "tier": "T2",
+        }
+    ]
     proj = next(e for e in p.log if e["type"] == "project")
     assert proj["workers"]["data"] == 5
 
@@ -334,7 +389,9 @@ def test_new_build_takes_backend_from_env_and_ignores_removed_fields(store, monk
     def send(body):
         req = urllib.request.Request(
             f"http://127.0.0.1:{srv.server_port}/api/projects",
-            data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+        )
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, json.loads(r.read())
@@ -343,9 +400,17 @@ def test_new_build_takes_backend_from_env_and_ignores_removed_fields(store, monk
 
     try:
         assert send({"request": "  "})[0] == 400
-        code, got = send({"request": "a todo cli", "backend": "claude-cli", "spec_text": "x",
-                          "parent_id": "p0", "max_fix_attempts": 9,
-                          "workers": {"data": 5}, "token_cap": 1234})
+        code, got = send(
+            {
+                "request": "a todo cli",
+                "backend": "claude-cli",
+                "spec_text": "x",
+                "parent_id": "p0",
+                "max_fix_attempts": 9,
+                "workers": {"data": 5},
+                "token_cap": 1234,
+            }
+        )
         assert code == 200 and got["floor"] == 1
         deadline = time.time() + 5
         while not started and time.time() < deadline:

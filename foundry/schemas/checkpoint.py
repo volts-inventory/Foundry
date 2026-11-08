@@ -109,6 +109,7 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
     ``max_len`` caps the returned string (trimmed at a word boundary with an ellipsis);
     callers that render into more space (e.g. the live event log's expandable box) pass
     a larger value so a long intent/criterion isn't cut mid-thought."""
+
     def s(attr: str) -> str | None:
         v = getattr(body, attr, None)
         return v.strip() if isinstance(v, str) and v.strip() else None
@@ -122,14 +123,18 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
 
     if kind == "ticket":
         # Machine-readable for the Workshop's Tickets tab, so never length-trimmed.
-        return json.dumps({
-            "id": s("id"), "title": s("title"),
-            "specialty": str(getattr(body, "specialty", "") or ""),
-            "difficulty": str(getattr(body, "difficulty", "") or ""),
-            "depends_on": list(getattr(body, "depends_on", ()) or ()),
-            # A re-plan's tombstone (supersedes its own id): the ticket was dropped.
-            "retired": getattr(body, "supersedes", None) == s("id"),
-        }, separators=(",", ":"))
+        return json.dumps(
+            {
+                "id": s("id"),
+                "title": s("title"),
+                "specialty": str(getattr(body, "specialty", "") or ""),
+                "difficulty": str(getattr(body, "difficulty", "") or ""),
+                "depends_on": list(getattr(body, "depends_on", ()) or ()),
+                # A re-plan's tombstone (supersedes its own id): the ticket was dropped.
+                "retired": getattr(body, "supersedes", None) == s("id"),
+            },
+            separators=(",", ":"),
+        )
     out: str | None = None
     if kind == "acceptance_criterion":
         out = s("text")
@@ -172,11 +177,15 @@ def _artifact_detail(kind: str, body: object, *, max_len: int = 200) -> str | No
     elif kind == "test_report":
         out = f"{getattr(body, 'passed', 0)} passed / {getattr(body, 'failed', 0)} failed"
     elif kind == "e2e_report":
-        out = (f"{getattr(body, 'scenarios_passed', 0)} scenarios passed / "
-               f"{getattr(body, 'scenarios_failed', 0)} failed")
+        out = (
+            f"{getattr(body, 'scenarios_passed', 0)} scenarios passed / "
+            f"{getattr(body, 'scenarios_failed', 0)} failed"
+        )
     elif kind == "threat_model":
-        out = (f"{count('oracle_bindings')} oracle bindings, "
-               f"{count('residual_item_ids')} residual items")
+        out = (
+            f"{count('oracle_bindings')} oracle bindings, "
+            f"{count('residual_item_ids')} residual items"
+        )
     elif kind == "audit_finding":
         out = f"severity {getattr(body, 'severity', '?')} — {count('findings')} finding(s)"
     elif kind == "supply_chain_report":

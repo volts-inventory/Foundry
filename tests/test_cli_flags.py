@@ -31,9 +31,9 @@ def test_state_dir_param_overrides_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FOUNDRY_STATE_DIR", str(tmp_path / "env"))
     explicit = tmp_path / "explicit"
     run("build a thing", state_dir=str(explicit))
-    assert (explicit / "checkpoints.db").is_file()      # checkpointer
-    assert (explicit / "global_records.db").is_file()   # trust ledgers
-    assert (explicit / "cas").is_dir()                  # content-addressed store
+    assert (explicit / "checkpoints.db").is_file()  # checkpointer
+    assert (explicit / "global_records.db").is_file()  # trust ledgers
+    assert (explicit / "cas").is_dir()  # content-addressed store
     assert not (tmp_path / "env").exists()
 
 

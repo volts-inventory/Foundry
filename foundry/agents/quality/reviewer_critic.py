@@ -119,11 +119,17 @@ def failing_checks(state: FactoryState, tree: str | None) -> tuple[tuple[str, ..
 
     latest: dict[str, GateResult] = {}
     for g in state.get("gates") or ():
-        if g.run_against == tree and g.name not in JUDGMENT_VERDICTS and (
-                g.name not in latest or g.seq > latest[g.name].seq):
+        if (
+            g.run_against == tree
+            and g.name not in JUDGMENT_VERDICTS
+            and (g.name not in latest or g.seq > latest[g.name].seq)
+        ):
             latest[g.name] = g
-    failed = [g for g in sorted(latest.values(), key=lambda g: g.seq)
-              if g.status in (GateStatus.FAIL, GateStatus.ERROR)]
+    failed = [
+        g
+        for g in sorted(latest.values(), key=lambda g: g.seq)
+        if g.status in (GateStatus.FAIL, GateStatus.ERROR)
+    ]
     tests = dict.fromkeys(i for g in failed for i in failing_ids(g.findings))
     return tuple(g.name for g in failed), tuple(tests)
 
@@ -135,8 +141,13 @@ def _reviewed_tree(
     ``None`` when it cannot matter (no gate verdict on state failed) or cannot be
     built here (no resolvers). Materializing is the only way to know it: verdict
     ``Seq``s are not a causal order across nodes."""
-    if resolve is None or resolve_blob is None or not any(
-            g.status in (GateStatus.FAIL, GateStatus.ERROR) for g in state.get("gates") or ()):
+    if (
+        resolve is None
+        or resolve_blob is None
+        or not any(
+            g.status in (GateStatus.FAIL, GateStatus.ERROR) for g in state.get("gates") or ()
+        )
+    ):
         return None
     from foundry.graph.gate_wiring import materialize_workdir
 
@@ -278,9 +289,11 @@ def review(
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
     gates, tests = failing_checks(state, _reviewed_tree(state, resolve, resolve_blob))
-    content += "\n\nChecks failing on this tree in its gate results: " + (
-        ", ".join((*gates, *tests)) or "none (no gate has failed on it)"
-    ) + "."
+    content += (
+        "\n\nChecks failing on this tree in its gate results: "
+        + (", ".join((*gates, *tests)) or "none (no gate has failed on it)")
+        + "."
+    )
     result = rt.proxy.judge(
         node_id,
         subject_uri,

@@ -127,10 +127,10 @@ class GlobalRecords:
                 (nonce, content_identity),
             )
             if cur.rowcount == 1:
-                return True                       # THIS call consumed the nonce
-            row = self._conn.execute(             # already present — replay iff a
+                return True  # THIS call consumed the nonce
+            row = self._conn.execute(  # already present — replay iff a
                 "SELECT content_identity FROM nonce_ledger WHERE nonce=?", (nonce,)
-            ).fetchone()                          # DIFFERENT identity holds it
+            ).fetchone()  # DIFFERENT identity holds it
             return row is not None and row[0] == content_identity
 
     def latch_negative_verdict(self, key: LatchKey) -> None:

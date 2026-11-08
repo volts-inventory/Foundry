@@ -70,8 +70,12 @@ class TokenMeter:
     :class:`BuildStopped`, at the same seams the caps are checked."""
 
     def __init__(
-        self, cap: int | None, ledger: Path | None = None,
-        cancel: threading.Event | None = None, *, time_cap_s: float | None = None,
+        self,
+        cap: int | None,
+        ledger: Path | None = None,
+        cancel: threading.Event | None = None,
+        *,
+        time_cap_s: float | None = None,
     ) -> None:
         if cap is not None and cap < 1:
             raise ValueError("token cap must be >= 1")

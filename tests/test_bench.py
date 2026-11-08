@@ -106,9 +106,7 @@ def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
 
 def test_time_cap_is_judged_from_the_last_run_only(tmp_path: Path) -> None:
     root = _case(tmp_path, 3, True)
-    (root / "run.log").write_text(
-        LOG + f"\n{bench.RUN_MARK}\nstopped: something else failed\n"
-    )
+    (root / "run.log").write_text(LOG + f"\n{bench.RUN_MARK}\nstopped: something else failed\n")
     s = bench.summarize_case(root)
     assert s["stopped_by_time_cap"] is False
     assert s["model_calls"] == 2

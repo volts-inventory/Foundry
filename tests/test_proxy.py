@@ -78,9 +78,7 @@ class FakeTransport:
 
 
 def make_seq(node_id: str = "review_node", *, step: int = 1) -> Seq:
-    return Seq(
-        run_id="run-1", emission_epoch=0, superstep_index=step, node_id=node_id, local=0
-    )
+    return Seq(run_id="run-1", emission_epoch=0, superstep_index=step, node_id=node_id, local=0)
 
 
 def make_proxy(
@@ -140,9 +138,7 @@ def test_lineage_revision_is_content_derived():
     a = LineageMap()
     b = LineageMap()  # identical content -> identical revision
     assert a.revision == b.revision
-    c = LineageMap(
-        [("claude-*", {"anthropic-claude"}), ("gemma-*", {"google-gemma"})]
-    )
+    c = LineageMap([("claude-*", {"anthropic-claude"}), ("gemma-*", {"google-gemma"})])
     assert c.revision != a.revision
     assert c.resolve("gemma-3") == frozenset({"google-gemma"})
 
@@ -150,8 +146,12 @@ def test_lineage_revision_is_content_derived():
 # ---- 2. judgment path: stamped, verifiable, admitted --------------------------
 
 
-def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1",
-               failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())):
+def judge_once(
+    proxy: ModelProviderProxy,
+    *,
+    nonce: str = "nonce-1",
+    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ()),
+):
     return proxy.judge(
         "review_node",
         "cas://artifact/abc",
@@ -195,15 +195,20 @@ def test_self_judge_profile_stamps_provenance_self():
 
 
 def _finding(text: str, **evidence: str) -> dict[str, str]:
-    return {"finding": text, "failing_check": "", "command": "", "expected": "",
-            "actual": "", **evidence}
+    return {
+        "finding": text,
+        "failing_check": "",
+        "command": "",
+        "expected": "",
+        "actual": "",
+        **evidence,
+    }
 
 
-def _judge_findings(findings: list[object],
-                    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())) -> GateResult:
-    transport = FakeTransport(
-        text=json.dumps({"status": "request-changes", "findings": findings})
-    )
+def _judge_findings(
+    findings: list[object], failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+) -> GateResult:
+    transport = FakeTransport(text=json.dumps({"status": "request-changes", "findings": findings}))
     proxy, _ = make_proxy(transport)
     return judge_once(proxy, failing=failing).gate_result
 
@@ -212,18 +217,22 @@ _FAILING = (("test",), ("tests/test_a.py::test_x",))
 
 
 def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
-    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")],
-                        _FAILING)
+    g = _judge_findings(
+        [_finding("missing tests", failing_check="tests/test_a.py::test_x")], _FAILING
+    )
     assert g.status == GateStatus.FAIL
     assert g.findings == ("missing tests [evidence: failing tests/test_a.py::test_x]",)
     assert verifier.verify_judgment_binding(g)  # a FAIL verdict is stamped too
 
 
-@pytest.mark.parametrize("evidence", [
-    {"failing_check": "test"},  # the failing gate by name
-    {"failing_check": "TEST_X"},  # the failing test by its unique short id
-    {"command": "pytest tests/test_a.py::test_x"},  # the command names it
-])
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"failing_check": "test"},  # the failing gate by name
+        {"failing_check": "TEST_X"},  # the failing test by its unique short id
+        {"command": "pytest tests/test_a.py::test_x"},  # the command names it
+    ],
+)
 def test_a_finding_citing_a_failing_check_blocks(verifier, installed, evidence):
     g = _judge_findings([_finding("broken", **evidence)], _FAILING)
     assert g.status == GateStatus.FAIL
@@ -232,17 +241,29 @@ def test_a_finding_citing_a_failing_check_blocks(verifier, installed, evidence):
 
 def test_a_finding_citing_a_passing_scenario_is_advisory_and_passes(verifier, installed):
     # The local-model failure: every gate passed, the reviewer cited a scenario id.
-    g = _judge_findings([_finding("total-sum check is fragile", failing_check="S001",
-                                  command="pytest -k S001", expected="", actual="")],
-                        _FAILING)
+    g = _judge_findings(
+        [
+            _finding(
+                "total-sum check is fragile",
+                failing_check="S001",
+                command="pytest -k S001",
+                expected="",
+                actual="",
+            )
+        ],
+        _FAILING,
+    )
     assert g.status == GateStatus.PASS
-    assert g.findings == (ADVISORY_PREFIX + "total-sum check is fragile"
-                          " [cites S001: not failing in this build's gates]",)
+    assert g.findings == (
+        ADVISORY_PREFIX + "total-sum check is fragile"
+        " [cites S001: not failing in this build's gates]",
+    )
     assert verifier.verify_judgment_binding(g)
 
 
 def test_with_no_failing_checks_a_citation_is_advisory_but_a_reproduction_blocks(
-        verifier, installed):
+    verifier, installed
+):
     cites = _finding("fails", failing_check="tests/test_a.py::test_x")
     assert _judge_findings([cites]).status == GateStatus.PASS
     repro = _finding("wrong total", command="dice 2d6 --seed 1", expected="7", actual="12")
@@ -253,12 +274,15 @@ def test_with_no_failing_checks_a_citation_is_advisory_but_a_reproduction_blocks
 
 
 def test_mixed_findings_block_on_the_backed_one_and_keep_the_rest_advisory(verifier, installed):
-    g = _judge_findings([
-        _finding("doesn't assert exit code 1", failing_check="S002"),
-        _finding("mocking Popen is pointless"),
-        _finding("add() is broken", failing_check="test_x"),
-        _finding("same output", command="dice 1d6", expected="4 ", actual=" 4"),
-    ], _FAILING)
+    g = _judge_findings(
+        [
+            _finding("doesn't assert exit code 1", failing_check="S002"),
+            _finding("mocking Popen is pointless"),
+            _finding("add() is broken", failing_check="test_x"),
+            _finding("same output", command="dice 1d6", expected="4 ", actual=" 4"),
+        ],
+        _FAILING,
+    )
     assert g.status == GateStatus.FAIL
     assert [f.startswith(ADVISORY_PREFIX) for f in g.findings] == [True, True, False, True]
 
@@ -274,14 +298,16 @@ def test_a_parametrized_test_id_is_matched_whole():
     assert not _blocks(failing, failing_check="tests/t.py::test_add[3-4]")
 
 
-@pytest.mark.parametrize(("evidence", "blocks"), [
-    ({"failing_check": " Security "}, True),  # the whole failing_check is the gate
-    ({"failing_check": "security concern in parser"}, False),
-    ({"command": "npm test"}, False),
-    ({"command": "security"}, False),  # a gate name counts only as failing_check
-])
-def test_a_gate_name_counts_only_as_the_whole_failing_check(verifier, installed,
-                                                            evidence, blocks):
+@pytest.mark.parametrize(
+    ("evidence", "blocks"),
+    [
+        ({"failing_check": " Security "}, True),  # the whole failing_check is the gate
+        ({"failing_check": "security concern in parser"}, False),
+        ({"command": "npm test"}, False),
+        ({"command": "security"}, False),  # a gate name counts only as failing_check
+    ],
+)
+def test_a_gate_name_counts_only_as_the_whole_failing_check(verifier, installed, evidence, blocks):
     assert _blocks((("security", "test"), ()), **evidence) is blocks
 
 
@@ -292,35 +318,47 @@ def test_a_short_id_matches_only_when_unique_and_the_citation_is_unqualified():
     one = ((), ("features/T1.feature::S001",))
     assert _blocks(one, failing_check="S001")
     assert not _blocks(one, failing_check="features/T2.feature::S001")  # qualified elsewhere
-    assert not _blocks(((), ("a/test_x.py::test_add", "b/test_y.py::test_add")),
-                       command="pytest -k test_add")
+    assert not _blocks(
+        ((), ("a/test_x.py::test_add", "b/test_y.py::test_add")), command="pytest -k test_add"
+    )
 
 
 def test_the_evidence_label_names_the_id_that_matched():
-    g = _judge_findings([_finding("broken", failing_check="S009",
-                                  command="pytest tests/test_a.py::test_x")], _FAILING)
+    g = _judge_findings(
+        [_finding("broken", failing_check="S009", command="pytest tests/test_a.py::test_x")],
+        _FAILING,
+    )
     assert g.findings == ("broken [evidence: failing tests/test_a.py::test_x]",)
 
 
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):
-    g = _judge_findings([
-        _finding("add() drops the title", command="python -c 'import app; app.add(\"a\")'",
-                 expected="1", actual="None"),
-        _finding("naming is unclear"),
-    ])
+    g = _judge_findings(
+        [
+            _finding(
+                "add() drops the title",
+                command="python -c 'import app; app.add(\"a\")'",
+                expected="1",
+                actual="None",
+            ),
+            _finding("naming is unclear"),
+        ]
+    )
     assert g.status == GateStatus.FAIL
     assert "expected '1', got 'None'" in g.findings[0]
     assert g.findings[1] == ADVISORY_PREFIX + "naming is unclear"  # kept, not dropped
 
 
-@pytest.mark.parametrize("findings", [
-    [_finding("this looks wrong")],
-    [_finding("off by one", command="pytest", expected="pass", actual="pass")],
-    [_finding("needs a repro", command="pytest", expected="pass")],
-    [_finding("vague", failing_check="N/A", command="none", expected="1", actual="2")],
-    ["missing tests"],  # an ungrammared plain-string finding cites nothing
-    [],
-])
+@pytest.mark.parametrize(
+    "findings",
+    [
+        [_finding("this looks wrong")],
+        [_finding("off by one", command="pytest", expected="pass", actual="pass")],
+        [_finding("needs a repro", command="pytest", expected="pass")],
+        [_finding("vague", failing_check="N/A", command="none", expected="1", actual="2")],
+        ["missing tests"],  # an ungrammared plain-string finding cites nothing
+        [],
+    ],
+)
 def test_an_evidence_less_rejection_is_advisory_and_passes(verifier, installed, findings):
     g = _judge_findings(findings)
     assert g.status == GateStatus.PASS
@@ -409,9 +447,7 @@ def test_fail_closed_raises_on_gate_drift_but_still_records_it():
     transport = FakeTransport(served_model="claude-sonnet-9-experimental")
     proxy = _fail_closed_proxy(transport)
     with pytest.raises(PinnedIdDriftError) as exc:
-        proxy.complete(
-            "gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-        )
+        proxy.complete("gate_node", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     # The drift is recorded BEFORE the raise — nothing is swallowed (the alert
     # surface + manifest still see it; the caller pause-and-escalates).
     assert exc.value.event["kind"] == "pinned-id"
@@ -427,9 +463,14 @@ def test_fail_closed_raises_on_judgment_drift_via_judge():
     proxy = _fail_closed_proxy(transport)
     with pytest.raises(PinnedIdDriftError):
         proxy.judge(
-            "review_node", "cas://artifact", "state-sha", "nonce-1", "SOP",
+            "review_node",
+            "cas://artifact",
+            "state-sha",
+            "nonce-1",
+            "SOP",
             [{"role": "user", "content": "review"}],
-            seq=make_seq("review_node"), tier="T1",
+            seq=make_seq("review_node"),
+            tier="T1",
         )
 
 
@@ -475,9 +516,7 @@ def test_tier_mismatch_fails_closed_under_fail_closed_policy():
     transport = FakeTransport(served_model="claude-sonnet-4-6")
     proxy = _same_family_proxy(transport, drift_policy=DriftPolicy(mode=DriftMode.FAIL_CLOSED))
     with pytest.raises(PinnedIdDriftError) as exc:
-        proxy.complete(
-            "gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-        )
+        proxy.complete("gate_node", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert exc.value.event["kind"] == "tier-mismatch"
 
 
@@ -513,9 +552,7 @@ def test_t1_gate_has_no_temperature_t2_gate_has_temperature_zero():
 
 def test_t1_ideation_uses_adaptive_thinking_not_temperature():
     proxy, transport = make_proxy()
-    proxy.complete(
-        "arch", "T1", "SOP", [{"role": "user", "content": "ideate"}], purpose="ideation"
-    )
+    proxy.complete("arch", "T1", "SOP", [{"role": "user", "content": "ideate"}], purpose="ideation")
     req = transport.requests[0]
     assert req["thinking"] == {"type": "adaptive"}
     assert "temperature" not in req
@@ -590,9 +627,7 @@ def test_transient_failure_recovers_within_retry_budget():
     delays: list[float] = []
     transport = FakeTransport(fail_times=1)
     proxy, _ = make_proxy(transport, sleeper=delays.append)
-    result = proxy.complete(
-        "n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-    )
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert result.text == APPROVE_JSON
     assert transport.attempts == 2
     assert delays == [0.5]
@@ -616,8 +651,9 @@ class _RateLimitError(Exception):
         super().__init__("429 Too Many Requests")
         self.status_code = 429
         if retry_after is not None:
-            self.response = type("R", (), {"headers": _FakeHeaders(
-                {"retry-after": str(retry_after)})})()
+            self.response = type(
+                "R", (), {"headers": _FakeHeaders({"retry-after": str(retry_after)})}
+            )()
 
 
 @dataclass
@@ -637,16 +673,23 @@ class _RateLimitTransport:
             raise _RateLimitError(retry_after=self.retry_after)
         self.requests.append(request)
         return ProviderResponse(
-            served_model=request["model"], request_id="req_rl",
-            text=self.text, usage=dict(USAGE), stop_reason="end_turn",
+            served_model=request["model"],
+            request_id="req_rl",
+            text=self.text,
+            usage=dict(USAGE),
+            stop_reason="end_turn",
         )
 
 
-def _rl_proxy(transport: Any, *, sleeper: Any, rl_retries: int = 6,
-              rl_base: float = 2.0) -> ModelProviderProxy:
+def _rl_proxy(
+    transport: Any, *, sleeper: Any, rl_retries: int = 6, rl_base: float = 2.0
+) -> ModelProviderProxy:
     return ModelProviderProxy(
-        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID),
-        sleeper=sleeper, rate_limit_max_retries=rl_retries,
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        sleeper=sleeper,
+        rate_limit_max_retries=rl_retries,
         rate_limit_backoff_base_s=rl_base,
     )
 
@@ -655,12 +698,10 @@ def test_rate_limit_recovers_and_honors_retry_after():
     delays: list[float] = []
     transport = _RateLimitTransport(rl_times=2, retry_after=7.0)
     proxy = _rl_proxy(transport, sleeper=delays.append)
-    result = proxy.complete(
-        "n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-    )
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert result.text == APPROVE_JSON
-    assert transport.attempts == 3            # 2 throttled + 1 success
-    assert delays == [7.0, 7.0]               # honored Retry-After, not 0.5/1.0
+    assert transport.attempts == 3  # 2 throttled + 1 success
+    assert delays == [7.0, 7.0]  # honored Retry-After, not 0.5/1.0
 
 
 def test_rate_limit_uses_separate_more_generous_budget():
@@ -671,8 +712,8 @@ def test_rate_limit_uses_separate_more_generous_budget():
     proxy = _rl_proxy(transport, sleeper=delays.append, rl_retries=4, rl_base=2.0)
     with pytest.raises(ProxyUnavailable):
         proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-    assert transport.attempts == 5            # initial + 4 rate-limit waits
-    assert delays == [2.0, 4.0, 8.0, 16.0]    # exponential, capped at 60s
+    assert transport.attempts == 5  # initial + 4 rate-limit waits
+    assert delays == [2.0, 4.0, 8.0, 16.0]  # exponential, capped at 60s
 
 
 def test_usage_limit_classified_and_waits_until_reset():
@@ -682,7 +723,7 @@ def test_usage_limit_classified_and_waits_until_reset():
     short retries followed by a crashed run."""
     import time as _time
 
-    reset = int(_time.time()) + 2 * 3600          # window resets in 2 hours
+    reset = int(_time.time()) + 2 * 3600  # window resets in 2 hours
 
     @dataclass
     class _UsageLimitTransport:
@@ -699,20 +740,21 @@ def test_usage_limit_classified_and_waits_until_reset():
                 )
             self.requests.append(request)
             return ProviderResponse(
-                served_model=request["model"], request_id="req_ul",
-                text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+                served_model=request["model"],
+                request_id="req_ul",
+                text=APPROVE_JSON,
+                usage=dict(USAGE),
+                stop_reason="end_turn",
             )
 
     delays: list[float] = []
     transport = _UsageLimitTransport()
     proxy = _rl_proxy(transport, sleeper=delays.append)
-    result = proxy.complete(
-        "n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate"
-    )
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert result.text == APPROVE_JSON
-    assert transport.attempts == 2                # 1 limited + 1 success after reset
+    assert transport.attempts == 2  # 1 limited + 1 success after reset
     assert len(delays) == 1
-    assert 3600 < delays[0] <= 2 * 3600 + 60      # slept ~until the reset, one wait
+    assert 3600 < delays[0] <= 2 * 3600 + 60  # slept ~until the reset, one wait
 
 
 def test_usage_limit_without_epoch_rides_backoff():
@@ -738,13 +780,14 @@ def test_network_timeout_rides_the_transient_budget():
 
 def test_rate_limiter_paces_requests_per_minute():
     from foundry.proxy.model_provider_proxy import _RateLimiter
+
     waits: list[float] = []
     clock = [0.0]
     rl = _RateLimiter(max_rpm=60, sleeper=waits.append, clock=lambda: clock[0])
     with rl.slot():
-        pass                                  # first call: no wait
+        pass  # first call: no wait
     with rl.slot():
-        pass                                  # clock hasn't moved → must space by 1s
+        pass  # clock hasn't moved → must space by 1s
     assert waits == [1.0]
 
 
@@ -753,6 +796,7 @@ def test_rate_limiter_paces_requests_per_minute():
 
 def test_client_cache_rebuilds_after_ttl():
     from foundry.proxy.model_provider_proxy import _ClientCache
+
     clock = [0.0]
     built: list[int] = []
 
@@ -762,45 +806,49 @@ def test_client_cache_rebuilds_after_ttl():
 
     cache = _ClientCache(factory, ttl_s=10.0, clock=lambda: clock[0])
     a = cache.get()
-    assert cache.get() is a            # within TTL → same client, no rebuild
+    assert cache.get() is a  # within TTL → same client, no rebuild
     clock[0] = 11.0
     b = cache.get()
-    assert b is not a and len(built) == 2   # past TTL → rebuilt
+    assert b is not a and len(built) == 2  # past TTL → rebuilt
 
 
 def test_client_cache_rebuilds_after_auth_error():
     from foundry.proxy.model_provider_proxy import _ClientCache
+
     built: list[int] = []
 
     def factory():
         built.append(1)
         return object()
 
-    cache = _ClientCache(factory)      # TTL off by default
+    cache = _ClientCache(factory)  # TTL off by default
     first = cache.get()
     with pytest.raises(Exception, match="401 Unauthorized"):
         cache.run(lambda _c: (_ for _ in ()).throw(Exception("401 Unauthorized")))
     second = cache.get()
-    assert second is not first and len(built) == 2   # auth error dropped the client
+    assert second is not first and len(built) == 2  # auth error dropped the client
 
 
 def test_manifest_is_bounded_and_counts_dropped():
     transport = FakeTransport()
     proxy = ModelProviderProxy(
-        transport, LineageMap(), ZoneBSigner(KEY, KEY_ID),
-        sleeper=lambda _s: None, manifest_max=3,
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        sleeper=lambda _s: None,
+        manifest_max=3,
     )
     for _ in range(5):
         proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
-    assert len(proxy.manifest) == 3        # capped to the most-recent 3
-    assert proxy.manifest_dropped == 2     # the 2 oldest rolled off (and were counted)
+    assert len(proxy.manifest) == 3  # capped to the most-recent 3
+    assert proxy.manifest_dropped == 2  # the 2 oldest rolled off (and were counted)
 
 
 def test_client_cache_keeps_injected_client_on_transient_error():
     from foundry.proxy.model_provider_proxy import _ClientCache
+
     sentinel = object()
-    cache = _ClientCache(lambda: object(), injected=sentinel, ttl_s=0.001,
-                         clock=lambda: 1e9)
+    cache = _ClientCache(lambda: object(), injected=sentinel, ttl_s=0.001, clock=lambda: 1e9)
     # An injected client is never proactively refreshed, and a NON-auth error
     # (a transient blip) leaves it in place for the retry layer to re-drive.
     with pytest.raises(ConnectionError, match="blip"):
@@ -868,8 +916,9 @@ def test_a_finished_call_is_replayed_from_the_call_cache(tmp_path):
     replay = again.complete("planner", "T1", "SOP", msgs, purpose="gate")
     assert replay.text == first.text and len(transport.requests) == sent
     assert again.token_meter.used == 0 and used > 0
-    other = again.complete("planner", "T1", "SOP", [{"role": "user", "content": "y"}],
-                           purpose="gate")
+    other = again.complete(
+        "planner", "T1", "SOP", [{"role": "user", "content": "y"}], purpose="gate"
+    )
     assert len(transport.requests) == sent + 1 and other is not None
 
 
@@ -885,13 +934,17 @@ class _HardKilledTransport:
         if self.attempts <= self.fails:
             raise RuntimeError("claude CLI hard-killed at 1800s")
         return ProviderResponse(
-            served_model=request["model"], request_id="req_hk",
-            text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+            served_model=request["model"],
+            request_id="req_hk",
+            text=APPROVE_JSON,
+            usage=dict(USAGE),
+            stop_reason="end_turn",
         )
 
 
 def test_wall_clock_hard_kill_is_not_a_rate_limit_and_retries_once(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ):
     """An identical prompt that already ran the whole CLI cap is retried ONCE on
     its own budget, then fails closed — never ridden on the 6-wait rate-limit
@@ -902,8 +955,7 @@ def test_wall_clock_hard_kill_is_not_a_rate_limit_and_retries_once(
     transport = _HardKilledTransport(fails=99)
     proxy = _rl_proxy(transport, sleeper=rl_waits.append, rl_retries=6)
     with pytest.raises(ProxyUnavailable, match="hard-killed at 1800s"):
-        proxy.complete("plan", "T1", "SOP", [{"role": "user", "content": "x"}],
-                       purpose="ideation")
+        proxy.complete("plan", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
     assert transport.attempts == 2
     err = capsys.readouterr().err
     assert "retry model call: plan (T1, ideation) — claude CLI hard-killed at 1800s [1/2]" in err
@@ -913,14 +965,14 @@ def test_wall_clock_hard_kill_is_not_a_rate_limit_and_retries_once(
 def test_wall_clock_hard_kill_recovers_on_its_single_retry():
     transport = _HardKilledTransport(fails=1)
     proxy = _rl_proxy(transport, sleeper=lambda _s: None)
-    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}],
-                            purpose="gate")
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
     assert result.text == APPROVE_JSON
     assert transport.attempts == 2
 
 
 def test_every_failed_rate_limit_wait_is_logged(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ):
     monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
 
@@ -932,8 +984,11 @@ def test_every_failed_rate_limit_wait_is_logged(
             if self.attempts <= 2:
                 raise RuntimeError("429 too many requests")
             return ProviderResponse(
-                served_model=request["model"], request_id="req_t",
-                text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+                served_model=request["model"],
+                request_id="req_t",
+                text=APPROVE_JSON,
+                usage=dict(USAGE),
+                stop_reason="end_turn",
             )
 
     proxy = _rl_proxy(_Throttled(), sleeper=lambda _s: None, rl_retries=6, rl_base=2.0)

@@ -167,8 +167,22 @@ ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # Strict grammars make the model fill every field, so "no evidence" often arrives
 # as a placeholder rather than "". Only for the citing fields: an expected/actual of
 # "None" or "null" is a real observed value.
-_PLACEHOLDERS = frozenset({"", "n/a", "na", "none", "null", "nil", "-", "--", "unknown",
-                           "not applicable", "no", "nothing"})
+_PLACEHOLDERS = frozenset(
+    {
+        "",
+        "n/a",
+        "na",
+        "none",
+        "null",
+        "nil",
+        "-",
+        "--",
+        "unknown",
+        "not applicable",
+        "no",
+        "nothing",
+    }
+)
 # Brackets stay inside a token: pytest's parametrized ids carry them.
 _CITATION_SPLIT = re.compile(r"[\s,;'\"`()]+")
 
@@ -243,6 +257,7 @@ def _verdict_findings(
         backed = True
     return tuple(out), backed
 
+
 _STATUS_BY_VERDICT = {
     "approve": GateStatus.PASS,
     "request-changes": GateStatus.FAIL,
@@ -301,18 +316,36 @@ def default_sampling_policy() -> SamplingPolicy:
 # glob comes first.
 _LOCAL_SAMPLING_PROFILES: tuple[tuple[str, dict[str, float]], ...] = (
     # Qwen3.8 card (thinking mode).
-    ("*qwen3.8*", {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
-                   "presence_penalty": 0.0, "repeat_penalty": 1.0}),
+    (
+        "*qwen3.8*",
+        {
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "top_k": 20,
+            "min_p": 0.0,
+            "presence_penalty": 0.0,
+            "repeat_penalty": 1.0,
+        },
+    ),
     # Qwen3-Coder generation_config.json.
     ("*qwen*coder*", {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "repeat_penalty": 1.05}),
     # Qwen3 / 3.5 / 3.6 thinking mode (the Qwen3.6 card).
-    ("*qwen3*", {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
-                 "presence_penalty": 0.0}),
+    (
+        "*qwen3*",
+        {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0},
+    ),
 )
-LOCAL_SAMPLING_KEYS: frozenset[str] = frozenset({
-    "temperature", "top_p", "top_k", "min_p",
-    "presence_penalty", "frequency_penalty", "repeat_penalty",
-})
+LOCAL_SAMPLING_KEYS: frozenset[str] = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repeat_penalty",
+    }
+)
 LOCAL_SAMPLING_ENV = "FOUNDRY_LOCAL_SAMPLING"
 
 
@@ -626,7 +659,9 @@ class AnthropicTransport:
     def __init__(self, client: Any | None = None) -> None:
         def _build() -> Any:
             import anthropic
+
             return anthropic.Anthropic()
+
         self._cache = _ClientCache(_build, injected=client)
 
     def _ensure_client(self) -> Any:
@@ -634,9 +669,7 @@ class AnthropicTransport:
 
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         response = self._cache.run(lambda c: c.messages.create(**request))
-        text = next(
-            (block.text for block in response.content if block.type == "text"), ""
-        )
+        text = next((block.text for block in response.content if block.type == "text"), "")
         tool_calls = tuple(
             {"id": block.id, "name": block.name, "input": dict(block.input or {})}
             for block in response.content
@@ -701,11 +734,20 @@ class _RetryPolicy:
 # SEPARATE, more generous (but still bounded) budget than a real transport failure
 # — so one hiccup can't kill a multi-hour overnight run.
 _RATE_LIMIT_MARKERS = (
-    "rate limit", "rate_limit", "ratelimit", "too many requests",
-    "429", "529", "overloaded", "quota exceeded", "throttl",
+    "rate limit",
+    "rate_limit",
+    "ratelimit",
+    "too many requests",
+    "429",
+    "529",
+    "overloaded",
+    "quota exceeded",
+    "throttl",
     # Subscription-window exhaustion (Claude Max via the claude CLI): the CLI
     # reports "Claude AI usage limit reached|<reset-epoch>".
-    "usage limit", "limit reached", "limit will reset",
+    "usage limit",
+    "limit reached",
+    "limit will reset",
     # Claude Max via the claude CLI also reports a spent 5-hour window as
     # "You've hit your session limit · resets 8am (UTC)" — a DIFFERENT phrase
     # from "usage limit", and the one that hard-crashed the overnight PIR run
@@ -716,7 +758,8 @@ _RATE_LIMIT_MARKERS = (
     # SDK/HTTP request timeouts (APITimeoutError, 408, gateway 504) are short,
     # transient network stalls — fine to wait out. A CLI wall-clock HARD-KILL is
     # not: see _is_wall_clock_kill.
-    "timed out", "timeout",
+    "timed out",
+    "timeout",
 )
 
 # A CLI subprocess killed at its wall-clock cap (cli_transports) already spent the
@@ -743,8 +786,13 @@ def _int_env(name: str, default: int) -> int:
 # one of these the SDK client is dropped so the NEXT call rebuilds it — re-resolving
 # the credential, so a rotated key / refreshed token is picked up without a restart.
 _AUTH_ERROR_MARKERS = (
-    "unauthorized", "authentication", "invalid api key", "invalid x-api-key",
-    "expired", "credential", "401",
+    "unauthorized",
+    "authentication",
+    "invalid api key",
+    "invalid x-api-key",
+    "expired",
+    "credential",
+    "401",
 )
 
 
@@ -767,16 +815,20 @@ class _ClientCache:
     after a call fails with an auth error. An injected client (tests) is used as-is
     and never proactively refreshed."""
 
-    def __init__(self, factory: Callable[[], Any], *, ttl_s: float | None = None,
-                 clock: Callable[[], float] = time.monotonic,
-                 injected: Any | None = None) -> None:
+    def __init__(
+        self,
+        factory: Callable[[], Any],
+        *,
+        ttl_s: float | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        injected: Any | None = None,
+    ) -> None:
         self._factory = factory
         self._client = injected
         self._injected = injected is not None
         self._clock = clock
         self._built_at = clock() if injected is not None else 0.0
-        self._ttl = float(ttl_s if ttl_s is not None
-                          else _int_env("FOUNDRY_CLIENT_TTL_S", 0))
+        self._ttl = float(ttl_s if ttl_s is not None else _int_env("FOUNDRY_CLIENT_TTL_S", 0))
 
     def get(self) -> Any:
         now = self._clock()
@@ -796,7 +848,7 @@ class _ClientCache:
             return call(self.get())
         except Exception as exc:
             if _is_auth_error(exc):
-                self.invalidate()   # next call rebuilds → re-resolves the credential
+                self.invalidate()  # next call rebuilds → re-resolves the credential
             raise
 
 
@@ -864,7 +916,7 @@ def _classify_rate_limit(exc: BaseException) -> tuple[bool, float | None]:
     # ridden out in ONE long wait instead of six useless 60-second ones.
     text = str(exc)
     if "usage limit" in text.lower():
-        m = re.search(r"\b(1[6-9]\d{8}|2\d{9})\b", text)   # a plausible unix epoch
+        m = re.search(r"\b(1[6-9]\d{8}|2\d{9})\b", text)  # a plausible unix epoch
         if m:
             until = float(m.group(1)) - time.time()
             if 0 < until < 48 * 3600:
@@ -893,9 +945,14 @@ class _RateLimiter:
     Thread-safe: model calls fan out across worker threads, so the pacer reserves
     its next slot under a lock, then sleeps OUTSIDE the lock to keep concurrency."""
 
-    def __init__(self, max_rpm: int = 0, max_concurrent: int = 0, *,
-                 sleeper: Callable[[float], None] = time.sleep,
-                 clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        max_rpm: int = 0,
+        max_concurrent: int = 0,
+        *,
+        sleeper: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._min_interval = 60.0 / max_rpm if max_rpm > 0 else 0.0
         self._sem = threading.Semaphore(max_concurrent) if max_concurrent > 0 else None
         self._lock = threading.Lock()
@@ -996,7 +1053,8 @@ class ModelProviderProxy:
         # the throttle, 6 waits for the budget) but stay injectable for tests.
         self._rl_sleeper = sleeper
         self._rl_max_retries = (
-            rate_limit_max_retries if rate_limit_max_retries is not None
+            rate_limit_max_retries
+            if rate_limit_max_retries is not None
             else _int_env("FOUNDRY_RATE_LIMIT_RETRIES", 6)
         )
         self._rl_backoff_base_s = rate_limit_backoff_base_s
@@ -1004,22 +1062,23 @@ class ModelProviderProxy:
         # Ceiling for ONE explicit wait-until-reset (Retry-After / a usage-window
         # epoch). Distinct from the backoff cap: implicit throttling backs off in
         # ≤60s steps; an explicit reset hours away is honored up to this bound.
-        self._rl_max_wait_s = float(
-            _int_env("FOUNDRY_RATE_LIMIT_MAX_WAIT_S", 6 * 3600)
-        )
+        self._rl_max_wait_s = float(_int_env("FOUNDRY_RATE_LIMIT_MAX_WAIT_S", 6 * 3600))
         self._limiter = _RateLimiter(
-            max_rpm=(max_rpm if max_rpm is not None
-                     else _int_env("FOUNDRY_MAX_RPM", 0)),
-            max_concurrent=(max_concurrent_calls if max_concurrent_calls is not None
-                            else _int_env("FOUNDRY_MAX_CONCURRENT_CALLS", 0)),
+            max_rpm=(max_rpm if max_rpm is not None else _int_env("FOUNDRY_MAX_RPM", 0)),
+            max_concurrent=(
+                max_concurrent_calls
+                if max_concurrent_calls is not None
+                else _int_env("FOUNDRY_MAX_CONCURRENT_CALLS", 0)
+            ),
             sleeper=sleeper,
         )
         self._max_tokens = max_tokens
         # Per-call records. Bounded so a days-long run with tens of thousands of calls
         # can't grow the manifest without limit; the oldest records roll off (and are
         # counted) past the cap. FOUNDRY_MANIFEST_MAX=0 keeps the full unbounded log.
-        _mm = (manifest_max if manifest_max is not None
-               else _int_env("FOUNDRY_MANIFEST_MAX", 100_000))
+        _mm = (
+            manifest_max if manifest_max is not None else _int_env("FOUNDRY_MANIFEST_MAX", 100_000)
+        )
         self._manifest: deque[dict[str, Any]] = deque(maxlen=_mm if _mm > 0 else None)
         self._manifest_dropped = 0
         self._drift_events: list[dict[str, Any]] = []
@@ -1101,7 +1160,8 @@ class ModelProviderProxy:
         )
         local = tier in self._local_tiers
         thinking = local and local_thinking_for(
-            requested_model, self._local_thinking, agent=node_id in _AGENT_NODE_IDS)
+            requested_model, self._local_thinking, agent=node_id in _AGENT_NODE_IDS
+        )
         if local:
             request["local_thinking"] = thinking
         if thinking:
@@ -1135,23 +1195,22 @@ class ModelProviderProxy:
         if cached is not None:
             response, parsed = cached
             progress.log(f"reuse {label} (finished before a restart)")
-            remember = getattr(self._tier_transports.get(tier, self._transport),
-                               "remember", None)
+            remember = getattr(self._tier_transports.get(tier, self._transport), "remember", None)
             if local and remember is not None:
                 remember(response)  # so the next turn still replays this turn's reasoning
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(
-                request, schema=schema, tier=tier, label=label
-            )
+            response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
             if local:
                 truncated = truncation_warning(request, response.usage)
                 if truncated:
-                    progress.log(f"WARNING {label}: {truncated} (raise the server's "
-                                 "context length, e.g. OLLAMA_CONTEXT_LENGTH)")
+                    progress.log(
+                        f"WARNING {label}: {truncated} (raise the server's "
+                        "context length, e.g. OLLAMA_CONTEXT_LENGTH)"
+                    )
 
         # Lineage is resolved from the proxy-OBSERVED served model id; an
         # unknown id fails closed inside the LineageMap (never guessed).
@@ -1184,7 +1243,7 @@ class ModelProviderProxy:
         if tools is not None:
             record["tool_calls"] = len(response.tool_calls)
         if self._manifest.maxlen is not None and len(self._manifest) == self._manifest.maxlen:
-            self._manifest_dropped += 1     # this append rolls the oldest record off
+            self._manifest_dropped += 1  # this append rolls the oldest record off
         self._manifest.append(record)
         if drift:
             # Pinned-ID drift (arch §8): invalidates calibration baselines. The
@@ -1267,9 +1326,7 @@ class ModelProviderProxy:
             raise VerdictChannelError(
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
-        findings, backed = _verdict_findings(
-            verdict.get("findings"), failing_gates, failing_tests
-        )
+        findings, backed = _verdict_findings(verdict.get("findings"), failing_gates, failing_tests)
         status = _STATUS_BY_VERDICT[verdict["status"]]
         if not backed:
             # Decided here, before the binding is stamped: a downgrade after signing
@@ -1451,9 +1508,9 @@ class ModelProviderProxy:
                     f"{request.get('model')}"
                 )
         local = tier in self._local_tiers
-        attempt = 0          # real transport failures (bounded, fail-closed)
-        rl_attempt = 0       # provider throttling (separate, more generous budget)
-        kill_attempt = 0     # CLI wall-clock hard-kills (own small budget)
+        attempt = 0  # real transport failures (bounded, fail-closed)
+        rl_attempt = 0  # provider throttling (separate, more generous budget)
+        kill_attempt = 0  # CLI wall-clock hard-kills (own small budget)
         what = f"retry {label or f'model call ({tier})'}"
 
         def log_retry(exc: BaseException, n: int, budget: int, wait: float) -> None:
@@ -1517,16 +1574,15 @@ class ModelProviderProxy:
                     else:
                         wait = backoff
                     if wait >= 300:
-                        resume_at = time.strftime(
-                            "%H:%M", time.localtime(time.time() + wait))
-                        print(f"[proxy] provider limit hit — waiting "
-                              f"{wait / 60:.0f} min (resuming ~{resume_at}) "
-                              f"[wait {rl_attempt + 1}/{self._rl_max_retries}]")
+                        resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
+                        print(
+                            f"[proxy] provider limit hit — waiting "
+                            f"{wait / 60:.0f} min (resuming ~{resume_at}) "
+                            f"[wait {rl_attempt + 1}/{self._rl_max_retries}]"
+                        )
                     if on_rate_limit_wait is not None:
                         with contextlib.suppress(Exception):  # advisory telemetry only
-                            on_rate_limit_wait(
-                                wait, time.time() + wait, retry_after is not None
-                            )
+                            on_rate_limit_wait(wait, time.time() + wait, retry_after is not None)
                     log_retry(exc, rl_attempt + 1, self._rl_max_retries, wait)
                     self._rl_sleeper(wait)
                     rl_attempt += 1
@@ -1540,7 +1596,11 @@ class ModelProviderProxy:
                         f"provider transport failed after {attempt + 1} attempt(s); "
                         "judgment nodes must pause-and-escalate (no family fallback)"
                     ) from exc
-                log_retry(exc, attempt + 1, self._retry.max_retries,
-                          self._retry.backoff_base_s * (2**attempt))
+                log_retry(
+                    exc,
+                    attempt + 1,
+                    self._retry.max_retries,
+                    self._retry.backoff_base_s * (2**attempt),
+                )
                 self._retry.sleep_before_retry(attempt)
                 attempt += 1

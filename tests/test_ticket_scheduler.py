@@ -85,8 +85,15 @@ def _ticket(
     **extra: Any,
 ) -> Ticket:
     return Ticket(
-        id=tid, title=f"title {tid}", description=f"desc {tid}", specialty=specialty,
-        difficulty=difficulty, depends_on=deps, files=files, seq=_seq(local), **extra,
+        id=tid,
+        title=f"title {tid}",
+        description=f"desc {tid}",
+        specialty=specialty,
+        difficulty=difficulty,
+        depends_on=deps,
+        files=files,
+        seq=_seq(local),
+        **extra,
     )
 
 
@@ -135,15 +142,19 @@ class _Recorder:
         root = Path(sandbox.worktree)
         seen = {
             p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
-            for p in root.rglob("*") if p.is_file()
+            for p in root.rglob("*")
+            if p.is_file()
         }
         with self.lock:
             self.calls.append(tid)
             self.packets[tid] = packet
             self.history.append(packet)
             self.seen[tid] = seen
-        files = {f: f"# written by {tid}\n" for f in packet.task.get("files", ())
-                 if tid not in self.silent}
+        files = {
+            f: f"# written by {tid}\n"
+            for f in packet.task.get("files", ())
+            if tid not in self.silent
+        }
         files.update(self.writes.get(tid, {}))
         files["rogue.txt"] = "out of scope\n"
         files["features/T-001.feature"] = "Feature: edited\n"
@@ -155,8 +166,9 @@ class _Recorder:
 
 
 def _runtime(adapter: Any, store: ArtifactStore) -> AgentRuntime:
-    proxy = ModelProviderProxy(MockTransport(default_text="{}"),
-                               signer=ZoneBSigner(b"k" * 16, "kid"))
+    proxy = ModelProviderProxy(
+        MockTransport(default_text="{}"), signer=ZoneBSigner(b"k" * 16, "kid")
+    )
     return AgentRuntime(proxy=proxy, adapter=adapter, cas=store)
 
 
@@ -165,10 +177,15 @@ def _state(store: ArtifactStore, tickets: list[Ticket], **extra: Any) -> Factory
     return {
         "request": "build a todo service",
         "artifacts": arts + list(extra.pop("artifacts", [])),
-        "pinned_constraints": [PinnedConstraint(
-            id="c1", text=CONSTRAINT, scope=ConstraintScope.GLOBAL, source="ADR-1",
-            seq=_seq(0, "architect"),
-        )],
+        "pinned_constraints": [
+            PinnedConstraint(
+                id="c1",
+                text=CONSTRAINT,
+                scope=ConstraintScope.GLOBAL,
+                source="ADR-1",
+                seq=_seq(0, "architect"),
+            )
+        ],
         **extra,
     }
 
@@ -178,14 +195,21 @@ def _graph(rt: AgentRuntime, store: ArtifactStore, tmp_path: Path, **kw: Any) ->
     src.mkdir(exist_ok=True)
     (src / "README.md").write_text("base\n")
     return build_implementation_subgraph(
-        rt, source_dir=str(src), resolve=store.resolve, resolve_blob=store.resolve_blob,
-        max_slots=4, **kw,
+        rt,
+        source_dir=str(src),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        max_slots=4,
+        **kw,
     )
 
 
 def _config(run_id: str = "run") -> RunnableConfig:
-    return {"configurable": {"thread_id": run_id}, "metadata": {"langgraph_step": 1},
-            "recursion_limit": 50}
+    return {
+        "configurable": {"thread_id": run_id},
+        "metadata": {"langgraph_step": 1},
+        "recursion_limit": 50,
+    }
 
 
 def _diffs(out: FactoryState) -> dict[str, Any]:
@@ -196,8 +220,14 @@ def _diffs(out: FactoryState) -> dict[str, Any]:
 
 
 def test_ticket_maps_to_a_deterministic_task() -> None:
-    t = _ticket("T-002", 1, specialty=Specialty.DATA, deps=("T-001", "T-404"),
-                difficulty=Difficulty.COMPLEX, scenario_ids=("AC-1", "AC-2"))
+    t = _ticket(
+        "T-002",
+        1,
+        specialty=Specialty.DATA,
+        deps=("T-001", "T-404"),
+        difficulty=Difficulty.COMPLEX,
+        scenario_ids=("AC-1", "AC-2"),
+    )
     task = task_from_ticket(t, _seq(5, "senior_engineer"), known=("T-001", "T-002"))
     assert (task.id, task.ticket_id, task.branch) == ("T-002", "T-002", "task/T-002")
     assert task.specialty is Specialty.DATA
@@ -256,9 +286,13 @@ def test_an_unmaterializable_tree_is_noted_not_silently_dropped(tmp_path: Path) 
     store = ArtifactStore()
     rec = _Recorder()
     bad = AcceptanceCriterion(id="AC-9", text="x", ticket_id="../escape", seq=_seq(9))
-    state = _state(store, [_ticket("T-001", 0, files=("a.py",))], artifacts=[
-        emit_artifact(bad, "acceptance_criterion", "planner", bad.seq, store=store),
-    ])
+    state = _state(
+        store,
+        [_ticket("T-001", 0, files=("a.py",))],
+        artifacts=[
+            emit_artifact(bad, "acceptance_criterion", "planner", bad.seq, store=store),
+        ],
+    )
     out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(state, _config())
     [note] = [t for t in out["gate_triage"] if t.name == "wave-overlay"]
     assert "bare base" in note.explanation and "escape" in note.explanation
@@ -272,21 +306,43 @@ def _three_tickets(store: ArtifactStore) -> tuple[list[Ticket], list[Any]]:
     spec_uri = persist_prose(CONTRACT_BODY, store=store)
     contract = InterfaceContract(name="TodoStore.add", spec_uri=spec_uri, seq=_seq(20))
     crit = AcceptanceCriterion(
-        id="AC-1", text="Given an empty store When I add 'milk' Then it has id 1",
-        given=("an empty store",), when=("I add 'milk'",), then=("it has id 1",),
-        ticket_id="T-001", seq=_seq(21),
+        id="AC-1",
+        text="Given an empty store When I add 'milk' Then it has id 1",
+        given=("an empty store",),
+        when=("I add 'milk'",),
+        then=("it has id 1",),
+        ticket_id="T-001",
+        seq=_seq(21),
     )
     extra = [
         emit_artifact(contract, "interface_contract", "planner", contract.seq, store=store),
         emit_artifact(crit, "acceptance_criterion", "planner", crit.seq, store=store),
     ]
     tickets = [
-        _ticket("T-001", 0, files=("todo/store.py",), scenario_ids=("AC-1",),
-                implements=("TodoStore.add",), difficulty=Difficulty.TRIVIAL),
-        _ticket("T-002", 1, specialty=Specialty.FRONTEND, files=("todo/cli.py",),
-                deps=("T-001",), consumes=("TodoStore.add",)),
-        _ticket("T-003", 2, specialty=Specialty.TEST, files=("tests/steps/test_t001.py",),
-                deps=("T-001",), scenario_ids=("AC-1",)),
+        _ticket(
+            "T-001",
+            0,
+            files=("todo/store.py",),
+            scenario_ids=("AC-1",),
+            implements=("TodoStore.add",),
+            difficulty=Difficulty.TRIVIAL,
+        ),
+        _ticket(
+            "T-002",
+            1,
+            specialty=Specialty.FRONTEND,
+            files=("todo/cli.py",),
+            deps=("T-001",),
+            consumes=("TodoStore.add",),
+        ),
+        _ticket(
+            "T-003",
+            2,
+            specialty=Specialty.TEST,
+            files=("tests/steps/test_t001.py",),
+            deps=("T-001",),
+            scenario_ids=("AC-1",),
+        ),
     ]
     return tickets, extra
 
@@ -319,8 +375,13 @@ def test_waves_build_in_dependency_order_on_the_integrated_tree(tmp_path: Path) 
     assert {(e["ticket_id"], e["phase"]) for e in events} == {
         (t, p) for t in ("T-001", "T-002", "T-003") for p in ("start", "done")
     }
-    assert {"phase": "start", "ticket_id": "T-001", "title": "title T-001",
-            "specialty": "backend", "tier": "T3"} in events
+    assert {
+        "phase": "start",
+        "ticket_id": "T-001",
+        "title": "title T-001",
+        "specialty": "backend",
+        "tier": "T3",
+    } in events
 
 
 def test_packet_carries_ticket_scenarios_contracts_and_persona(tmp_path: Path) -> None:
@@ -328,7 +389,8 @@ def test_packet_carries_ticket_scenarios_contracts_and_persona(tmp_path: Path) -
     rec = _Recorder()
     tickets, extra = _three_tickets(store)
     _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets, artifacts=extra), _config())
+        _state(store, tickets, artifacts=extra), _config()
+    )
 
     p1 = rec.packets["T-001"]
     assert p1.pinned_constraints == (CONSTRAINT,)
@@ -350,15 +412,20 @@ def test_packet_carries_the_built_interfaces_and_the_step_scaffold(tmp_path: Pat
     rec = _Recorder(writes={"T-001": {"todo/store.py": built}})
     tickets, extra = _three_tickets(store)
     _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets, artifacts=extra), _config())
+        _state(store, tickets, artifacts=extra), _config()
+    )
 
     assert not any("INTERFACES ALREADY BUILT" in s for s in rec.packets["T-001"].retrieved_spans)
-    [sigmap] = [s for s in rec.packets["T-002"].retrieved_spans
-                if s.startswith("INTERFACES ALREADY BUILT")]
+    [sigmap] = [
+        s for s in rec.packets["T-002"].retrieved_spans if s.startswith("INTERFACES ALREADY BUILT")
+    ]
     assert "## todo/store.py\nclass TodoStore:\n    def add(self, title: str) -> int" in sigmap
     assert "return 1" not in sigmap
-    [scaffold] = [s for s in rec.packets["T-003"].retrieved_spans
-                  if s.startswith("PYTEST-BDD STEP SCAFFOLD for tests/steps/test_t001.py")]
+    [scaffold] = [
+        s
+        for s in rec.packets["T-003"].retrieved_spans
+        if s.startswith("PYTEST-BDD STEP SCAFFOLD for tests/steps/test_t001.py")
+    ]
     assert 'scenarios("../../features/T-001.feature")' in scaffold
     assert '@given("an empty store")' in scaffold and "@when(\"I add 'milk'\")" in scaffold
     assert not any(s.startswith("PYTEST-BDD") for s in rec.packets["T-001"].retrieved_spans)
@@ -367,8 +434,11 @@ def test_packet_carries_the_built_interfaces_and_the_step_scaffold(tmp_path: Pat
 def test_writes_outside_the_ticket_files_are_dropped_and_noted(tmp_path: Path) -> None:
     store = ArtifactStore()
     tickets = [_ticket("T-001", 0, files=("todo/store.py",))]
-    out = _graph(_runtime(_Recorder(), store), store, tmp_path).compile().invoke(
-        _state(store, tickets), _config())
+    out = (
+        _graph(_runtime(_Recorder(), store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets), _config())
+    )
     diff = store.resolve(_diffs(out)["T-001"])
     assert isinstance(diff, FeatureDiff)
     body = json.loads(store.resolve_blob(diff.diff_uri))
@@ -388,8 +458,11 @@ def test_a_failing_ticket_keeps_its_siblings_and_is_retried_then_skipped(
 ) -> None:
     store = ArtifactStore()
     rec = _Recorder(fail_on={"T-002": 5})  # fails every attempt
-    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, _wave_of_three()), _config())
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, _wave_of_three()), _config())
+    )
     assert set(_diffs(out)) == {"T-001", "T-003"}  # the siblings' diffs landed
     assert sorted(rec.calls) == ["T-001", "T-002!", "T-002!", "T-003"]  # retried once
     notes = {t.name for t in out["gate_triage"] if t.run_against == "task/T-002"}
@@ -399,8 +472,11 @@ def test_a_failing_ticket_keeps_its_siblings_and_is_retried_then_skipped(
 def test_a_ticket_that_fails_once_is_built_on_the_retry(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder(fail_on={"T-002": 1})
-    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, _wave_of_three()), _config())
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, _wave_of_three()), _config())
+    )
     assert set(_diffs(out)) == {"T-001", "T-002", "T-003"}
     assert rec.calls.count("T-001") == 1 and rec.calls[-1] == "T-002"
 
@@ -429,16 +505,22 @@ def test_a_cap_stopped_supervisor_run_resumes(tmp_path: Path, resume: str) -> No
     store = ArtifactStore()
     meter = TokenMeter(10**9)
     rec = _Recorder(cap_on="T-002", meter=meter)
-    proxy = ModelProviderProxy(MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve"),
-                               signer=ZoneBSigner(KEY, KEY_ID))
+    proxy = ModelProviderProxy(
+        MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve"),
+        signer=ZoneBSigner(KEY, KEY_ID),
+    )
     proxy.token_meter = meter
     rt = AgentRuntime(proxy=proxy, adapter=rec, cas=store)
     src = tmp_path / "src"
     src.mkdir()
     records = GlobalRecords()
     app = build_supervisor_graph(
-        rt, runner=_runner(records), resolve=store.resolve, resolve_blob=store.resolve_blob,
-        source_dir=str(src), max_fix_attempts=1,
+        rt,
+        runner=_runner(records),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        source_dir=str(src),
+        max_fix_attempts=1,
     ).compile(checkpointer=MemorySaver())
     cfg = _sup_config("cap-run")
     seed = _state(store, _wave_of_three())
@@ -474,14 +556,22 @@ def test_a_ticket_that_writes_none_of_its_files_is_retried_then_skipped(
     # failed attempt, not a built ticket: an empty diff must not unblock dependents.
     store = ArtifactStore()
     rec = _Recorder(silent=frozenset({"T-001"}))
-    tickets = [_ticket("T-001", 0, files=("contracts.py",)),
-               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
-    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets), _config())
+    tickets = [
+        _ticket("T-001", 0, files=("contracts.py",)),
+        _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+    ]
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets), _config())
+    )
     assert _diffs(out) == {}
     assert rec.calls == ["T-001", "T-001"]  # T-002 never builds on the empty contract
-    notes = {t.name: t.explanation for t in out["gate_triage"]
-             if t.run_against == "task/T-001" and t.produced_by == "engineering"}
+    notes = {
+        t.name: t.explanation
+        for t in out["gate_triage"]
+        if t.run_against == "task/T-001" and t.produced_by == "engineering"
+    }
     assert set(notes) == {"ticket-failed:1", "ticket-failed:2", "ticket-skipped"}
     assert "contracts.py" in notes["ticket-failed:1"]
 
@@ -493,11 +583,13 @@ def test_a_retried_ticket_is_told_why_its_last_attempt_failed(tmp_path: Path) ->
     rec = _Recorder(silent=frozenset({"T-001"}))
     tickets = [_ticket("T-001", 0, files=("contracts.py",))]
     _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets), _config())
+        _state(store, tickets), _config()
+    )
     first, second = rec.history
     assert first.prior_failures == ()
-    assert any("wrote none of the ticket's files (contracts.py)" in f
-               for f in second.prior_failures)
+    assert any(
+        "wrote none of the ticket's files (contracts.py)" in f for f in second.prior_failures
+    )
     assert assemble_prompt(first) != assemble_prompt(second)
 
 
@@ -505,8 +597,11 @@ def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder()
     tickets = [_ticket("T-001", 0, files=("a.py",)), _ticket("T-002", 1, files=("b.py",))]
-    first = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets[:1]), _config())
+    first = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets[:1]), _config())
+    )
     rec.calls.clear()
     seeded = _state(store, tickets, artifacts=list(_diffs(first).values()))
     out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(seeded, _config())
@@ -522,8 +617,9 @@ def test_over_budget_ticket_is_skipped_and_the_loop_ends(tmp_path: Path) -> None
         _ticket("T-002", 1, files=("b.py",)),
         _ticket("T-003", 2, files=("c.py",), deps=("T-002",)),
     ]
-    app = _graph(_runtime(rec, store), store, tmp_path,
-                 cost_budget_microusd=100, cost_cap_microusd=100).compile()
+    app = _graph(
+        _runtime(rec, store), store, tmp_path, cost_budget_microusd=100, cost_cap_microusd=100
+    ).compile()
     out = app.invoke(_state(store, tickets), _config())
     assert rec.calls == ["T-001"]
     skipped = {t.run_against for t in out["gate_triage"] if t.name == "ticket-skipped"}
@@ -537,8 +633,7 @@ def test_fix_reentry_runs_the_fixer_not_the_tickets(tmp_path: Path) -> None:
     app = _graph(_runtime(rec, store), store, tmp_path).compile()
     built = app.invoke(_state(store, tickets), _config())
     ran: list[str] = []
-    for step in app.stream({**built, "phase": "build_test_fix"}, _config(),
-                           stream_mode="updates"):
+    for step in app.stream({**built, "phase": "build_test_fix"}, _config(), stream_mode="updates"):
         ran.extend(step)
     assert ran == ["fixer"]
     assert rec.calls[-1] == "fix-1" and rec.seen["fix-1"]["a.py"] == "# written by T-001\n"
@@ -551,17 +646,28 @@ _WAVE_KEY = b"dev-zone-b-wave-key-0123456789abcdef"
 
 
 def _wave_run(
-    tmp_path: Path, rec: _Recorder, *, max_fix_attempts: int = 3,
-    tickets: list[Ticket] | None = None, store: ArtifactStore | None = None,
-    fix_policy: FixPolicy | None = None, **extra: Any,
+    tmp_path: Path,
+    rec: _Recorder,
+    *,
+    max_fix_attempts: int = 3,
+    tickets: list[Ticket] | None = None,
+    store: ArtifactStore | None = None,
+    fix_policy: FixPolicy | None = None,
+    **extra: Any,
 ) -> tuple[FactoryState, list[str], ArtifactStore]:
     """Two waves (T-002 depends on T-001) with the REAL runner's build gate between."""
     store = store or ArtifactStore()
     rt = _runtime(rec, store)
     records = GlobalRecords()
     runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), records, "s1", "l1")
-    check = WaveBuildCheck(rt, runner, store.resolve, store.resolve_blob,
-                           max_fix_attempts=max_fix_attempts, fix_policy=fix_policy or FixPolicy())
+    check = WaveBuildCheck(
+        rt,
+        runner,
+        store.resolve,
+        store.resolve_blob,
+        max_fix_attempts=max_fix_attempts,
+        fix_policy=fix_policy or FixPolicy(),
+    )
     tickets = tickets or [
         _ticket("T-001", 0, files=("app.py",)),
         _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
@@ -580,8 +686,9 @@ def _wave_run(
 
 
 def _builds(out: FactoryState) -> list[GateStatus]:
-    return [g.status for g in sorted(out.get("gates") or (), key=lambda g: g.seq)
-            if g.name == "build"]
+    return [
+        g.status for g in sorted(out.get("gates") or (), key=lambda g: g.seq) if g.name == "build"
+    ]
 
 
 def test_a_passing_intermediate_build_proceeds_to_the_next_wave(tmp_path: Path) -> None:
@@ -595,11 +702,13 @@ def test_a_passing_intermediate_build_proceeds_to_the_next_wave(tmp_path: Path) 
 def test_a_failing_intermediate_build_runs_the_fixer_before_the_next_wave(
     tmp_path: Path,
 ) -> None:
-    rec = _Recorder(writes={
-        "T-001": {"app.py": "def broken(:\n"},
-        "fix-1": {"app.py": "def fixed():\n    return 1\n"},
-        "T-002": {"app.py": "def fixed():\n    return 2\n"},
-    })
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "fix-1": {"app.py": "def fixed():\n    return 1\n"},
+            "T-002": {"app.py": "def fixed():\n    return 2\n"},
+        }
+    )
     out, ran, store = _wave_run(tmp_path, rec)
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
     assert rec.calls == ["T-001", "fix-1", "T-002"]
@@ -615,11 +724,16 @@ def test_a_failing_intermediate_build_runs_the_fixer_before_the_next_wave(
 
 def test_a_spent_fix_budget_halts_the_waves_in_order(tmp_path: Path) -> None:
     # Each fix changes the failure (progress) without clearing it.
-    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"},
-                            "fix-1": {"app.py": "def broken_1(:\n"},
-                            "fix-2": {"app.py": "def broken_2(:\n"}})
-    out, ran, store = _wave_run(tmp_path, rec, max_fix_attempts=3,
-                                fix_policy=FixPolicy(restarts=False))
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "fix-1": {"app.py": "def broken_1(:\n"},
+            "fix-2": {"app.py": "def broken_2(:\n"},
+        }
+    )
+    out, ran, store = _wave_run(
+        tmp_path, rec, max_fix_attempts=3, fix_policy=FixPolicy(restarts=False)
+    )
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate"]
     assert rec.calls == ["T-001", "fix-1", "fix-2"]  # wave 2 never started
     assert set(_builds(out)) == {GateStatus.FAIL}
@@ -640,8 +754,9 @@ def _exists_check(tmp_path: Path) -> str:
 def test_the_wave_check_typechecks_only_targets_built_so_far(tmp_path: Path) -> None:
     # Wave 0 is the contracts ticket; the planned `app` package arrives in wave 1.
     # The stack's typecheck names both, so the wave-0 check must not demand `app`.
-    stack = StackDecision(language="python", build="true",
-                          typecheck=f"{_exists_check(tmp_path)} app contracts.py")
+    stack = StackDecision(
+        language="python", build="true", typecheck=f"{_exists_check(tmp_path)} app contracts.py"
+    )
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("app/__init__.py",), deps=("contracts",)),
@@ -657,8 +772,9 @@ def test_the_wave_check_typechecks_only_targets_built_so_far(tmp_path: Path) -> 
 def test_the_wave_check_builds_only_targets_built_so_far(tmp_path: Path) -> None:
     # The finance-tracker trial: `compileall -q finance smoke.py` failed wave 0
     # because smoke.py belongs to a later ticket.
-    stack = StackDecision(language="python",
-                          build=f"{_exists_check(tmp_path)} contracts.py smoke.py")
+    stack = StackDecision(
+        language="python", build=f"{_exists_check(tmp_path)} contracts.py smoke.py"
+    )
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("smoke.py",), deps=("contracts",)),
@@ -673,14 +789,16 @@ def test_the_wave_check_builds_only_targets_built_so_far(tmp_path: Path) -> None
 def test_the_wave_check_still_fails_a_missing_built_target(tmp_path: Path) -> None:
     # Scoping only drops planned-but-unbuilt targets: a path no ticket plans (a
     # typo'd target) still fails the check — the gate is not weakened.
-    stack = StackDecision(language="python", build="true",
-                          typecheck=f"{_exists_check(tmp_path)} contracts.py contract.py")
+    stack = StackDecision(
+        language="python",
+        build="true",
+        typecheck=f"{_exists_check(tmp_path)} contracts.py contract.py",
+    )
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("app/__init__.py",), deps=("contracts",)),
     ]
-    out, ran, _ = _wave_run(tmp_path, _Recorder(), tickets=tickets, stack=stack,
-                            max_fix_attempts=1)
+    out, ran, _ = _wave_run(tmp_path, _Recorder(), tickets=tickets, stack=stack, max_fix_attempts=1)
     assert ran == ["engineering", "wave_gate"]
     assert _builds(out) == [GateStatus.FAIL]
 
@@ -689,18 +807,21 @@ def test_contracts_that_fail_the_wave_zero_typecheck_are_fixable(tmp_path: Path)
     # The contracts are gate-owned, but not before wave 0 passes: the fixer's repair
     # of a stub the type checker rejects reaches the re-check, and wave 1 builds on it.
     script = tmp_path / "typecheck.py"
-    script.write_text("import sys; sys.exit(any('BROKEN' in open(p).read() "
-                      "for p in sys.argv[1:]))")
-    stack = StackDecision(language="python", build="true",
-                          typecheck=f"{sys.executable} {script} contracts.py")
+    script.write_text("import sys; sys.exit(any('BROKEN' in open(p).read() for p in sys.argv[1:]))")
+    stack = StackDecision(
+        language="python", build="true", typecheck=f"{sys.executable} {script} contracts.py"
+    )
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
     ]
-    rec = _Recorder(writes={"contracts": {"contracts.py": "BROKEN\n"},
-                            "fix-1": {"contracts.py": "class Store: ...\n"}})
-    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, stack=stack,
-                                max_fix_attempts=2)
+    rec = _Recorder(
+        writes={
+            "contracts": {"contracts.py": "BROKEN\n"},
+            "fix-1": {"contracts.py": "class Store: ...\n"},
+        }
+    )
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, stack=stack, max_fix_attempts=2)
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
     assert _builds(out) == [GateStatus.FAIL, GateStatus.PASS]
     assert rec.seen["T-001"]["contracts.py"] == "class Store: ...\n"
@@ -719,17 +840,25 @@ def test_a_later_contract_fix_carries_forward_and_a_ticket_edit_does_not(
         _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
         _ticket("T-002", 2, files=("more.py", "contracts.py"), deps=("T-001",)),
     ]
-    rec = _Recorder(writes={
-        "T-001": {"app.py": "def broken(:\n"},
-        "fix-1": {"app.py": "VALUE = 1\n", "contracts.py": "class Store: ...  # fixed\n"},
-        "T-002": {"contracts.py": "class Store: ...  # ticket edit\n"},
-    })
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "fix-1": {"app.py": "VALUE = 1\n", "contracts.py": "class Store: ...  # fixed\n"},
+            "T-002": {"contracts.py": "class Store: ...  # ticket edit\n"},
+        }
+    )
     out, ran, store = _wave_run(tmp_path, rec, tickets=tickets)
-    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
-                   "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+    ]
     assert rec.seen["T-002"]["contracts.py"] == "class Store: ...  # fixed\n"
-    notes = {t.name: t.explanation for t in out["gate_triage"]
-             if t.run_against == "task/fix-1"}
+    notes = {t.name: t.explanation for t in out["gate_triage"] if t.run_against == "task/fix-1"}
     assert "contracts.py" in notes["contract-change:contracts.py"]
     tree = tmp_path / "tree"
     materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
@@ -742,18 +871,21 @@ def test_a_mid_wave_fix_keeps_writes_outside_the_built_files_and_notes_them(
     # A repair often needs a file no built ticket owns (a missing __init__.py, a
     # manifest): the fixer's write is kept and flagged, never silently dropped.
     # Gate inputs stay out of reach: its feature-file edit is still discarded.
-    rec = _Recorder(writes={
-        "T-001": {"app.py": "def broken(:\n"},
-        "fix-1": {"app.py": "def fixed():\n    return 1\n", "later.py": "x = 1\n"},
-    })
-    tickets = [_ticket("T-001", 0, files=("app.py",)),
-               _ticket("T-002", 1, files=("later.py",), deps=("T-001",))]
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "fix-1": {"app.py": "def fixed():\n    return 1\n", "later.py": "x = 1\n"},
+        }
+    )
+    tickets = [
+        _ticket("T-001", 0, files=("app.py",)),
+        _ticket("T-002", 1, files=("later.py",), deps=("T-001",)),
+    ]
     out, ran, store = _wave_run(tmp_path, rec, tickets=tickets)
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering"]
     assert rec.seen["T-002"]["later.py"] == "x = 1\n"  # the fix reached the next wave
     assert "never build a later ticket's files" in rec.packets["fix-1"].persona
-    notes = {t.name: t.explanation for t in out["gate_triage"]
-             if t.run_against == "task/fix-1"}
+    notes = {t.name: t.explanation for t in out["gate_triage"] if t.run_against == "task/fix-1"}
     assert "later.py" in notes["fix-scope"] and "rogue.txt" in notes["fix-scope"]
     assert "app.py" not in notes["fix-scope"]
     assert notes["write-scope"].endswith("features/T-001.feature")  # dropped, not kept
@@ -763,16 +895,23 @@ def test_a_mid_wave_fix_keeps_writes_outside_the_built_files_and_notes_them(
     assert (tree / "later.py").read_text() == "# written by T-002\n"  # its owner wins
 
 
-@pytest.mark.parametrize(("cmd", "want"), [
-    ("mypy app contracts.py smoke.py", "mypy contracts.py"),
-    ("mypy app/ smoke.py", ""),
-    ("mypy ./app contracts.py && pyright contracts.py",
-     "mypy contracts.py && pyright contracts.py"),
-    ("mypy .", "mypy ."),
-    ("mypy contracts.py lib", "mypy contracts.py lib"),  # `lib` is not planned
-])
+@pytest.mark.parametrize(
+    ("cmd", "want"),
+    [
+        ("mypy app contracts.py smoke.py", "mypy contracts.py"),
+        ("mypy app/ smoke.py", ""),
+        (
+            "mypy ./app contracts.py && pyright contracts.py",
+            "mypy contracts.py && pyright contracts.py",
+        ),
+        ("mypy .", "mypy ."),
+        ("mypy contracts.py lib", "mypy contracts.py lib"),  # `lib` is not planned
+    ],
+)
 def test_wave_typecheck_drops_only_planned_unbuilt_targets(
-    tmp_path: Path, cmd: str, want: str,
+    tmp_path: Path,
+    cmd: str,
+    want: str,
 ) -> None:
     (tmp_path / "contracts.py").write_text("")
     planned = planned_paths(["contracts.py", "app/db.py", "app/__init__.py", "smoke.py"])
@@ -799,8 +938,11 @@ def test_adapter_triage_is_forwarded_never_a_gate_result(tmp_path: Path) -> None
 
     store = ArtifactStore()
     rt = _runtime(StubAdapter(triage_note="needs a test"), store)
-    out = _graph(rt, store, tmp_path).compile().invoke(
-        _state(store, [_ticket("T-001", 0)]), _config())
+    out = (
+        _graph(rt, store, tmp_path)
+        .compile()
+        .invoke(_state(store, [_ticket("T-001", 0)]), _config())
+    )
     assert set(_diffs(out)) == {"T-001"}
     assert not out.get("gates")  # L5: agents never mint a GateResult
     triage = out["gate_triage"]
@@ -818,8 +960,9 @@ class _ConstantDiffAdapter:
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         (Path(sandbox.worktree) / "same.txt").write_text("constant")
-        return AdapterResult(diff_uri=sandbox.put_blob(b"identical-diff"),
-                             snapshot_digest=sandbox.snapshot())
+        return AdapterResult(
+            diff_uri=sandbox.put_blob(b"identical-diff"), snapshot_digest=sandbox.snapshot()
+        )
 
 
 def test_concurrent_identical_writes_to_a_shared_store_are_safe(tmp_path: Path) -> None:
@@ -828,8 +971,12 @@ def test_concurrent_identical_writes_to_a_shared_store_are_safe(tmp_path: Path) 
     'Directory not empty' (a PID-only temp name shared across threads)."""
     store = ArtifactStore()
     tickets = [_ticket("T-001", 0, files=("a.py",)), _ticket("T-002", 1, files=("b.py",))]
-    app = _graph(_runtime(_ConstantDiffAdapter(), store), store, tmp_path,
-                 snapshot_store=str(tmp_path / "store")).compile()
+    app = _graph(
+        _runtime(_ConstantDiffAdapter(), store),
+        store,
+        tmp_path,
+        snapshot_store=str(tmp_path / "store"),
+    ).compile()
     out = app.invoke(_state(store, tickets), _config())
     assert set(_diffs(out)) == {"T-001", "T-002"}  # one wave, no race crash
     digest = hashlib.sha256(b"identical-diff").hexdigest()
@@ -860,8 +1007,7 @@ class _LiveByLineage:
             time.sleep(0.04)
             if packet.task["id"] == "boom":
                 raise RuntimeError("adapter blew up")
-            return AdapterResult(diff_uri=sandbox.put_blob(b""),
-                                 snapshot_digest=sandbox.snapshot())
+            return AdapterResult(diff_uri=sandbox.put_blob(b""), snapshot_digest=sandbox.snapshot())
         finally:
             with self.lock:
                 self.live[sp] -= 1
@@ -870,9 +1016,16 @@ class _LiveByLineage:
 
 def _etask(tid: str, specialty: str) -> ExecutionTask:
     packet = TaskPacket(
-        task={"id": tid, "ticket_id": tid, "title": f"t {tid}", "specialty": specialty,
-              "tier": "T2"},
-        worktree_path=".", turn_budget=1, cost_budget_microusd=1,
+        task={
+            "id": tid,
+            "ticket_id": tid,
+            "title": f"t {tid}",
+            "specialty": specialty,
+            "tier": "T2",
+        },
+        worktree_path=".",
+        turn_budget=1,
+        cost_budget_microusd=1,
     )
     return ExecutionTask(packet=packet, adapter="x", lineage=specialty)
 
@@ -888,8 +1041,11 @@ def test_per_specialty_limit_is_never_exceeded(tmp_path: Path) -> None:
         limits={"backend": 1, "frontend": 2},
     )
     try:
-        ids = [pool.submit(_etask(f"{sp}-{i}", sp))
-               for i in range(5) for sp in ("backend", "frontend", "data")]
+        ids = [
+            pool.submit(_etask(f"{sp}-{i}", sp))
+            for i in range(5)
+            for sp in ("backend", "frontend", "data")
+        ]
         for tid in ids:
             pool.result(tid)
     finally:
@@ -923,10 +1079,17 @@ def test_a_task_waiting_on_its_specialty_never_holds_a_pool_thread(tmp_path: Pat
         limits={"backend": 1, "frontend": 2},
     )
     try:
-        ids = [pool.submit(_etask(tid, sp)) for tid, sp in (
-            ("B1", "backend"), ("B2", "backend"), ("B3", "backend"),
-            ("F1", "frontend"), ("F2", "frontend"), ("F3", "frontend"),
-        )]
+        ids = [
+            pool.submit(_etask(tid, sp))
+            for tid, sp in (
+                ("B1", "backend"),
+                ("B2", "backend"),
+                ("B3", "backend"),
+                ("F1", "frontend"),
+                ("F2", "frontend"),
+                ("F3", "frontend"),
+            )
+        ]
         with cond:
             cond.wait_for(lambda: len(started) >= 3, timeout=2)
             first = sorted(started)
@@ -967,10 +1130,20 @@ def test_on_task_reports_start_done_failed_and_is_fail_soft(tmp_path: Path) -> N
     assert events == [
         {"phase": "start", "ticket_id": "ok", "title": "t ok", "specialty": "data", "tier": "T2"},
         {"phase": "done", "ticket_id": "ok", "title": "t ok", "specialty": "data", "tier": "T2"},
-        {"phase": "start", "ticket_id": "boom", "title": "t boom", "specialty": "test",
-         "tier": "T2"},
-        {"phase": "failed", "ticket_id": "boom", "title": "t boom", "specialty": "test",
-         "tier": "T2"},
+        {
+            "phase": "start",
+            "ticket_id": "boom",
+            "title": "t boom",
+            "specialty": "test",
+            "tier": "T2",
+        },
+        {
+            "phase": "failed",
+            "ticket_id": "boom",
+            "title": "t boom",
+            "specialty": "test",
+            "tier": "T2",
+        },
     ]
 
 
@@ -989,8 +1162,9 @@ def _model_arg(argv: list[str]) -> str | None:
 
 
 def test_claude_code_resolves_the_packet_tier_to_model() -> None:
-    adapter = ClaudeCodeAdapter(model="fallback-model",
-                                tier_models={"T1": "opus-x", "T3": "haiku-x"})
+    adapter = ClaudeCodeAdapter(
+        model="fallback-model", tier_models={"T1": "opus-x", "T3": "haiku-x"}
+    )
     assert _model_arg(adapter._argv(_packet("T3"))) == "haiku-x"
     assert _model_arg(adapter._argv(_packet("T1"))) == "opus-x"
     assert _model_arg(adapter._argv(_packet("T2"))) == "fallback-model"  # unmapped tier
@@ -1008,8 +1182,14 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
         def complete(self, _node: str, tier: str, system: str, *_a: Any, **_k: Any) -> Any:
             tiers.append(tier)
             systems.append(system)
-            return type("R", (), {"text": "```diff\n```\n```triage\nok\n```",
-                                  "parsed": {"action": "finish", "summary": "ok"}})()
+            return type(
+                "R",
+                (),
+                {
+                    "text": "```diff\n```\n```triage\nok\n```",
+                    "parsed": {"action": "finish", "summary": "ok"},
+                },
+            )()
 
     proxy: Any = _Proxy()
     cc = cli.make_coding_adapter("claude-code", proxy=proxy, tier_models={"T3": "haiku-x"})
@@ -1035,12 +1215,19 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
 def test_parse_workers_and_ticket_tiers() -> None:
     assert cli.parse_workers("") == {"backend": 4, "data": 4, "frontend": 4, "test": 4}
     assert cli.parse_workers("frontend=2, backend=3,data=1,test=2") == {
-        "backend": 3, "data": 1, "frontend": 2, "test": 2}
+        "backend": 3,
+        "data": 1,
+        "frontend": 2,
+        "test": 2,
+    }
     for bad in ("ops=2", "backend=0", "backend=x", "backend"):
         with pytest.raises(ValueError):
             cli.parse_workers(bad)
     assert cli.parse_ticket_tiers("trivial=t2") == {
-        Difficulty.TRIVIAL: "T2", Difficulty.STANDARD: "T2", Difficulty.COMPLEX: "T1"}
+        Difficulty.TRIVIAL: "T2",
+        Difficulty.STANDARD: "T2",
+        Difficulty.COMPLEX: "T1",
+    }
     for bad in ("easy=T1", "complex=T9"):
         with pytest.raises(ValueError):
             cli.parse_ticket_tiers(bad)
@@ -1067,7 +1254,7 @@ def test_main_passes_flags_and_env_through_to_run(monkeypatch: pytest.MonkeyPatc
 
 # ---- per-wave scenario check: unbound scenarios are caught in their wave -----
 
-_STEPS = '''from pytest_bdd import given, scenarios, then, when
+_STEPS = """from pytest_bdd import given, scenarios, then, when
 
 scenarios("{path}")
 
@@ -1086,22 +1273,32 @@ def _add():
 def _id():
     from app import add
     assert add("milk") == 1
-'''
+"""
 
 
 def _bdd_wave_tickets(store: ArtifactStore) -> tuple[list[Ticket], list[Any]]:
     crit = AcceptanceCriterion(
-        id="AC-1", text="add returns 1", given=("an empty store",),
-        when=("I add 'milk'",), then=("it has id 1",), ticket_id="T-001", seq=_seq(21),
+        id="AC-1",
+        text="add returns 1",
+        given=("an empty store",),
+        when=("I add 'milk'",),
+        then=("it has id 1",),
+        ticket_id="T-001",
+        seq=_seq(21),
     )
     tickets = [
         _ticket("T-001", 0, files=("app.py",), scenario_ids=("AC-1",)),
-        _ticket("T-002", 1, specialty=Specialty.TEST, files=("tests/steps/test_app.py",),
-                deps=("T-001",), scenario_ids=("AC-1",)),
+        _ticket(
+            "T-002",
+            1,
+            specialty=Specialty.TEST,
+            files=("tests/steps/test_app.py",),
+            deps=("T-001",),
+            scenario_ids=("AC-1",),
+        ),
         _ticket("T-003", 2, files=("later.py",), deps=("T-002",)),
     ]
-    return tickets, [emit_artifact(crit, "acceptance_criterion", "planner", crit.seq,
-                                   store=store)]
+    return tickets, [emit_artifact(crit, "acceptance_criterion", "planner", crit.seq, store=store)]
 
 
 def test_the_wave_check_catches_an_unbound_scenario_and_the_fixer_binds_it(
@@ -1110,30 +1307,42 @@ def test_the_wave_check_catches_an_unbound_scenario_and_the_fixer_binds_it(
     # The trial failure: a test ticket binds its OWN copy of the scenarios, so the
     # suite is green but the gate-owned feature never runs. Caught after the wave
     # that built both carriers, not all at once at the final gate.
-    rec = _Recorder(writes={
-        "T-001": {"app.py": "def add(title):\n    return 1\n"},
-        "T-002": {"tests/features/app.feature": "Feature: copy\n",
-                  "tests/steps/test_app.py": _STEPS.format(path="../features/app.feature")},
-        "fix-1": {"tests/steps/test_app.py":
-                  _STEPS.format(path="../../features/T-001.feature")},
-    })
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def add(title):\n    return 1\n"},
+            "T-002": {
+                "tests/features/app.feature": "Feature: copy\n",
+                "tests/steps/test_app.py": _STEPS.format(path="../features/app.feature"),
+            },
+            "fix-1": {
+                "tests/steps/test_app.py": _STEPS.format(path="../../features/T-001.feature")
+            },
+        }
+    )
     store = ArtifactStore()
     tickets, extra = _bdd_wave_tickets(store)
     out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, artifacts=extra, store=store)
 
     # T-001 alone leaves AC-1 waiting on its test ticket: build only, no scenario run.
-    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
-                   "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+    ]
     tests = [g for g in sorted(out["gates"], key=lambda g: g.seq) if g.name == "test"]
     assert [g.status for g in tests] == [GateStatus.FAIL, GateStatus.PASS]
-    assert any("features/T-001.feature::AC-1 was not executed" in f
-               for f in tests[0].findings)
+    assert any("features/T-001.feature::AC-1 was not executed" in f for f in tests[0].findings)
     # The fixer sees the failure grouped by feature file with the owning tickets.
     grouped = "\n".join(rec.packets["fix-1"].prior_failures)
     assert "[features/T-001.feature] scenarios AC-1" in grouped
     assert "T-002 (tests/steps/test_app.py)" in grouped
     assert "never write, copy or regenerate a .feature" in " ".join(
-        rec.packets["fix-1"].task["rules"])
+        rec.packets["fix-1"].task["rules"]
+    )
     # The agent's own feature file never reaches the tree.
     tree = tmp_path / "tree"
     materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
@@ -1148,12 +1357,15 @@ def test_a_test_ticket_packet_names_its_feature_binding_and_verify_command(
     rec = _Recorder()
     stack = StackDecision(language="python", test="python3 -m pytest -q")
     _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets, artifacts=extra, stack=stack), _config())
+        _state(store, tickets, artifacts=extra, stack=stack), _config()
+    )
 
     rules = " ".join(rec.packets["T-002"].task["rules"])
     assert "features/T-001.feature (Scenario: AC-1)" in rules
-    assert ('in tests/steps/test_app.py ONLY, the path relative to it: '
-            'scenarios("../../features/T-001.feature")') in rules
+    assert (
+        "in tests/steps/test_app.py ONLY, the path relative to it: "
+        'scenarios("../../features/T-001.feature")'
+    ) in rules
     assert "Never write, copy or regenerate a .feature file" in rules
     assert rec.packets["T-002"].task["verify"]["scenarios"] == (
         "grep -q features/T-001.feature tests/steps/test_app.py && "
@@ -1183,16 +1395,22 @@ def test_a_first_wave_that_never_builds_ends_without_a_check(tmp_path: Path) -> 
 
 
 def _drift_state(store: ArtifactStore) -> tuple[list[Ticket], list[Any]]:
-    signature = ("class ProductService:\n"
-                 "    def list_products(self, search: str | None = None) -> list[Product]\n"
-                 "    def get_product(self, product_id: int) -> Product | None")
-    contract = InterfaceContract(name="ProductServiceInterface",
-                                 spec_uri=persist_prose(signature, store=store),
-                                 kind="class", signature=signature, seq=_seq(20))
-    extra = [emit_artifact(contract, "interface_contract", "planner", contract.seq,
-                           store=store)]
-    return [_ticket("contracts", 0, files=("contracts.py",),
-                    implements=("ProductServiceInterface",))], extra
+    signature = (
+        "class ProductService:\n"
+        "    def list_products(self, search: str | None = None) -> list[Product]\n"
+        "    def get_product(self, product_id: int) -> Product | None"
+    )
+    contract = InterfaceContract(
+        name="ProductServiceInterface",
+        spec_uri=persist_prose(signature, store=store),
+        kind="class",
+        signature=signature,
+        seq=_seq(20),
+    )
+    extra = [emit_artifact(contract, "interface_contract", "planner", contract.seq, store=store)]
+    return [
+        _ticket("contracts", 0, files=("contracts.py",), implements=("ProductServiceInterface",))
+    ], extra
 
 
 def test_a_contracts_file_that_renames_a_planned_name_is_retried_then_noted(
@@ -1202,21 +1420,27 @@ def test_a_contracts_file_that_renames_a_planned_name_is_retried_then_noted(
     # list_products, the catalog ticket coded against the plan, and mypy split them.
     store = ArtifactStore()
     tickets, extra = _drift_state(store)
-    drifted = ("class ProductService(Protocol):\n"
-               "    def list_all_products(self) -> list[Product]: ...\n"
-               "    def get_product(self, product_id: int) -> Product | None: ...\n")
+    drifted = (
+        "class ProductService(Protocol):\n"
+        "    def list_all_products(self) -> list[Product]: ...\n"
+        "    def get_product(self, product_id: int) -> Product | None: ...\n"
+    )
     rec = _Recorder(writes={"contracts": {"contracts.py": drifted}})
-    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets, artifacts=extra), _config())
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets, artifacts=extra), _config())
+    )
     assert rec.calls == ["contracts", "contracts"]
     first, second = rec.history
     assert first.prior_failures == ()
-    assert any("contract ProductServiceInterface declares list_products" in f
-               for f in second.prior_failures)
+    assert any(
+        "contract ProductServiceInterface declares list_products" in f
+        for f in second.prior_failures
+    )
     # The last attempt is kept (later tickets need the file), with the drift noted.
     assert set(_diffs(out)) == {"contracts"}
-    notes = {t.name: t.explanation for t in out["gate_triage"]
-             if t.run_against == "task/contracts"}
+    notes = {t.name: t.explanation for t in out["gate_triage"] if t.run_against == "task/contracts"}
     assert "ticket-skipped" not in notes
     assert "list_products" in notes["contract-drift"]
 
@@ -1224,12 +1448,17 @@ def test_a_contracts_file_that_renames_a_planned_name_is_retried_then_noted(
 def test_a_contracts_file_with_every_planned_name_builds_first_time(tmp_path: Path) -> None:
     store = ArtifactStore()
     tickets, extra = _drift_state(store)
-    exact = ("class ProductService(Protocol):\n"
-             "    def list_products(self, search: str | None = None) -> list[Product]: ...\n"
-             "    def get_product(self, product_id: int) -> Product | None: ...\n")
+    exact = (
+        "class ProductService(Protocol):\n"
+        "    def list_products(self, search: str | None = None) -> list[Product]: ...\n"
+        "    def get_product(self, product_id: int) -> Product | None: ...\n"
+    )
     rec = _Recorder(writes={"contracts": {"contracts.py": exact}})
-    out = _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
-        _state(store, tickets, artifacts=extra), _config())
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets, artifacts=extra), _config())
+    )
     assert rec.calls == ["contracts"]
     assert set(_diffs(out)) == {"contracts"}
     assert not any(t.name == "contract-drift" for t in out.get("gate_triage") or ())
@@ -1238,10 +1467,12 @@ def test_a_contracts_file_with_every_planned_name_builds_first_time(tmp_path: Pa
 def test_contract_members_reads_types_functions_and_go_methods() -> None:
     from foundry.agents.implementation.tickets import contract_members
 
-    assert contract_members("class Store(Protocol):\n    def add(self, t: str) -> int\n"
-                            "    def __init__(self) -> None") == ("Store", "add")
-    assert contract_members("type Store interface { Add(t string) int }\n"
-                            "func (s *Store) Add(t string) int") == ("Store", "Add")
+    assert contract_members(
+        "class Store(Protocol):\n    def add(self, t: str) -> int\n    def __init__(self) -> None"
+    ) == ("Store", "add")
+    assert contract_members(
+        "type Store interface { Add(t string) int }\nfunc (s *Store) Add(t string) int"
+    ) == ("Store", "Add")
     assert contract_members("export interface Todo { id: number }") == ("Todo",)
     # Prose is not code: no names, so no drift finding to chase.
     assert contract_members("a function that returns the type of an order") == ()

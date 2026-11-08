@@ -201,6 +201,7 @@ def _default_adapter_for(backend: str) -> str:
         return _DEFAULT_ADAPTER
     return "claude-code" if backend == "claude-cli" else "raw-react"
 
+
 # System-decided parallelism (no user knob): the Tech-Lead decomposes the work
 # into independently-buildable tasks, and the IC pool sizes ITSELF to that plan —
 # one worker per ready task, bounded by this SAFETY CAP so a large decomposition
@@ -277,8 +278,7 @@ def make_coding_adapter(
         # `activity_cb` (optional) streams what the agent is DOING inside one step —
         # a step is a single blocking CLI call, so without it a multi-minute agentic
         # pass reports nothing until it returns.
-        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb,
-                                 tier_models=tier_models)
+        return ClaudeCodeAdapter(run_id=thread_id, on_activity=activity_cb, tier_models=tier_models)
     if name == "proxy-agent":
         from foundry.execution.adapters.proxy_agent import ProxyAgentAdapter
 
@@ -309,9 +309,16 @@ def make_coding_adapter(
         # Opt-in (Phase 5): the actions as native tool calls; a backend without a
         # tool channel (claude-cli, codex) falls back to JSON actions on its own.
         native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
-            "", "0", "false", "no")
-        return ProxyAgentAdapter(complete_fn=_agent_complete, run_id=thread_id,
-                                 tool_complete_fn=_agent_tools if native else None)
+            "",
+            "0",
+            "false",
+            "no",
+        )
+        return ProxyAgentAdapter(
+            complete_fn=_agent_complete,
+            run_id=thread_id,
+            tool_complete_fn=_agent_tools if native else None,
+        )
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
 
@@ -326,8 +333,13 @@ def _resolve_coding_adapter(
     """A WorkerAdapter instance passes through (tests inject one); a name (or None)
     is constructed via :func:`make_coding_adapter`."""
     if adapter is None or isinstance(adapter, str):
-        return make_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                   activity_cb=activity_cb, tier_models=tier_models)
+        return make_coding_adapter(
+            adapter,
+            proxy=proxy,
+            thread_id=thread_id,
+            activity_cb=activity_cb,
+            tier_models=tier_models,
+        )
     return adapter
 
 
@@ -402,9 +414,7 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
     fails closed with a clear ``ValueError``. Drift from the pinned model on a
     gate/judgment call fails closed by default (see :func:`_drift_policy`)."""
     if backend not in BACKENDS:
-        raise ValueError(
-            f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}"
-        )
+        raise ValueError(f"unknown backend {backend!r}; choose one of {', '.join(BACKENDS)}")
     signer = _zone_b_signer()
     drift = _drift_policy()
     if backend == _MOCK_BACKEND:
@@ -419,6 +429,7 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         drift_policy=drift,
         tier_models=_tier_models(backend),
     )
+
 
 def _cloud_transport(backend: str) -> ProviderTransport:
     """The egress of one cloud level ("mock" is the scripted keyless double)."""
@@ -467,11 +478,18 @@ def _level_adapter(
     if cloud_models:
         cloud = _resolve_coding_adapter(
             adapter if adapter is not None else _default_adapter_for(backend),
-            proxy=proxy, thread_id=thread_id, activity_cb=activity_cb,
+            proxy=proxy,
+            thread_id=thread_id,
+            activity_cb=activity_cb,
             tier_models=cloud_models,
         )
-    return TieredAdapter(cloud=cloud, local=local, local_tiers=local_tiers(levels),
-                         local_slot=proxy.local_slot, escalation_tier=escalation_tier(levels))
+    return TieredAdapter(
+        cloud=cloud,
+        local=local,
+        local_tiers=local_tiers(levels),
+        local_slot=proxy.local_slot,
+        escalation_tier=escalation_tier(levels),
+    )
 
 
 # Spec ingestion (task [8]). A whole-run cap on the design-spec text seeded into
@@ -531,9 +549,18 @@ _PLAN_PAYLOAD: dict[str, Any] = {
     "adrs": [],
     # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
     "stack": {
-        "language": "python", "framework": "", "package_manager": "pip", "install": "",
-        "build": "", "typecheck": "", "test": "pytest", "bdd": "",
-        "run": "python3 -c 'import app'", "notes": "", "contracts_file": "", "harness_files": [],
+        "language": "python",
+        "framework": "",
+        "package_manager": "pip",
+        "install": "",
+        "build": "",
+        "typecheck": "",
+        "test": "pytest",
+        "bdd": "",
+        "run": "python3 -c 'import app'",
+        "notes": "",
+        "contracts_file": "",
+        "harness_files": [],
     },
     "interfaces": [],
     # A small build: one epic, its tickets inline (no per-epic calls).
@@ -708,6 +735,7 @@ def _judgment_anchors(real_artifacts: bool) -> dict[str, str]:
 
 # ---- final source-tree materialization (on a passing build) -----------------
 
+
 def _write_output_tree(
     final_state: FactoryState,
     output_dir: str,
@@ -740,12 +768,11 @@ def _write_output_tree(
     with tempfile.TemporaryDirectory(prefix="foundry-cli-out-") as staging:
         stage_root = Path(staging)
         if best is not None:
-            materialize_best(final_state, stage_root, best, resolve=resolve,
-                             resolve_blob=resolve_blob)
-        else:
-            materialize_workdir(
-                final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
+            materialize_best(
+                final_state, stage_root, best, resolve=resolve, resolve_blob=resolve_blob
             )
+        else:
+            materialize_workdir(final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob)
         for src in sorted(stage_root.rglob("*")):
             if not src.is_file():
                 continue
@@ -845,8 +872,15 @@ def _latest_values(app: Any, config: RunnableConfig) -> FactoryState:
 
 
 def _draft_on_stop(
-    app: Any, config: RunnableConfig, exc: BaseException, *, request: str, thread_id: str,
-    output_dir: str, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+    app: Any,
+    config: RunnableConfig,
+    exc: BaseException,
+    *,
+    request: str,
+    thread_id: str,
+    output_dir: str,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
 ) -> None:
     """Write the stopped run's latest tree as a DRAFT and note where on ``exc``.
     Best-effort: it runs while ``exc`` propagates and must never replace it."""
@@ -855,8 +889,12 @@ def _draft_on_stop(
         if not any(a.kind == "feature_diff" for a in state.get("artifacts") or ()):
             return
         draft = _write_draft_on_halt(
-            state, output_dir, gate_findings=_result(request, thread_id, state).gate_findings,
-            resolve=resolve, resolve_blob=resolve_blob, stopped=str(exc).splitlines()[0][:300],
+            state,
+            output_dir,
+            gate_findings=_result(request, thread_id, state).gate_findings,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
+            stopped=str(exc).splitlines()[0][:300],
         )
     except Exception:
         return
@@ -888,9 +926,7 @@ def _read_spec_path(path: str) -> str:
             f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in _SPEC_SUFFIXES
         )
         if not files:
-            raise ValueError(
-                f"spec directory has no {'/'.join(_SPEC_SUFFIXES)} files: {path}"
-            )
+            raise ValueError(f"spec directory has no {'/'.join(_SPEC_SUFFIXES)} files: {path}")
         parts = [
             f"# === {f.relative_to(p)} ===\n{f.read_text(encoding='utf-8', errors='replace')}"
             for f in files
@@ -1009,13 +1045,18 @@ class RunResult:
             f"mode:      {self.mode}",
             f"  trust:   {_TRUST_POSTURE.get(self.mode, 'unknown')}",
             f"backend:   {self.backend}  "
-            + ("(deterministic mock — no model call)"
-               if self.backend == _MOCK_BACKEND else "(real model egress)"),
+            + (
+                "(deterministic mock — no model call)"
+                if self.backend == _MOCK_BACKEND
+                else "(real model egress)"
+            ),
         ]
         if self.levels:
             lines.append(f"models:    {self.model_mode or 'custom'}")
-            lines += [f"  {tier}: {lvl['backend']} {lvl['model']}"
-                      for tier, lvl in sorted(self.levels.items())]
+            lines += [
+                f"  {tier}: {lvl['backend']} {lvl['model']}"
+                for tier, lvl in sorted(self.levels.items())
+            ]
         lines += [
             f"phase:     {self.phase}",
             f"result:    {'PASS' if self.passed else 'HALTED (no PR)'}",
@@ -1042,7 +1083,7 @@ class RunResult:
                 f"{self.resume_from} (each rerun gets a fresh fix budget)"
                 if self.resumable
                 else f"halted at {self.resume_from}: add --state-dir DIR to make a halted "
-                     "run resumable"
+                "run resumable"
             )
         if self.output_root:
             lines.append(f"source tree written to: {self.output_root}")
@@ -1067,9 +1108,7 @@ def _progress_enabled() -> bool:
     return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
 
 
-def _invoke_streaming(
-    app: Any, seed: FactoryState | None, config: RunnableConfig
-) -> FactoryState:
+def _invoke_streaming(app: Any, seed: FactoryState | None, config: RunnableConfig) -> FactoryState:
     """Drive the graph with ``stream`` (updates mode), printing each completed
     node + elapsed time to stderr, then return the terminal channel state."""
     import time
@@ -1099,9 +1138,9 @@ def _unpack_stream_item(item: Any) -> tuple[tuple[Any, ...], str, Any]:
             return item[0], str(item[1]), item[2]
         if len(item) == 2:
             a, b = item
-            if isinstance(a, tuple):          # (namespace, payload) — single mode
+            if isinstance(a, tuple):  # (namespace, payload) — single mode
                 return a, "updates", b
-            return (), str(a), b              # (mode, payload) — no subgraphs
+            return (), str(a), b  # (mode, payload) — no subgraphs
     return (), "updates", item
 
 
@@ -1184,8 +1223,11 @@ def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> Factor
     if _has_pending_run(app, config):
         return seed
     prior = _prior_values(app, config)
-    if (prior.get("phase") == "halted" and prior.get("request") == seed.get("request")
-            and prior.get("spec") == seed.get("spec")):
+    if (
+        prior.get("phase") == "halted"
+        and prior.get("request") == seed.get("request")
+        and prior.get("spec") == seed.get("spec")
+    ):
         return {"request": seed["request"], "phase": RESUME_PHASE}
     return seed
 
@@ -1279,9 +1321,7 @@ def _detailed_artifacts(arts: Sequence[Any], cap: int = _DETAIL_CAP) -> list[Any
 # ---- the smoke run ----------------------------------------------------------
 
 
-def _change_base(
-    base_dir: str | None, request: str, thread_id: str
-) -> tuple[str | None, str]:
+def _change_base(base_dir: str | None, request: str, thread_id: str) -> tuple[str | None, str]:
     """(absolute base tree, run id) for a change build; (None, thread_id) otherwise."""
     if base_dir is None:
         return None, thread_id
@@ -1314,7 +1354,10 @@ def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
 
 
 def fix_until_cap_for(
-    explicit: bool | None, *, model_mode: str | None, levels: Mapping[str, Any] | None,
+    explicit: bool | None,
+    *,
+    model_mode: str | None,
+    levels: Mapping[str, Any] | None,
     level_table: Mapping[str, Level] | None,
 ) -> bool:
     """Whether the run fixes until its time cap: ``explicit`` (the flag) wins, then
@@ -1474,20 +1517,29 @@ def run(
     if diff_body is None:
         diff_body = _PASSING_DIFF
     level_table = resolve_levels(
-        model_mode=model_mode, levels=levels, backend=backend,
-        cloud_models=_tier_models(backend), cloud_backends=BACKENDS,
-        local_url=local_url, local_model=local_model,
+        model_mode=model_mode,
+        levels=levels,
+        backend=backend,
+        cloud_models=_tier_models(backend),
+        cloud_backends=BACKENDS,
+        local_url=local_url,
+        local_model=local_model,
     )
     if max_fix_attempts is None:
         max_fix_attempts = DEFAULT_FIX_ATTEMPTS[model_mode or "cloud"]
     if time_cap_minutes is not None and time_cap_minutes <= 0:
         raise ValueError("time_cap_minutes must be > 0")
-    fix_policy = FixPolicy(until_cap=fix_until_cap_for(
-        fix_until_cap, model_mode=model_mode, levels=levels, level_table=level_table))
+    fix_policy = FixPolicy(
+        until_cap=fix_until_cap_for(
+            fix_until_cap, model_mode=model_mode, levels=levels, level_table=level_table
+        )
+    )
     if fix_policy.until_cap and time_cap_minutes is None:
-        print(f"note: fixing until the time cap without one: each fix loop stops after "
-              f"{fix_policy.window_ceiling} passes (set --time-cap to fix for longer)",
-              file=sys.stderr)
+        print(
+            f"note: fixing until the time cap without one: each fix loop stops after "
+            f"{fix_policy.window_ceiling} passes (set --time-cap to fix for longer)",
+            file=sys.stderr,
+        )
     spec_text = _load_spec(spec)
     base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
@@ -1520,14 +1572,23 @@ def run(
         # adapter — a name OR an injected WorkerAdapter instance (tests) — wins.
         if adapter is None:
             adapter = _default_adapter_for(backend)
-        coding_adapter = _resolve_coding_adapter(adapter, proxy=proxy, thread_id=thread_id,
-                                                 activity_cb=activity_cb,
-                                                 tier_models=_tier_models(backend))
+        coding_adapter = _resolve_coding_adapter(
+            adapter,
+            proxy=proxy,
+            thread_id=thread_id,
+            activity_cb=activity_cb,
+            tier_models=_tier_models(backend),
+        )
     else:
         proxy = _build_level_proxy(level_table)
-        coding_adapter = _level_adapter(adapter, backend=backend, levels=level_table,
-                                        proxy=proxy, thread_id=thread_id,
-                                        activity_cb=activity_cb)
+        coding_adapter = _level_adapter(
+            adapter,
+            backend=backend,
+            levels=level_table,
+            proxy=proxy,
+            thread_id=thread_id,
+            activity_cb=activity_cb,
+        )
         if local_tiers(level_table) == frozenset(level_table):
             max_slots = 1  # one local model: more ticket slots would only queue
     rt = AgentRuntime(proxy=proxy, adapter=coding_adapter, cas=store)
@@ -1538,9 +1599,12 @@ def run(
         proxy.call_cache = run_dir
     meter: TokenMeter | None = None
     if token_cap is not None or time_cap_minutes is not None or cancel is not None:
-        meter = TokenMeter(token_cap, run_dir / "tokens.json" if run_dir else None,
-                           cancel=cancel,
-                           time_cap_s=time_cap_minutes * 60 if time_cap_minutes else None)
+        meter = TokenMeter(
+            token_cap,
+            run_dir / "tokens.json" if run_dir else None,
+            cancel=cancel,
+            time_cap_s=time_cap_minutes * 60 if time_cap_minutes else None,
+        )
         proxy.token_meter = meter
         if hasattr(rt.adapter, "token_meter"):  # the claude-code substrate bypasses the proxy
             setattr(rt.adapter, "token_meter", meter)  # noqa: B010
@@ -1685,8 +1749,11 @@ def run(
                     if not uri:
                         return None
                     raw = resolve_blob(uri)
-                    text = (raw.decode("utf-8", "replace")
-                            if isinstance(raw, (bytes, bytearray)) else str(raw))
+                    text = (
+                        raw.decode("utf-8", "replace")
+                        if isinstance(raw, (bytes, bytearray))
+                        else str(raw)
+                    )
                     snap: Any = None
                     try:
                         snap = json.loads(text)
@@ -1695,8 +1762,9 @@ def run(
                     if isinstance(snap, dict) and isinstance(snap.get("files"), dict):
                         files = list(snap["files"])
                         deleted = snap.get("deleted") or []
-                        lines = sum(c.count("\n") + 1 for c in snap["files"].values()
-                                    if isinstance(c, str))
+                        lines = sum(
+                            c.count("\n") + 1 for c in snap["files"].values() if isinstance(c, str)
+                        )
                         names = ", ".join(os.path.basename(f) for f in files[:6])
                         if len(files) > 6:
                             names += " …"
@@ -1727,8 +1795,13 @@ def run(
                     return f"{stat} — {names}" if names else stat
 
                 def drive_pc(
-                    node: str, scope: str, *, phase: str = "finish",
-                    result: object = None, _pc: Any = progress_cb, _rv: Any = resolve,
+                    node: str,
+                    scope: str,
+                    *,
+                    phase: str = "finish",
+                    result: object = None,
+                    _pc: Any = progress_cb,
+                    _rv: Any = resolve,
                 ) -> None:
                     if phase == "finish" and isinstance(result, dict) and result.get("artifacts"):
                         arts = list(result["artifacts"])
@@ -1737,15 +1810,21 @@ def run(
                             kind = str(getattr(a, "kind", ""))
                             try:
                                 body = _rv(a)
-                                d = (_feature_diff_stat(body) if kind == "feature_diff"
-                                     else _artifact_detail(kind, body, max_len=600))
+                                d = (
+                                    _feature_diff_stat(body)
+                                    if kind == "feature_diff"
+                                    else _artifact_detail(kind, body, max_len=600)
+                                )
                             except Exception:
                                 d = None
-                            details.append({
-                                "kind": kind, "detail": str(d or ""),
-                                "uri": str(getattr(a, "uri", "")),
-                                "produced_by": str(getattr(a, "produced_by", "")),
-                            })
+                            details.append(
+                                {
+                                    "kind": kind,
+                                    "detail": str(d or ""),
+                                    "uri": str(getattr(a, "uri", "")),
+                                    "produced_by": str(getattr(a, "produced_by", "")),
+                                }
+                            )
                         if details:
                             result = {**result, "_art_details": details}
                         org = _org_section({"artifacts": arts}, _rv)
@@ -1773,9 +1852,16 @@ def run(
             except Exception as exc:
                 # A capped, stopped or unavailable run still hands back its best tree.
                 if output_dir is not None:
-                    _draft_on_stop(app, config, exc, request=request, thread_id=thread_id,
-                                   output_dir=output_dir, resolve=resolve,
-                                   resolve_blob=resolve_blob)
+                    _draft_on_stop(
+                        app,
+                        config,
+                        exc,
+                        request=request,
+                        thread_id=thread_id,
+                        output_dir=output_dir,
+                        resolve=resolve,
+                        resolve_blob=resolve_blob,
+                    )
                 raise
         finally:
             reset_gate_write_verifier(token)
@@ -1797,11 +1883,15 @@ def run(
         backend=backend,
     )
     if level_table is not None:
-        result = replace(result, model_mode="custom" if levels else model_mode,
-                         levels={t: lvl.as_dict() for t, lvl in level_table.items()})
+        result = replace(
+            result,
+            model_mode="custom" if levels else model_mode,
+            levels={t: lvl.as_dict() for t, lvl in level_table.items()},
+        )
     if final_state.get("phase") == "halted":
-        result = replace(result, resume_from=resume_boundary(final_state, resolve),
-                         resumable=durable is not None)
+        result = replace(
+            result, resume_from=resume_boundary(final_state, resolve), resumable=durable is not None
+        )
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
@@ -1815,8 +1905,11 @@ def run(
         # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
         # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
         draft_root = _write_draft_on_halt(
-            final_state, output_dir, gate_findings=result.gate_findings,
-            resolve=resolve, resolve_blob=resolve_blob,
+            final_state,
+            output_dir,
+            gate_findings=result.gate_findings,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
         )
         if draft_root is not None:
             result = replace(result, draft_root=draft_root)
@@ -1825,8 +1918,14 @@ def run(
         # The manifest is a report on a finished build: failing to write it must
         # never turn a gated result into an exception.
         try:
-            write_manifest(manifest_root, request=request, thread_id=thread_id,
-                           state=final_state, rt=rt, passed=result.passed)
+            write_manifest(
+                manifest_root,
+                request=request,
+                thread_id=thread_id,
+                state=final_state,
+                rt=rt,
+                passed=result.passed,
+            )
         except Exception as exc:
             print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)
     return result
@@ -1881,8 +1980,9 @@ def _result(
 
 # Flags whose features were removed: reject them rather than letting the leftover
 # tokens silently become part of the build request.
-_REMOVED_FLAGS = frozenset({"--packs", "--apply", "--guardian-approve", "--strict", "--docs",
-                            "--checkpoints"})
+_REMOVED_FLAGS = frozenset(
+    {"--packs", "--apply", "--guardian-approve", "--strict", "--docs", "--checkpoints"}
+)
 
 
 def _request_text(args: list[str]) -> str:
@@ -1930,8 +2030,7 @@ def parse_workers(text: str) -> dict[str, int]:
     out = dict(DEFAULT_WORKERS)
     for key, value in _kv_pairs(text, "workers"):
         if key not in out:
-            raise ValueError(f"workers: unknown specialty {key!r}; choose from "
-                             f"{', '.join(known)}")
+            raise ValueError(f"workers: unknown specialty {key!r}; choose from {', '.join(known)}")
         if not value.isdigit() or int(value) < 1:
             raise ValueError(f"workers: {key} needs a whole number >= 1, got {value!r}")
         out[key] = int(value)
@@ -1952,8 +2051,9 @@ def parse_ticket_tiers(text: str) -> dict[Difficulty, str]:
             ) from None
         tier = value.upper()
         if tier not in _TIER_ENV:
-            raise ValueError(f"ticket tiers: unknown tier {value!r}; choose from "
-                             f"{', '.join(_TIER_ENV)}")
+            raise ValueError(
+                f"ticket tiers: unknown tier {value!r}; choose from {', '.join(_TIER_ENV)}"
+            )
         out[difficulty] = tier
     return out
 
@@ -2042,11 +2142,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"unknown --model-mode {model_mode!r}; choose one of {', '.join(MODEL_MODES)}"
             )
         args, _local_url = _take_value(args, "--local-url", what="a URL")
-        local_url = _local_url or os.environ.get("FOUNDRY_LOCAL_URL", "").strip() \
-            or DEFAULT_LOCAL_URL
+        local_url = (
+            _local_url or os.environ.get("FOUNDRY_LOCAL_URL", "").strip() or DEFAULT_LOCAL_URL
+        )
         args, _local_model = _take_value(args, "--local-model", what="a model id")
-        local_model = _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() \
-            or DEFAULT_LOCAL_MODEL
+        local_model = (
+            _local_model or os.environ.get("FOUNDRY_LOCAL_MODEL", "").strip() or DEFAULT_LOCAL_MODEL
+        )
         args, time_cap = _take_int(args, "--time-cap", minimum=1)
         # --fix-until-cap / --no-fix-until-cap override FOUNDRY_FIX_UNTIL_CAP and the
         # mode's default (on for local).

@@ -129,8 +129,11 @@ class TieredAdapter:
 
             # The session's opening gate check runs before it holds the local slot.
             prepared = getattr(self.local, "prepared", None)
-            with local_session(), (prepared(packet) if callable(prepared)
-                                   else contextlib.nullcontext()), self._local_slot():
+            with (
+                local_session(),
+                prepared(packet) if callable(prepared) else contextlib.nullcontext(),
+                self._local_slot(),
+            ):
                 result: AdapterResult = self.local.run(packet, sandbox)
             return result
         cloud_result: AdapterResult = self.cloud.run(packet, sandbox)

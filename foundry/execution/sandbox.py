@@ -465,10 +465,10 @@ class Sandbox:
                     proc.stdin.write(input_text)
                     proc.stdin.close()
             if proc.stdout is not None:
-                for line in proc.stdout:          # yields as the child flushes
+                for line in proc.stdout:  # yields as the child flushes
                     out.append(line)
                     with contextlib.suppress(Exception):
-                        on_line(line)             # advisory: never break the run
+                        on_line(line)  # advisory: never break the run
             proc.wait()
         finally:
             killer.cancel()

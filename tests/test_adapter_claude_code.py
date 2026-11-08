@@ -91,9 +91,7 @@ def source_dir(tmp_path: Path) -> Path:
 
 def test_run_records_added_and_modified_files_as_snapshot(source_dir: Path) -> None:
     adapter = ClaudeCodeAdapter(
-        exec_fn=fake_exec(
-            {"pkg/new.py": "NEW = 2\n", "existing.py": "OLD = 99\n"}, envelope()
-        )
+        exec_fn=fake_exec({"pkg/new.py": "NEW = 2\n", "existing.py": "OLD = 99\n"}, envelope())
     )
     with Sandbox(source_dir) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
@@ -162,8 +160,12 @@ def test_the_summary_is_kept_beside_the_cost_note_when_there_is_no_triage(
 
 
 def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> None:
-    usage = {"input_tokens": 7, "output_tokens": 3, "cache_read_input_tokens": 900,
-             "cache_creation_input_tokens": 40}
+    usage = {
+        "input_tokens": 7,
+        "output_tokens": 3,
+        "cache_read_input_tokens": 900,
+        "cache_creation_input_tokens": 40,
+    }
     adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
     with Sandbox(source_dir) as sb:
         adapter.run(make_packet(sb.worktree), sb)
@@ -185,9 +187,7 @@ def test_progress_logs_each_agent_session(
 def test_hard_kill_records_budget_breach_triage(source_dir: Path) -> None:
     # A wall-clock kill is a budget breach, never a verdict (sandbox contract):
     # the partially-authored tree is still recorded; the gates decide.
-    adapter = ClaudeCodeAdapter(
-        exec_fn=fake_exec({"partial.py": "P = 1\n"}, "", timed_out=True)
-    )
+    adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"partial.py": "P = 1\n"}, "", timed_out=True))
     with Sandbox(source_dir) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -329,12 +329,17 @@ def test_walk_worktree_excludes_scratch_dirs(tmp_path: Path) -> None:
     assert set(walk_worktree(tmp_path)) == {"src/m.py"}
 
 
-@pytest.mark.parametrize(("manifest", "kept"), [
-    ("Cargo.toml", {"Cargo.toml", "src/target/m.rs"}),
-    ("pom.xml", {"pom.xml", "src/target/m.rs"}),
-    ("package.json", {"package.json", "src/target/m.rs", "target/debug/app",
-                      "target/CACHEDIR.TAG"}),
-])
+@pytest.mark.parametrize(
+    ("manifest", "kept"),
+    [
+        ("Cargo.toml", {"Cargo.toml", "src/target/m.rs"}),
+        ("pom.xml", {"pom.xml", "src/target/m.rs"}),
+        (
+            "package.json",
+            {"package.json", "src/target/m.rs", "target/debug/app", "target/CACHEDIR.TAG"},
+        ),
+    ],
+)
 def test_walk_worktree_drops_a_cargo_or_maven_target_dir(
     tmp_path: Path, manifest: str, kept: set[str]
 ) -> None:
@@ -374,17 +379,21 @@ def test_activity_phrases_name_the_tool_and_its_target() -> None:
         "running pytest -q"
     ]
     # several tool calls in one message -> one phrase each, in order
-    assert _stream_activities(_assistant(("Read", {"file_path": "a.md"}),
-                                         ("Grep", {"pattern": "def main"}))) == [
-        "reading a.md", "searching for def main"
-    ]
+    assert _stream_activities(
+        _assistant(("Read", {"file_path": "a.md"}), ("Grep", {"pattern": "def main"}))
+    ) == ["reading a.md", "searching for def main"]
     # an unknown/MCP tool is NAMED but its arguments are never echoed (unknown shape)
     assert _stream_activities(_assistant(("mcp__x__do", {"secret": "s3cr3t"}))) == [
         "using mcp__x__do"
     ]
     # non-assistant lines, junk and partial lines are silently ignored
-    for line in ('{"type":"system","subtype":"init"}', "not json", "", "{",
-                 json.dumps({"type": "result", "result": "done"})):
+    for line in (
+        '{"type":"system","subtype":"init"}',
+        "not json",
+        "",
+        "{",
+        json.dumps({"type": "result", "result": "done"}),
+    ):
         assert _stream_activities(line) == []
 
 
@@ -397,8 +406,7 @@ def test_activity_never_leaks_file_contents_or_long_payloads() -> None:
     assert phrases == ["writing src/settings.py"]
     assert "sk-live" not in phrases[0] and "API_KEY" not in phrases[0]
     # Edit's old/new strings are content too — never reported
-    edit = _assistant(("Edit", {"file_path": "a.py", "old_string": secret,
-                                "new_string": secret}))
+    edit = _assistant(("Edit", {"file_path": "a.py", "old_string": secret, "new_string": secret}))
     assert _stream_activities(edit) == ["editing a.py"]
     # and any allowlisted field is truncated to one short line
     long_cmd = _assistant(("Bash", {"command": "x " * 200}))
@@ -413,13 +421,18 @@ def test_streaming_run_reports_activity_and_still_parses_the_envelope(tmp_path) 
     src = tmp_path / "src"
     src.mkdir()
     (src / "seed.py").write_text("SEED = 1\n")
-    stdout = "\n".join([
-        json.dumps({"type": "system", "subtype": "init"}),
-        _assistant(("Read", {"file_path": "seed.py"})),
-        _assistant(("Write", {"file_path": "impl.py", "content": "IMPL = 1\n"})),
-        _assistant(("Bash", {"command": "pytest -q"})),
-        envelope(),                     # the same result object as the json format
-    ]) + "\n"
+    stdout = (
+        "\n".join(
+            [
+                json.dumps({"type": "system", "subtype": "init"}),
+                _assistant(("Read", {"file_path": "seed.py"})),
+                _assistant(("Write", {"file_path": "impl.py", "content": "IMPL = 1\n"})),
+                _assistant(("Bash", {"command": "pytest -q"})),
+                envelope(),  # the same result object as the json format
+            ]
+        )
+        + "\n"
+    )
 
     seen_argv: list[Any] = []
     streamed: list[str] = []
@@ -430,8 +443,9 @@ def test_streaming_run_reports_activity_and_still_parses_the_envelope(tmp_path) 
         for line in stdout.splitlines(keepends=True):
             if on_stdout_line is not None:
                 on_stdout_line(line)
-        return SandboxResult(returncode=0, stdout=stdout, stderr="", timed_out=False,
-                             wall_clock_s=1.0)
+        return SandboxResult(
+            returncode=0, stdout=stdout, stderr="", timed_out=False, wall_clock_s=1.0
+        )
 
     adapter = ClaudeCodeAdapter(exec_fn=_exec, on_activity=streamed.append)
     with Sandbox(src) as sandbox:
@@ -455,8 +469,9 @@ def test_without_a_listener_nothing_changes(tmp_path) -> None:
     def _exec(sandbox: Sandbox, argv: Any, timeout_s: Any) -> SandboxResult:
         seen_argv.append(list(argv))
         (sandbox.worktree / "a.py").write_text("A = 1\n")
-        return SandboxResult(returncode=0, stdout=envelope(), stderr="", timed_out=False,
-                             wall_clock_s=1.0)
+        return SandboxResult(
+            returncode=0, stdout=envelope(), stderr="", timed_out=False, wall_clock_s=1.0
+        )
 
     adapter = ClaudeCodeAdapter(exec_fn=_exec)
     with Sandbox(src) as sandbox:

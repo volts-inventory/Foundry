@@ -14,9 +14,18 @@ DELTA_SOP_KEY = "You are the Plan Patcher"
 
 # Python without a bdd command: the gates keep the pinned pytest-bdd harness.
 PYTHON_STACK: dict[str, Any] = {
-    "language": "python", "framework": "", "package_manager": "pip", "install": "",
-    "build": "", "typecheck": "", "test": "pytest", "bdd": "", "run": "", "notes": "",
-    "contracts_file": "", "harness_files": [],
+    "language": "python",
+    "framework": "",
+    "package_manager": "pip",
+    "install": "",
+    "build": "",
+    "typecheck": "",
+    "test": "pytest",
+    "bdd": "",
+    "run": "",
+    "notes": "",
+    "contracts_file": "",
+    "harness_files": [],
 }
 
 
@@ -55,8 +64,7 @@ def plan_payload(
     success criterion, the last ticket is the entrypoint (depending on every
     other) and the deliverable defaults to a library (no run command needed)."""
     criteria_of = {
-        t["unit"]: list(t.get("criterion_ids", ()))
-        for t in (decomposition or {}).get("tasks", ())
+        t["unit"]: list(t.get("criterion_ids", ())) for t in (decomposition or {}).get("tasks", ())
     }
     criteria = {c["id"]: c for c in prd.get("acceptance_criteria", [])}
     placed: set[str] = set()
@@ -64,26 +72,30 @@ def plan_payload(
     for i, unit in enumerate(design.get("ownership", {}), start=1):
         mine = [c for c in criteria_of.get(unit, []) if c in criteria and c not in placed]
         placed.update(mine)
-        tickets.append({
-            "id": f"T-{i:03d}",
-            "title": f"build {unit}",
-            "specialty": "backend",
-            "difficulty": "standard",
-            "depends_on": [],
-            "files": [unit],
-            "scenarios": [_scenario(criteria[c]) for c in mine],
-        })
+        tickets.append(
+            {
+                "id": f"T-{i:03d}",
+                "title": f"build {unit}",
+                "specialty": "backend",
+                "difficulty": "standard",
+                "depends_on": [],
+                "files": [unit],
+                "scenarios": [_scenario(criteria[c]) for c in mine],
+            }
+        )
     orphans = [c for cid, c in criteria.items() if cid not in placed]
     if orphans:
-        tickets.append({
-            "id": "T-SPEC",
-            "title": "cross-cutting acceptance",
-            "specialty": "backend",
-            "difficulty": "standard",
-            "depends_on": [],
-            "files": [],
-            "scenarios": [_scenario(c) for c in orphans],
-        })
+        tickets.append(
+            {
+                "id": "T-SPEC",
+                "title": "cross-cutting acceptance",
+                "specialty": "backend",
+                "difficulty": "standard",
+                "depends_on": [],
+                "files": [],
+                "scenarios": [_scenario(c) for c in orphans],
+            }
+        )
     scenarios = [s for t in tickets for s in t["scenarios"]]
     if scenarios:
         scenarios[0]["covers"] = _goal_ids(intent)
@@ -114,10 +126,16 @@ def plan_payload(
         "stack": PYTHON_STACK,
         "interfaces": design.get("interfaces", []),
         # A single epic with its tickets inline: the planner makes one call.
-        "epics": [{
-            "id": "E1", "title": prd["title"], "summary": prd.get("prd_body", ""),
-            "depends_on": [], "provides": [], "consumes": [],
-        }],
+        "epics": [
+            {
+                "id": "E1",
+                "title": prd["title"],
+                "summary": prd.get("prd_body", ""),
+                "depends_on": [],
+                "provides": [],
+                "consumes": [],
+            }
+        ],
         "tickets": tickets,
         "pinned_constraints": design.get("pinned_constraints", []),
     }
@@ -129,14 +147,27 @@ EPIC_PLANNER_SOP_KEY = "You are the Epic Planner"
 
 
 def _ticket(tid: str, specialty: str, *deps: str, **extra: Any) -> dict[str, Any]:
-    return {"id": tid, "title": f"{specialty} {tid}", "specialty": specialty,
-            "difficulty": "standard", "depends_on": list(deps), "files": [f"{tid}.py"],
-            "scenarios": [], **extra}
+    return {
+        "id": tid,
+        "title": f"{specialty} {tid}",
+        "specialty": specialty,
+        "difficulty": "standard",
+        "depends_on": list(deps),
+        "files": [f"{tid}.py"],
+        "scenarios": [],
+        **extra,
+    }
 
 
 def _scn(cid: str, *covers: str, abuse: bool = False) -> dict[str, Any]:
-    return {"id": cid, "given": ["g"], "when": ["w"], "then": ["t"], "security_abuse": abuse,
-            "covers": list(covers)}
+    return {
+        "id": cid,
+        "given": ["g"],
+        "when": ["w"],
+        "then": ["t"],
+        "security_abuse": abuse,
+        "covers": list(covers),
+    }
 
 
 def _review(*missing: str) -> dict[str, Any]:
@@ -156,17 +187,25 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         "scope": {"tier": "standard", "rationale": "a real product", "signals": []},
         "intent": {
             "intent": "A notes product with storage, an API and a web UI.",
-            "must_haves": [{"id": "MH-1", "text": "notes persist"},
-                           {"id": "MH-2", "text": "notes are served over HTTP"}],
+            "must_haves": [
+                {"id": "MH-1", "text": "notes persist"},
+                {"id": "MH-2", "text": "notes are served over HTTP"},
+            ],
             "success_criteria": [{"id": "SC-1", "text": "a user sees a note in the browser"}],
             "deliverable": "app",
         },
         "prd": {"title": "Notes", "body": "Users keep notes.", "required_capabilities": []},
         "criteria_review": _review(),
-        "sprint_plan": {"milestones": ["M1"], "usd_cap_microusd": 1_000_000,
-                        "done_definition": "green"},
-        "design": {"title": "Notes", "body": "web -> api -> store",
-                   "components": ["store", "api", "web"]},
+        "sprint_plan": {
+            "milestones": ["M1"],
+            "usd_cap_microusd": 1_000_000,
+            "done_definition": "green",
+        },
+        "design": {
+            "title": "Notes",
+            "body": "web -> api -> store",
+            "components": ["store", "api", "web"],
+        },
         "adrs": [],
         "stack": {**PYTHON_STACK, "run": "python -m notes --check"},
         "interfaces": [
@@ -175,15 +214,33 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
             {"name": "Api.http", "spec": "GET /notes/{id}"},
         ],
         "epics": [
-            {"id": "E1", "title": "Storage", "summary": "persist notes",
-             "specialty_mix": ["data", "test"], "depends_on": [],
-             "provides": ["Store.save", "Store.load"], "consumes": []},
-            {"id": "E2", "title": "API", "summary": "serve notes",
-             "specialty_mix": ["backend", "test"], "depends_on": ["E1"],
-             "provides": ["Api.http"], "consumes": ["Store.load"]},
-            {"id": "E3", "title": "Web", "summary": "show notes",
-             "specialty_mix": ["frontend", "test"], "depends_on": ["E2"],
-             "provides": [], "consumes": []},
+            {
+                "id": "E1",
+                "title": "Storage",
+                "summary": "persist notes",
+                "specialty_mix": ["data", "test"],
+                "depends_on": [],
+                "provides": ["Store.save", "Store.load"],
+                "consumes": [],
+            },
+            {
+                "id": "E2",
+                "title": "API",
+                "summary": "serve notes",
+                "specialty_mix": ["backend", "test"],
+                "depends_on": ["E1"],
+                "provides": ["Api.http"],
+                "consumes": ["Store.load"],
+            },
+            {
+                "id": "E3",
+                "title": "Web",
+                "summary": "show notes",
+                "specialty_mix": ["frontend", "test"],
+                "depends_on": ["E2"],
+                "provides": [],
+                "consumes": [],
+            },
         ],
         "tickets": [],
         "pinned_constraints": [],
@@ -192,24 +249,33 @@ def multi_epic_plan() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
         "E1": {
             "tickets": [
                 _ticket("T01", "data", implements=["Store.save"], scenarios=[_scn("AC01", "MH-1")]),
-                _ticket("T02", "data", "T01", implements=["Store.load"],
-                        scenarios=[_scn("AC02", abuse=True)]),
+                _ticket(
+                    "T02",
+                    "data",
+                    "T01",
+                    implements=["Store.load"],
+                    scenarios=[_scn("AC02", abuse=True)],
+                ),
                 _ticket("T03", "test", "T01", "T02"),
             ],
             "criteria_review": _review(),
         },
         "E2": {
             "tickets": [
-                _ticket("T01", "backend", implements=["Api.http"], consumes=["Store.load"],
-                        scenarios=[_scn("AC01", "MH-2")]),
+                _ticket(
+                    "T01",
+                    "backend",
+                    implements=["Api.http"],
+                    consumes=["Store.load"],
+                    scenarios=[_scn("AC01", "MH-2")],
+                ),
                 _ticket("T02", "test", "T01"),
             ],
             "criteria_review": _review(),
         },
         "E3": {
             "tickets": [
-                _ticket("web page", "frontend", scenarios=[_scn("AC01", "SC-1")],
-                        entrypoint=True),
+                _ticket("web page", "frontend", scenarios=[_scn("AC01", "SC-1")], entrypoint=True),
                 _ticket("T02", "test", "web page"),
             ],
             "criteria_review": _review(),

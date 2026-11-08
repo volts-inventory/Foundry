@@ -108,6 +108,7 @@ def test_load_spec_caps_on_encoded_bytes(char: str) -> None:
     """The cap is on ENCODED BYTES, so a multibyte spec is bounded too (not just
     ASCII) — and the truncation never leaves a partial UTF-8 char."""
     from foundry.cli import _SPEC_MAX_BYTES
+
     huge = char * (_SPEC_MAX_BYTES * 2)
     out = _load_spec(huge)
     assert len(out.encode("utf-8")) <= _SPEC_MAX_BYTES  # truly byte-bounded
@@ -201,6 +202,7 @@ def test_main_spec_only_no_request_runs(tmp_path: Path) -> None:
 
 def test_request_from_spec_uses_first_heading() -> None:
     from foundry.cli import _request_from_spec
+
     assert _request_from_spec(_SPEC_TEXT) == "Link Shortener — Design Spec"
     assert _request_from_spec("\n\n  \n") == "Build the system described in the provided spec."
 

@@ -35,15 +35,19 @@ def _base(root: Path, *, test_body: str = "assert double(2) == 4") -> Path:
     (base / "test_lib.py").write_text(
         f"from lib import double\n\n\ndef test_double():\n    {test_body}\n"
     )
-    (base / "BUILD-MANIFEST.json").write_text(json.dumps({
-        "thread_id": "base-run",
-        "request": "build a todo app",
-        "contracts": [
-            {"name": "TodoStore.add", "kind": "function", "signature": ""},
-            {"name": "TodoStore.list", "kind": "function", "signature": ""},
-        ],
-        "contracts_files": ["todo/store.py"],
-    }))
+    (base / "BUILD-MANIFEST.json").write_text(
+        json.dumps(
+            {
+                "thread_id": "base-run",
+                "request": "build a todo app",
+                "contracts": [
+                    {"name": "TodoStore.add", "kind": "function", "signature": ""},
+                    {"name": "TodoStore.list", "kind": "function", "signature": ""},
+                ],
+                "contracts_files": ["todo/store.py"],
+            }
+        )
+    )
     return base
 
 
@@ -56,19 +60,32 @@ def _with_feature(base: Path) -> Path:
 # ---- planner: change mode -------------------------------------------------------
 
 _CHANGE_PLAN: dict[str, Any] = _plan(
-    interfaces=[{"name": "CsvExport.export", "spec": "export(todos) -> str",
-                 "consumers": ["cli"]}],
+    interfaces=[{"name": "CsvExport.export", "spec": "export(todos) -> str", "consumers": ["cli"]}],
     tickets=[
         {
-            "id": "T-002", "title": "CSV export", "specialty": "backend",
-            "files": ["todo/csv_export.py"], "implements": ["CsvExport.export"],
+            "id": "T-002",
+            "title": "CSV export",
+            "specialty": "backend",
+            "files": ["todo/csv_export.py"],
+            "implements": ["CsvExport.export"],
             "consumes": ["TodoStore.list"],
-            "scenarios": [{"id": "AC-010", "given": ["two todos"], "when": ["exported"],
-                           "then": ["two csv rows"], "covers": ["MH-1", "SC-1"]}],
+            "scenarios": [
+                {
+                    "id": "AC-010",
+                    "given": ["two todos"],
+                    "when": ["exported"],
+                    "then": ["two csv rows"],
+                    "covers": ["MH-1", "SC-1"],
+                }
+            ],
         },
         {
-            "id": "T-003", "title": "CSV steps", "specialty": "test", "depends_on": ["T-002"],
-            "files": ["tests/step_defs/test_csv.py"], "scenarios": [],
+            "id": "T-003",
+            "title": "CSV steps",
+            "specialty": "test",
+            "depends_on": ["T-002"],
+            "files": ["tests/step_defs/test_csv.py"],
+            "scenarios": [],
         },
     ],
 )
@@ -91,8 +108,13 @@ def test_change_prompt_carries_the_base_tree_view_and_the_request(tmp_path: Path
     prompt = _prompt(tx)
     assert "add CSV export" in prompt
     assert "CHANGE MODE" in prompt
-    for needle in ("todo/store.py", "lib.py", "TodoStore.add", "Scenario: AC-001",
-                   "build a todo app"):
+    for needle in (
+        "todo/store.py",
+        "lib.py",
+        "TodoStore.add",
+        "Scenario: AC-001",
+        "build a todo app",
+    ):
         assert needle in prompt
     assert "BUILD-MANIFEST" not in prompt  # the base's run report is not project source
 

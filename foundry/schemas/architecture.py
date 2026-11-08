@@ -180,8 +180,11 @@ _DEFAULT_AREA = "backend"
 #: ``security`` join ``backend`` (matching the office's discipline rooms). Fixed order.
 ENGINEERING_LANES: tuple[str, ...] = ("frontend", "backend", "data")
 _AREA_TO_LANE: dict[str, str] = {
-    "frontend": "frontend", "backend": "backend", "data": "data",
-    "infra": "backend", "security": "backend",
+    "frontend": "frontend",
+    "backend": "backend",
+    "data": "data",
+    "infra": "backend",
+    "security": "backend",
 }
 
 
@@ -189,6 +192,7 @@ def lane_of_area(area: str) -> str:
     """Discipline LANE (frontend/backend/data) an area folds into — a total map, so
     every owner lands in exactly one lane node (unknown/infra/security -> backend)."""
     return _AREA_TO_LANE.get(area, "backend")
+
 
 #: (area, keywords) in PRECEDENCE order — first match wins (most-specific first).
 #: Matching is WHOLE-TOKEN ONLY (a path is split into tokens on /_-. and each
@@ -203,43 +207,139 @@ def lane_of_area(area: str) -> str:
 _AREA_RULES: tuple[tuple[str, frozenset[str]], ...] = (
     (
         "security",
-        frozenset({
-            "auth", "authn", "authz", "oauth", "crypto", "cryptography",
-            "secret", "secrets", "credential", "credentials", "token", "tokens",
-            "security", "compliance", "regulated", "fintech", "finance",
-            "financial", "payment", "payments", "billing", "phi", "pii", "kms",
-            "vault", "login", "signin", "signup", "session", "sessions", "rbac",
-            "permission", "permissions",
-        }),
+        frozenset(
+            {
+                "auth",
+                "authn",
+                "authz",
+                "oauth",
+                "crypto",
+                "cryptography",
+                "secret",
+                "secrets",
+                "credential",
+                "credentials",
+                "token",
+                "tokens",
+                "security",
+                "compliance",
+                "regulated",
+                "fintech",
+                "finance",
+                "financial",
+                "payment",
+                "payments",
+                "billing",
+                "phi",
+                "pii",
+                "kms",
+                "vault",
+                "login",
+                "signin",
+                "signup",
+                "session",
+                "sessions",
+                "rbac",
+                "permission",
+                "permissions",
+            }
+        ),
     ),
     (
         "frontend",
-        frozenset({
-            "ui", "ux", "web", "mobile", "frontend", "view", "views",
-            "component", "components", "page", "pages", "css", "html", "widget",
-            "widgets", "screen", "screens", "button", "buttons", "layout",
-            "layouts", "nav", "navbar", "theme", "themes", "stylesheet",
-            "stylesheets",
-        }),
+        frozenset(
+            {
+                "ui",
+                "ux",
+                "web",
+                "mobile",
+                "frontend",
+                "view",
+                "views",
+                "component",
+                "components",
+                "page",
+                "pages",
+                "css",
+                "html",
+                "widget",
+                "widgets",
+                "screen",
+                "screens",
+                "button",
+                "buttons",
+                "layout",
+                "layouts",
+                "nav",
+                "navbar",
+                "theme",
+                "themes",
+                "stylesheet",
+                "stylesheets",
+            }
+        ),
     ),
     (
         "data",
-        frozenset({
-            "data", "dataset", "datasets", "etl", "warehouse", "schema",
-            "schemas", "migration", "migrations", "sql", "analytics", "ingest",
-            "ingestion", "ml", "training", "ai", "query", "queries", "database",
-            "databases", "embedding", "embeddings",
-        }),
+        frozenset(
+            {
+                "data",
+                "dataset",
+                "datasets",
+                "etl",
+                "warehouse",
+                "schema",
+                "schemas",
+                "migration",
+                "migrations",
+                "sql",
+                "analytics",
+                "ingest",
+                "ingestion",
+                "ml",
+                "training",
+                "ai",
+                "query",
+                "queries",
+                "database",
+                "databases",
+                "embedding",
+                "embeddings",
+            }
+        ),
     ),
     (
         "infra",
-        frozenset({
-            "infra", "infrastructure", "deploy", "deployment", "deployments",
-            "ops", "devops", "sre", "platform", "docker", "dockerfile", "k8s",
-            "kubernetes", "terraform", "helm", "cluster", "gateway", "proxy",
-            "network", "networking", "provision", "provisioning", "ci", "cd",
-            "pipeline", "pipelines",
-        }),
+        frozenset(
+            {
+                "infra",
+                "infrastructure",
+                "deploy",
+                "deployment",
+                "deployments",
+                "ops",
+                "devops",
+                "sre",
+                "platform",
+                "docker",
+                "dockerfile",
+                "k8s",
+                "kubernetes",
+                "terraform",
+                "helm",
+                "cluster",
+                "gateway",
+                "proxy",
+                "network",
+                "networking",
+                "provision",
+                "provisioning",
+                "ci",
+                "cd",
+                "pipeline",
+                "pipelines",
+            }
+        ),
     ),
 )
 
@@ -277,7 +377,4 @@ def classify_areas(owners: Mapping[str, str]) -> dict[str, str]:
     units_by_owner: dict[str, list[str]] = {}
     for unit, owner in owners.items():
         units_by_owner.setdefault(owner, []).append(unit)
-    return {
-        owner: classify_area(owner, units_by_owner[owner])
-        for owner in sorted(units_by_owner)
-    }
+    return {owner: classify_area(owner, units_by_owner[owner]) for owner in sorted(units_by_owner)}

@@ -10,6 +10,7 @@ Python — the ones whose breakage is silent in the browser:
   lines under the fold and the log looks frozen);
 * the working halo must be lit and dropped on the two seating paths.
 """
+
 from __future__ import annotations
 
 import re
@@ -34,8 +35,16 @@ def test_build_dialog_is_request_plus_collapsed_settings() -> None:
     # with a summary line that is recomputed whenever the dialog opens.
     assert re.search(r'<details[^>]*id="fold-scale"(?![^>]*\bopen\b)', HTML)
     assert 'id="scale-sum"' in HTML
-    for gone in ("backend-select", "adapter-select", "profile-select", "fix-input",
-                 "cap-input", "preset-select", "spec-text", "startfrom-select"):
+    for gone in (
+        "backend-select",
+        "adapter-select",
+        "profile-select",
+        "fix-input",
+        "cap-input",
+        "preset-select",
+        "spec-text",
+        "startfrom-select",
+    ):
         assert f'id="{gone}"' not in HTML
     show = JS.split("function showNewModal(")[1].split("\n}")[0]
     assert "syncSettingsSummary()" in show
@@ -47,12 +56,14 @@ def test_live_log_mutations_all_go_through_the_follow_helper() -> None:
     for fn in ("appendLogDom", "agentBox", "refreshAgentBox"):
         body = JS.split(f"function {fn}(")[1].split("\n}")[0]
         assert "inLog(" in body, fn
-    assert 'id="log-jump"' in HTML          # the affordance for when you HAVE scrolled up
+    assert 'id="log-jump"' in HTML  # the affordance for when you HAVE scrolled up
 
 
 def test_the_working_halo_is_lit_at_the_desk_and_dropped_on_stand_down() -> None:
-    for method, call in (("deskRest(a, working, busy)", "setGlow(a, working)"),
-                         ("standDown(a)", "setGlow(a, false)")):
+    for method, call in (
+        ("deskRest(a, working, busy)", "setGlow(a, working)"),
+        ("standDown(a)", "setGlow(a, false)"),
+    ):
         body = JS.split(f"\n  {method}{{")[1].split("\n  }")[0]
         assert call in body, method
     # …and a sprite destroyed mid-scene must drop its halo first: destroy() does not

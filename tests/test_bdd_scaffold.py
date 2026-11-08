@@ -42,20 +42,38 @@ def _project(tmp_path: Path, module: str, body: str) -> Path:
 
 def _pytest(root: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:xdist",
-         "-rA", str(root)],
-        cwd=root, capture_output=True, text=True, timeout=120,
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-p",
+            "no:xdist",
+            "-rA",
+            str(root),
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
 
 
 def test_parse_feature_resolves_and_background_and_outline_rows() -> None:
     plain, outline = parse_feature(_FEATURE)
     assert [(s.kind, s.text) for s in plain.steps] == [
-        ("given", "an empty basket"), ("when", 'I add "milk"'), ("then", "the basket has 1 item"),
+        ("given", "an empty basket"),
+        ("when", 'I add "milk"'),
+        ("then", "the basket has 1 item"),
     ]
     rows = outline.rendered()
     assert [s.text for s in rows[0]] == [
-        "an empty basket", 'I add 2 of "bread"', 'I add "milk"', "the basket has 3 item",
+        "an empty basket",
+        'I add 2 of "bread"',
+        'I add "milk"',
+        "the basket has 3 item",
     ]
     assert rows[1][1].text == 'I add 1 of "{jam}"'
 
@@ -64,8 +82,13 @@ def test_scaffold_has_one_function_per_distinct_step_and_the_relative_binding() 
     text = step_scaffold("tests/steps/test_t1.py", {"features/T-1.feature": _FEATURE})
     assert 'scenarios("../../features/T-1.feature")' in text
     tree = ast.parse(text)
-    steps = [ast.unparse(d) for f in tree.body if isinstance(f, ast.FunctionDef)
-             for d in f.decorator_list if "fixture" not in ast.unparse(d)]
+    steps = [
+        ast.unparse(d)
+        for f in tree.body
+        if isinstance(f, ast.FunctionDef)
+        for d in f.decorator_list
+        if "fixture" not in ast.unparse(d)
+    ]
     assert steps == [
         "given('an empty basket')",
         "when('I add \"milk\"')",
@@ -93,7 +116,7 @@ def test_scaffold_binds_every_step_under_real_pytest_bdd(tmp_path: Path) -> None
     assert "3 passed" in filled.stdout
 
 
-_STEPS = '''\
+_STEPS = """\
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
@@ -123,7 +146,7 @@ def _add_many(basket, count, item, request):
 @then(parsers.parse("the basket has {n:d} item"))
 def _count(basket, n):
     assert len(basket) == n
-'''
+"""
 
 
 def test_a_clean_step_module_has_no_static_notes(tmp_path: Path) -> None:
@@ -157,12 +180,14 @@ def test_static_checks_name_duplicates_unmatched_texts_and_unprovided_params(
 
 
 def test_a_conftest_fixture_or_target_counts_as_provided(tmp_path: Path) -> None:
-    steps = _STEPS.replace('@given("an empty basket", target_fixture="basket")',
-                           '@given("an empty basket")')
+    steps = _STEPS.replace(
+        '@given("an empty basket", target_fixture="basket")', '@given("an empty basket")'
+    )
     root = _project(tmp_path, "tests/test_t1.py", steps)
     assert any("`basket`" in n for n in step_module_notes(root, "tests/test_t1.py"))
     (root / "tests/conftest.py").write_text(
-        "import pytest\n\n\n@pytest.fixture(name='basket')\ndef _basket():\n    return []\n")
+        "import pytest\n\n\n@pytest.fixture(name='basket')\ndef _basket():\n    return []\n"
+    )
     assert step_module_notes(root, "tests/test_t1.py") == ()
 
 
@@ -186,7 +211,7 @@ def _plain_project(tmp_path: Path, body: str) -> Path:
 
 def test_scaffold_keeps_a_plain_scenarios_placeholder_literal(tmp_path: Path) -> None:
     scaffold = step_scaffold("tests/test_t1.py", {"features/T-1.feature": _PLAIN_PLACEHOLDER})
-    assert "@when(\"I fetch /notes/<id>\")\ndef when_i_fetch_notes_id(context):" in scaffold
+    assert '@when("I fetch /notes/<id>")\ndef when_i_fetch_notes_id(context):' in scaffold
     assert "parsers" not in scaffold
     assert "# <id> is literal text in this plain Scenario" in scaffold
     root = _plain_project(tmp_path, scaffold.replace("raise NotImplementedError", "pass"))
@@ -194,7 +219,7 @@ def test_scaffold_keeps_a_plain_scenarios_placeholder_literal(tmp_path: Path) ->
     assert run.returncode == 0, run.stdout
 
 
-_PLAIN_STEPS = '''\
+_PLAIN_STEPS = """\
 from pytest_bdd import given, parsers, scenarios, then, when
 
 scenarios("../features/T-1.feature")
@@ -214,7 +239,7 @@ def _fetch(id):
 @then("I get the note")
 def _got():
     assert _seen["got"] == "/notes/7", _seen["got"]
-'''
+"""
 
 
 def _placeholder_notes(root: Path) -> list[str]:
@@ -227,18 +252,23 @@ def test_static_notes_name_a_step_reading_a_plain_scenarios_placeholder(
     root = _plain_project(tmp_path, _PLAIN_STEPS)
     run = _pytest(root)
     assert run.returncode == 1 and "/notes/<id>" in run.stdout  # the literal text arrives
-    [note] = [n for n in static_step_notes(root, {"features/T-1.feature"}, params=False)
-              if "plain Scenario" in n]
+    [note] = [
+        n
+        for n in static_step_notes(root, {"features/T-1.feature"}, params=False)
+        if "plain Scenario" in n
+    ]
     assert note.startswith('`@when("I fetch /notes/{id}")` (tests/test_t1.py:')
     assert '`id` = "<id>"' in note and "features/T-1.feature::AC-1" in note
     # Ignoring the argument is fine, and so is an outline whose Examples fill it.
     (root / "tests/test_t1.py").write_text(
-        _PLAIN_STEPS.replace('f"/notes/{id}"', "f\"/notes/{_seen['id']}\""))
+        _PLAIN_STEPS.replace('f"/notes/{id}"', "f\"/notes/{_seen['id']}\"")
+    )
     assert _placeholder_notes(root) == []
     assert _pytest(root).returncode == 0
     (root / "tests/test_t1.py").write_text(_PLAIN_STEPS)
     (root / "features/T-1.feature").write_text(
         _PLAIN_PLACEHOLDER.replace("Scenario:", "Scenario Outline:")
-        + "\n    Examples:\n      | id |\n      | 7  |\n")
+        + "\n    Examples:\n      | id |\n      | 7  |\n"
+    )
     assert _placeholder_notes(root) == []
     assert _pytest(root).returncode == 0

@@ -272,7 +272,8 @@ SOP = (
     "specialty_mix hint. The LAST epic depends (directly or through other epics) on "
     "every other epic and holds the entrypoint ticket. Work over the caps is dropped "
     "(and reported), so consolidate instead.\n"
-    "TICKETS: decompose the work into Jira-style tickets. " + _TICKET_RULES
+    "TICKETS: decompose the work into Jira-style tickets. "
+    + _TICKET_RULES
     + "When you return epics without inline tickets, criteria_review covers only "
     "plan-level gaps: each epic reviews its own scenarios.\n"
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
@@ -306,7 +307,8 @@ SOP = (
     "with the language's OFFICIAL "
     "Cucumber runner and writes its report (Cucumber Messages NDJSON; godog and "
     "cucumber-rs: their Cucumber JSON) to the file named by $"
-    + BDD_REPORT_ENV + " (Python may leave bdd empty to use the built-in pytest-bdd "
+    + BDD_REPORT_ENV
+    + " (Python may leave bdd empty to use the built-in pytest-bdd "
     "harness); run (optional: boots the real app headless, exits 0 on success; for "
     "a web server it is a smoke script, e.g. `node smoke.js` / `python3 smoke.py`, "
     "that starts the app on port 0, makes one request, stops it and exits 0 — never "
@@ -341,7 +343,8 @@ EPIC_SOP = (
     "You are the Epic Planner. A lead planner has written the product spec, the "
     "architecture and the shared interface contracts, and split the work into "
     "epics. In ONE reply, decompose YOUR epic into Jira-style tickets (at "
-    f"most {MAX_EPIC_TICKETS}). " + _TICKET_RULES
+    f"most {MAX_EPIC_TICKETS}). "
+    + _TICKET_RULES
     + "IDS: number tickets T01, T02, ... and scenarios AC01, AC02, ...; they are "
     "prefixed with your epic id for you. depends_on names only tickets of YOUR "
     "epic: work in other epics is ordered for you through the epic dependencies "
@@ -405,7 +408,13 @@ _TICKET_SCHEMA: dict[str, Any] = {
         "entrypoint": {"type": "boolean"},
     },
     "required": [
-        "id", "title", "specialty", "difficulty", "depends_on", "files", "scenarios",
+        "id",
+        "title",
+        "specialty",
+        "difficulty",
+        "depends_on",
+        "files",
+        "scenarios",
         "entrypoint",
     ],
     "additionalProperties": False,
@@ -444,8 +453,17 @@ _STACK_SCHEMA: dict[str, Any] = {
         "harness_files": _STR_ARRAY,
     },
     "required": [
-        "language", "framework", "package_manager", "install", "build", "typecheck",
-        "test", "bdd", "run", "contracts_file", "harness_files",
+        "language",
+        "framework",
+        "package_manager",
+        "install",
+        "build",
+        "typecheck",
+        "test",
+        "bdd",
+        "run",
+        "contracts_file",
+        "harness_files",
     ],
     "additionalProperties": False,
 }
@@ -601,6 +619,7 @@ def _plan_schema(languages: Iterable[str]) -> dict[str, Any]:
     stack = {**_STACK_SCHEMA, "properties": {**_STACK_SCHEMA["properties"], "language": language}}
     return {**PLAN_SCHEMA, "properties": {**PLAN_SCHEMA["properties"], "stack": stack}}
 
+
 EPIC_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -651,9 +670,13 @@ def _intake_text(state: FactoryState) -> str:
     a change build, the base tree view with the change-mode rules."""
     request = str(state.get("request", ""))
     spec = str(state.get("spec", "") or "")
-    text = request if not spec.strip() else (
-        f"REQUEST (intent summary):\n{request}\n\n"
-        f"DESIGN SPEC (detailed source of truth):\n{spec[:_SPEC_PROMPT_CAP]}"
+    text = (
+        request
+        if not spec.strip()
+        else (
+            f"REQUEST (intent summary):\n{request}\n\n"
+            f"DESIGN SPEC (detailed source of truth):\n{spec[:_SPEC_PROMPT_CAP]}"
+        )
     )
     base = _base(state)
     return text if base is None else f"{text}\n\n{_change_text(base)}"
@@ -700,9 +723,7 @@ def _scope_text(state: FactoryState, *, revising: bool) -> str:
     if decision is not None:
         # A revision exists to close a gate-blocking gap; its "reproduce every
         # criterion AND add" contradicts a criteria cap, so closing the gap wins.
-        caps = "" if revising else (
-            scope_directive(state) + scope_directive(state, architect=True)
-        )
+        caps = "" if revising else (scope_directive(state) + scope_directive(state, architect=True))
         return f"\n\nSCOPE IS FIXED: {decision.tier.value}. Echo it in scope.tier.{caps}"
     if _forced_standard(state):
         return "\n\nSCOPE IS FIXED: standard (a design spec was supplied)."
@@ -783,7 +804,10 @@ _CHECK = (
 
 
 def _revision_block(
-    findings: Iterable[str], criteria: str, goals: str, source: tuple[str, str] = _GATE,
+    findings: Iterable[str],
+    criteria: str,
+    goals: str,
+    source: tuple[str, str] = _GATE,
 ) -> str:
     """A full-plan revision block. The Spec gate reads the newest record per
     criterion id, so the revision fixes a criterion a finding names by re-emitting
@@ -832,7 +856,8 @@ def _stack_text(state: FactoryState, toolchains: Sequence[Toolchain]) -> str:
     if pinned is not None:
         fixed = {k: v for k, v in pinned.model_dump(mode="json").items() if v and k != "notes"}
         return (
-            "\n\nSTACK IS FIXED (pinned by the operator): " + as_text(fixed)
+            "\n\nSTACK IS FIXED (pinned by the operator): "
+            + as_text(fixed)
             + f"\nEcho language={pinned.language!r} in stack.language."
             + (f"\nGates: {pinned.notes}" if pinned.notes else "")
         )
@@ -851,18 +876,20 @@ def _stack_text(state: FactoryState, toolchains: Sequence[Toolchain]) -> str:
 
 
 def _user_content(
-    state: FactoryState, rt: AgentRuntime, spans: tuple[Span, ...],
+    state: FactoryState,
+    rt: AgentRuntime,
+    spans: tuple[Span, ...],
     toolchains: Sequence[Toolchain] = (),
 ) -> str:
-    retrieved = [
-        {"file": s.file, "lines": [s.line, s.end_line], "symbol": s.symbol} for s in spans
-    ]
+    retrieved = [{"file": s.file, "lines": [s.line, s.end_line], "symbol": s.symbol} for s in spans]
     body = _intake_text(state)
     if retrieved:
         body += "\n\nRETRIEVED CODE SPANS (existing code):\n" + as_text(retrieved)
     revision = _revision_text(state, rt)
     return (
-        body + _stack_text(state, toolchains) + _scope_text(state, revising=bool(revision))
+        body
+        + _stack_text(state, toolchains)
+        + _scope_text(state, revising=bool(revision))
         + revision
     )
 
@@ -990,11 +1017,14 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
     feature names) are renamed the same way."""
     out: dict[str, str] = {}
     safe = {
-        tid for tid in ids
-        if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
+        tid
+        for tid in ids
+        if _SAFE_TICKET_ID.fullmatch(tid)
+        and tid not in (".", "..", *_GENERATED_TICKETS)
         # `fix-<n>` / `revert-<n>` are the fix loop's diff namespaces: a ticket there
         # would read as built.
-        and not tid.startswith(_FIX_DIFF_PREFIXES) and tid not in reserved
+        and not tid.startswith(_FIX_DIFF_PREFIXES)
+        and tid not in reserved
     }
     taken = safe | _GENERATED_TICKETS | reserved
     for tid in ids:
@@ -1124,8 +1154,12 @@ def _epic_items(
                 f"Epic {epic.id}: {len(items)} tickets exceed the per-epic cap of "
                 f"{MAX_EPIC_TICKETS}; dropped "
                 + _dropped_text(
-                    (_ns(epic.id, _str(t.get("id")).strip() or f"T{MAX_EPIC_TICKETS + i + 1:02d}"),
-                     t)
+                    (
+                        _ns(
+                            epic.id, _str(t.get("id")).strip() or f"T{MAX_EPIC_TICKETS + i + 1:02d}"
+                        ),
+                        t,
+                    )
                     for i, t in enumerate(items[MAX_EPIC_TICKETS:])
                 )
                 + ": consolidate this epic's tickets so no work is lost."
@@ -1138,14 +1172,16 @@ def _epic_items(
             n += 1
             sid = _str(scenario.get("id")).strip() or f"AC{n:02d}"
             scenarios.append({**scenario, "id": _ns(epic.id, sid)})
-        out.append({
-            **item,
-            "id": _ns(epic.id, _str(item.get("id")).strip() or f"T{i + 1:02d}"),
-            "depends_on": [_ns(epic.id, d) for d in _steps(item.get("depends_on"))],
-            "scenarios": scenarios,
-            _EPIC_KEY: epic.id,
-            **({_DROPPED_KEY: True} if i >= MAX_EPIC_TICKETS else {}),
-        })
+        out.append(
+            {
+                **item,
+                "id": _ns(epic.id, _str(item.get("id")).strip() or f"T{i + 1:02d}"),
+                "depends_on": [_ns(epic.id, d) for d in _steps(item.get("depends_on"))],
+                "scenarios": scenarios,
+                _EPIC_KEY: epic.id,
+                **({_DROPPED_KEY: True} if i >= MAX_EPIC_TICKETS else {}),
+            }
+        )
     return out, concerns
 
 
@@ -1162,8 +1198,7 @@ def _link_epics(
     tickets is looked through to its own nearest upstream epics that have some,
     so the chain keeps its order. Mutates ``deps``."""
     members = {
-        e.id: [tid for tid, item in items.items() if item.get(_EPIC_KEY) == e.id]
-        for e in epics
+        e.id: [tid for tid, item in items.items() if item.get(_EPIC_KEY) == e.id] for e in epics
     }
     by_id = {e.id: e for e in epics}
 
@@ -1179,14 +1214,13 @@ def _link_epics(
     for epic in epics:
         mine = members[epic.id]
         needs = interface_names & {
-            *epic.consumes, *(c for tid in mine for c in _strs(items[tid].get("consumes")))
+            *epic.consumes,
+            *(c for tid in mine for c in _strs(items[tid].get("consumes"))),
         }
         upstream: list[str] = []
         for up in nearest(epic.depends_on, set()):
             theirs = members[up]
-            providers = [
-                tid for tid in theirs if needs & set(_strs(items[tid].get("implements")))
-            ]
+            providers = [tid for tid in theirs if needs & set(_strs(items[tid].get("implements")))]
             if not providers:
                 depended = {d for tid in theirs for d in deps[tid]}
                 providers = [tid for tid in theirs if tid not in depended]
@@ -1232,10 +1266,18 @@ def _link_entrypoints(
         if not _bool(item.get("entrypoint")) or _is_test(item):
             continue
         upstream = _upstream_epics(epics, _str(item.get(_EPIC_KEY)))
-        deps[tid] = list(_uniq((*deps[tid], *(
-            other for other, it in items.items()
-            if it.get(_EPIC_KEY) in upstream and not _is_test(it)
-        ))))
+        deps[tid] = list(
+            _uniq(
+                (
+                    *deps[tid],
+                    *(
+                        other
+                        for other, it in items.items()
+                        if it.get(_EPIC_KEY) in upstream and not _is_test(it)
+                    ),
+                )
+            )
+        )
 
 
 def _is_test(item: dict[str, Any]) -> bool:
@@ -1255,15 +1297,22 @@ def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> s
         "PLAN (from the lead planner):\n"
         f"Stack: {_str(stack.get('language')) or '(unset)'}"
         + (f" / {_str(stack.get('framework'))}" if stack.get("framework") else "")
-        + (f"; contracts file (written for you, never list it in files): "
-           f"{_str(stack.get('contracts_file'))}" if stack.get("contracts_file") else "")
+        + (
+            f"; contracts file (written for you, never list it in files): "
+            f"{_str(stack.get('contracts_file'))}"
+            if stack.get("contracts_file")
+            else ""
+        )
         + "\n"
         f"Product: {_str(prd.get('title'))}\n{_str(prd.get('body'))[:_BRIEF_CAP]}\n"
         f"Architecture: {_str(design.get('title'))}\n"
         f"{_str(design.get('body'))[:_BRIEF_CAP]}\n"
         f"Components: {', '.join(_strs(design.get('components'))) or '(none)'}"
-        + ("\nPinned constraints (apply to every ticket):\n" + "\n".join(constraints)
-           if constraints else "")
+        + (
+            "\nPinned constraints (apply to every ticket):\n" + "\n".join(constraints)
+            if constraints
+            else ""
+        )
         + _goals_text(intent)
     )
 
@@ -1273,7 +1322,11 @@ def _interfaces_text(pairs: Iterable[tuple[str, str]]) -> str:
 
 
 def _epic_content(
-    intake: str, brief: str, epics: Sequence[_Epic], epic: _Epic, interfaces: str,
+    intake: str,
+    brief: str,
+    epics: Sequence[_Epic],
+    epic: _Epic,
+    interfaces: str,
     revision: str,
 ) -> str:
     entry = _entry_epic(epics)
@@ -1283,20 +1336,26 @@ def _epic_content(
         for e in epics
     )
     mine = {
-        "id": epic.id, "title": epic.title, "summary": epic.summary,
-        "specialty_mix": list(epic.specialty_mix), "depends_on": list(epic.depends_on),
-        "provides": list(epic.provides), "consumes": list(epic.consumes),
+        "id": epic.id,
+        "title": epic.title,
+        "summary": epic.summary,
+        "specialty_mix": list(epic.specialty_mix),
+        "depends_on": list(epic.depends_on),
+        "provides": list(epic.provides),
+        "consumes": list(epic.consumes),
     }
     return (
         f"{intake}\n\n{brief}\n\nEPICS (each planned in its own call):\n{roster}\n\n"
         f"YOUR EPIC: {epic.id}\n{as_text(mine)}\n"
-        + ("YOUR EPIC OWNS THE ENTRYPOINT: mark exactly one feature ticket "
-           "entrypoint=true that wires the whole app together end to end (main / server "
-           "/ CLI / public API), depends_on every other feature ticket of your epic and "
-           "carries an end-to-end scenario.\n\n" if epic.id == entry else
-           "Your epic does NOT own the entrypoint: entrypoint=false on every ticket.\n\n")
-        + 
-        "INTERFACE CONTRACTS (shared by every epic; implements[] / consumes[] them "
+        + (
+            "YOUR EPIC OWNS THE ENTRYPOINT: mark exactly one feature ticket "
+            "entrypoint=true that wires the whole app together end to end (main / server "
+            "/ CLI / public API), depends_on every other feature ticket of your epic and "
+            "carries an end-to-end scenario.\n\n"
+            if epic.id == entry
+            else "Your epic does NOT own the entrypoint: entrypoint=false on every ticket.\n\n"
+        )
+        + "INTERFACE CONTRACTS (shared by every epic; implements[] / consumes[] them "
         f"by name):\n{interfaces}" + revision
     )
 
@@ -1337,10 +1396,14 @@ def _rehome_scenarios(
             continue
         ids = ", ".join(_str(s.get("id")).strip() or "?" for s in scenarios)
         files = set(_strs(item.get("files")))
-        home = next((
-            k for k, it in out.items()
-            if not _is_test(it) and files.intersection(_strs(it.get("files")))
-        ), None)
+        home = next(
+            (
+                k
+                for k, it in out.items()
+                if not _is_test(it) and files.intersection(_strs(it.get("files")))
+            ),
+            None,
+        )
         if home is None:
             concerns.append(
                 f"Dropped scenario(s) {ids} with ticket {tid}: no kept ticket owns its files."
@@ -1387,9 +1450,7 @@ def _build_tickets(
             concerns.append(f"Duplicate ticket id {tid}: the later entry wins.")
         raw_items[tid] = item
     if len(raw_items) > cap:
-        concerns.append(
-            f"{len(raw_items)} tickets exceed the cap of {cap}; kept the first {cap}."
-        )
+        concerns.append(f"{len(raw_items)} tickets exceed the cap of {cap}; kept the first {cap}.")
         if overflow is not None:
             overflow.append(
                 f"{len(raw_items)} tickets exceed the cap of {cap}; dropped "
@@ -1405,7 +1466,8 @@ def _build_tickets(
     alias = _safe_ticket_ids(list(raw_items), reserved)
     concerns += [
         f"Ticket id {old!r} renamed to {new!r} (ids name files)."
-        for old, new in alias.items() if old != new
+        for old, new in alias.items()
+        if old != new
     ]
     items = {alias[tid]: item for tid, item in raw_items.items()}
 
@@ -1462,8 +1524,15 @@ def _build_tickets(
         scenario_ids = own[tid]
         if specialty[tid] is Specialty.TEST:
             scenario_ids = _uniq(
-                (*scenario_ids, *(c for d in declared[tid] if specialty[d] is not Specialty.TEST
-                                  for c in own[d]))
+                (
+                    *scenario_ids,
+                    *(
+                        c
+                        for d in declared[tid]
+                        if specialty[d] is not Specialty.TEST
+                        for c in own[d]
+                    ),
+                )
             )
         contracts: dict[str, tuple[str, ...]] = {}
         for key in ("implements", "consumes"):
@@ -1573,10 +1642,20 @@ def _stack_decision(
         ]
     stack = StackDecision(
         language=language,
-        **{k: _str(raw.get(k)).strip() for k in (
-            "framework", "package_manager", "install", "build", "typecheck", "test",
-            "bdd", "run", "notes",
-        )},
+        **{
+            k: _str(raw.get(k)).strip()
+            for k in (
+                "framework",
+                "package_manager",
+                "install",
+                "build",
+                "typecheck",
+                "test",
+                "bdd",
+                "run",
+                "notes",
+            )
+        },
     )
     if language != "python" and not stack.test and not stack.bdd:
         # The pytest harness cannot test another language: without a command of its
@@ -1587,18 +1666,20 @@ def _stack_decision(
         ]
     concerns: list[str] = []
     if (install := stack_install(stack)) != stack.install:
-        concerns.append(f"The {language} stack's install `{stack.install or '(none)'}` "
-                        f"downloads no dependencies; it runs `{install}` so the offline "
-                        "steps have them.")
+        concerns.append(
+            f"The {language} stack's install `{stack.install or '(none)'}` "
+            f"downloads no dependencies; it runs `{install}` so the offline "
+            "steps have them."
+        )
         stack = stack.model_copy(update={"install": install})
     if (bdd := _bdd_quoting(stack.bdd)) != stack.bdd:
-        concerns.append(f"The bdd command `{stack.bdd}` single-quotes ${BDD_REPORT_ENV}, "
-                        f"which stops its expansion; it runs `{bdd}`.")
+        concerns.append(
+            f"The bdd command `{stack.bdd}` single-quotes ${BDD_REPORT_ENV}, "
+            f"which stops its expansion; it runs `{bdd}`."
+        )
         stack = stack.model_copy(update={"bdd": bdd})
     if language != "python" and not stack.bdd:
-        concerns.append(
-            f"The {language} stack has no bdd command: its scenarios are not executed."
-        )
+        concerns.append(f"The {language} stack has no bdd command: its scenarios are not executed.")
     if language != "python" and not stack.test:
         concerns.append(f"The {language} stack has no test command.")
     return stack, concerns
@@ -1610,8 +1691,13 @@ def _plan_paths(raw: Any, what: str, concerns: list[str]) -> tuple[str, ...]:
     kept: list[str] = []
     for path in _uniq(_strs(raw)):
         parts = path.split("/")
-        if (path.startswith("/") or path.endswith("/") or ".." in parts
-                or path == "criteria.json" or parts[0] == FEATURE_DIR):
+        if (
+            path.startswith("/")
+            or path.endswith("/")
+            or ".." in parts
+            or path == "criteria.json"
+            or parts[0] == FEATURE_DIR
+        ):
             concerns.append(f"Dropped {what} path {path!r}: not a project file.")
         else:
             kept.append(path)
@@ -1633,7 +1719,7 @@ _CONTRACT_STUB_RULES: dict[str, str] = {
         "the contracts name), never a function or class body."
     ),
     "": "declarations only — interfaces, types and signatures with no bodies the "
-        "compiler would reject.",
+    "compiler would reject.",
 }
 
 
@@ -1680,67 +1766,93 @@ def _generated_tickets(
                 f"{language or '(none)'!r}: they are not written as code."
             )
         else:
-            out.append(Ticket(
-                id=CONTRACTS_TICKET_ID,
-                title="Define contracts",
-                description=(
-                    f"Write every interface contract this ticket implements as real "
-                    f"{language or 'project-language'} code in {', '.join(owned)}: the "
-                    "exact signatures, types, classes and interfaces (TypeScript "
-                    "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
-                    "...) with no behaviour beyond what the language needs to compile: "
-                    "declarations only, no logic, helpers, I/O or validation. Every "
-                    "other ticket imports these definitions and none may change or "
-                    "redeclare them, so match each contract exactly. The file must pass "
-                    "the stack's build and typecheck on its own: "
-                    + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
-                    + (" " + ", ".join(f for f in owned if f in base.files)
-                       + " already exists: keep every declaration in it exactly as it "
-                       "is and add the new ones."
-                       if base is not None and any(f in base.files for f in owned) else "")
-                ),
-                specialty=Specialty.BACKEND,
-                difficulty=Difficulty.TRIVIAL,
-                files=owned,
-                implements=tuple(i.name for i in code),
-                seq=seq,
-            ))
+            out.append(
+                Ticket(
+                    id=CONTRACTS_TICKET_ID,
+                    title="Define contracts",
+                    description=(
+                        f"Write every interface contract this ticket implements as real "
+                        f"{language or 'project-language'} code in {', '.join(owned)}: the "
+                        "exact signatures, types, classes and interfaces (TypeScript "
+                        "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
+                        "...) with no behaviour beyond what the language needs to compile: "
+                        "declarations only, no logic, helpers, I/O or validation. Every "
+                        "other ticket imports these definitions and none may change or "
+                        "redeclare them, so match each contract exactly. The file must pass "
+                        "the stack's build and typecheck on its own: "
+                        + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
+                        + (
+                            " "
+                            + ", ".join(f for f in owned if f in base.files)
+                            + " already exists: keep every declaration in it exactly as it "
+                            "is and add the new ones."
+                            if base is not None and any(f in base.files for f in owned)
+                            else ""
+                        )
+                    ),
+                    specialty=Specialty.BACKEND,
+                    difficulty=Difficulty.TRIVIAL,
+                    files=owned,
+                    implements=tuple(i.name for i in code),
+                    seq=seq,
+                )
+            )
     if stack is not None and stack.bdd and base is not None:
         concerns.append("Change build: the base tree's BDD runner is kept as wired.")
     elif stack is not None and stack.bdd:
-        files = _uniq((*_plan_paths(raw_stack.get("harness_files"), "harness", concerns),
-                       *_DEFAULT_HARNESS_FILES.get(language, ())))
-        commands = "; ".join(
-            f"{k} `{v}`" for k, v in (
-                ("install", stack.install), ("build", stack.build),
-                ("typecheck", stack.typecheck), ("test", stack.test), ("run", stack.run),
-            ) if v
+        files = _uniq(
+            (
+                *_plan_paths(raw_stack.get("harness_files"), "harness", concerns),
+                *_DEFAULT_HARNESS_FILES.get(language, ()),
+            )
         )
-        out.append(Ticket(
-            id=HARNESS_TICKET_ID,
-            title="Wire the BDD runner",
-            description=(
-                f"Add the official Cucumber runner for {language} as a dev dependency "
-                "in the package manifest and write its config so the BDD command "
-                f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
-                f"its report to the file named by ${BDD_REPORT_ENV}. "
-                + (f"The stack's commands, which must pass once every ticket is "
-                   f"built: {commands}. " if commands else "")
-                + "Write ONLY your files: the feature tickets write the source after "
-                "you, and this wave's build check runs on your files alone, so "
-                "declare no build target at a source file you do not write; any "
-                "file you create outside your files is discarded."
-                + " Write no step definitions: the test tickets do."
-                + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
-                + (" " + _python_deps_rule(
-                    stack, "requirements.txt or pyproject.toml [project].dependencies")
-                   if language == "python" else "")
-            ),
-            specialty=Specialty.TEST,
-            difficulty=Difficulty.STANDARD,
-            files=tuple(f for f in files if f not in owned),
-            seq=seq,
-        ))
+        commands = "; ".join(
+            f"{k} `{v}`"
+            for k, v in (
+                ("install", stack.install),
+                ("build", stack.build),
+                ("typecheck", stack.typecheck),
+                ("test", stack.test),
+                ("run", stack.run),
+            )
+            if v
+        )
+        out.append(
+            Ticket(
+                id=HARNESS_TICKET_ID,
+                title="Wire the BDD runner",
+                description=(
+                    f"Add the official Cucumber runner for {language} as a dev dependency "
+                    "in the package manifest and write its config so the BDD command "
+                    f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
+                    f"its report to the file named by ${BDD_REPORT_ENV}. "
+                    + (
+                        f"The stack's commands, which must pass once every ticket is "
+                        f"built: {commands}. "
+                        if commands
+                        else ""
+                    )
+                    + "Write ONLY your files: the feature tickets write the source after "
+                    "you, and this wave's build check runs on your files alone, so "
+                    "declare no build target at a source file you do not write; any "
+                    "file you create outside your files is discarded."
+                    + " Write no step definitions: the test tickets do."
+                    + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
+                    + (
+                        " "
+                        + _python_deps_rule(
+                            stack, "requirements.txt or pyproject.toml [project].dependencies"
+                        )
+                        if language == "python"
+                        else ""
+                    )
+                ),
+                specialty=Specialty.TEST,
+                difficulty=Difficulty.STANDARD,
+                files=tuple(f for f in files if f not in owned),
+                seq=seq,
+            )
+        )
     return out, concerns
 
 
@@ -1748,8 +1860,11 @@ _PY_MANIFESTS = ("requirements.txt", "pyproject.toml")
 
 
 def _python_deps_ticket(
-    tickets: Sequence[Ticket], generated: Sequence[Ticket], stack: StackDecision | None,
-    base: BaseView | None, seq: Seq,
+    tickets: Sequence[Ticket],
+    generated: Sequence[Ticket],
+    stack: StackDecision | None,
+    base: BaseView | None,
+    seq: Seq,
 ) -> list[Ticket]:
     """A wave-0 ticket declaring a new Python build's dependencies in the manifest a
     planned ticket owns (requirements.txt when none does and the stack names a
@@ -1758,8 +1873,13 @@ def _python_deps_ticket(
     earlier check runs without the framework and fails on ModuleNotFoundError, which
     the fixer may not repair in a later wave's file. The planned owner keeps the file
     too, so it can still extend it (overlapping scopes run in separate waves)."""
-    if (stack is None or stack.language != "python" or stack.bdd or base is not None
-            or any(t.id == HARNESS_TICKET_ID for t in generated)):
+    if (
+        stack is None
+        or stack.language != "python"
+        or stack.bdd
+        or base is not None
+        or any(t.id == HARNESS_TICKET_ID for t in generated)
+    ):
         return []
     manifests = tuple(m for m in _PY_MANIFESTS if any(m in t.files for t in tickets))
     if not manifests and stack.framework.strip():
@@ -1768,24 +1888,27 @@ def _python_deps_ticket(
         manifests = ("requirements.txt",)
     planned = {t.id for t in tickets}
     if not manifests or any(
-        not planned.intersection(t.depends_on) for t in tickets
+        not planned.intersection(t.depends_on)
+        for t in tickets
         if any(m in t.files for m in manifests)
     ):
         return []  # none, or a first-wave ticket already writes it
-    return [Ticket(
-        id=HARNESS_TICKET_ID,
-        title="Declare the Python dependencies",
-        description=(
-            _python_deps_rule(stack, " / ".join(manifests))
-            + " Write ONLY your files: the feature tickets write the source after you; "
-            "any file you create outside your files is discarded. Write no application "
-            "code and no step definitions."
-        ),
-        specialty=Specialty.BACKEND,
-        difficulty=Difficulty.TRIVIAL,
-        files=manifests,
-        seq=seq,
-    )]
+    return [
+        Ticket(
+            id=HARNESS_TICKET_ID,
+            title="Declare the Python dependencies",
+            description=(
+                _python_deps_rule(stack, " / ".join(manifests))
+                + " Write ONLY your files: the feature tickets write the source after you; "
+                "any file you create outside your files is discarded. Write no application "
+                "code and no step definitions."
+            ),
+            specialty=Specialty.BACKEND,
+            difficulty=Difficulty.TRIVIAL,
+            files=manifests,
+            seq=seq,
+        )
+    ]
 
 
 def _attach_generated(
@@ -1805,17 +1928,33 @@ def _attach_generated(
                 f"Ticket {t.id}: dropped the gate-owned contract file(s) "
                 f"{', '.join(sorted(set(t.files) - set(files)))} from its files."
             )
-        ordered.append(t.model_copy(update={
-            "files": files, "depends_on": _uniq((*gen_ids, *t.depends_on)),
-        }))
+        ordered.append(
+            t.model_copy(
+                update={
+                    "files": files,
+                    "depends_on": _uniq((*gen_ids, *t.depends_on)),
+                }
+            )
+        )
     return [
         t.model_copy(update={"seq": seq._replace(local=i)}) for i, t in enumerate(ordered)
     ], concerns
 
 
 # Script files a stack command can name as its own repo file (`python3 smoke.py`).
-_SCRIPT_SUFFIXES = (".py", ".js", ".mjs", ".cjs", ".ts", ".mts", ".sh", ".rb", ".lua",
-                    ".pl", ".php")
+_SCRIPT_SUFFIXES = (
+    ".py",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".mts",
+    ".sh",
+    ".rb",
+    ".lua",
+    ".pl",
+    ".php",
+)
 
 
 def stack_files(stack: StackDecision) -> tuple[str, ...]:
@@ -1828,15 +1967,20 @@ def stack_files(stack: StackDecision) -> tuple[str, ...]:
             continue
         for tok in tokens:
             path = tok.removeprefix("./")
-            if (path.endswith(_SCRIPT_SUFFIXES) and not path.startswith(("-", "/"))
-                    and not any(ch in path for ch in "$=*:")
-                    and ".." not in path.split("/") and path not in out):
+            if (
+                path.endswith(_SCRIPT_SUFFIXES)
+                and not path.startswith(("-", "/"))
+                and not any(ch in path for ch in "$=*:")
+                and ".." not in path.split("/")
+                and path not in out
+            ):
                 out.append(path)
     return tuple(out)
 
 
 def _own_stack_files(
-    tickets: Sequence[Ticket], stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
     existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str], tuple[str, ...]]:
     """Give every script a stack command runs (``smoke.py`` for ``python3 smoke.py``)
@@ -1849,29 +1993,51 @@ def _own_stack_files(
     tickets, init_concerns = _own_package_inits(tickets, stack, existing)
 
     def owned(path: str) -> bool:
-        return path in existing or any(f == path or (f.endswith("/") and path.startswith(f))
-                                       for t in tickets for f in t.files)
+        return path in existing or any(
+            f == path or (f.endswith("/") and path.startswith(f)) for t in tickets for f in t.files
+        )
 
     orphans = [f for f in stack_files(stack) if not owned(f)]
     if not orphans:
         return list(tickets), init_concerns, ()
     entry = next((t for t in tickets if t.entrypoint and t.id not in _GENERATED_TICKETS), None)
     if entry is None:
-        return list(tickets), init_concerns, tuple(
-            f"Stack command file {f} is written by no ticket: put it in the files[] of "
-            "the ticket that wires the app (the entrypoint ticket)." for f in orphans
+        return (
+            list(tickets),
+            init_concerns,
+            tuple(
+                f"Stack command file {f} is written by no ticket: put it in the files[] of "
+                "the ticket that wires the app (the entrypoint ticket)."
+                for f in orphans
+            ),
         )
-    note = (" Also write " + ", ".join(orphans) + ": the stack's commands run "
-            + ("it" if len(orphans) == 1 else "them")
-            + (f" (run: `{stack.run}`), which must boot the real app headless and exit 0"
-               if stack.run else "") + ".")
-    updated = entry.model_copy(update={
-        "files": (*entry.files, *orphans), "description": entry.description + note,
-    })
-    return ([updated if t.id == entry.id else t for t in tickets],
-            [*init_concerns,
-             f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
-             "ticket wrote."], ())
+    note = (
+        " Also write "
+        + ", ".join(orphans)
+        + ": the stack's commands run "
+        + ("it" if len(orphans) == 1 else "them")
+        + (
+            f" (run: `{stack.run}`), which must boot the real app headless and exit 0"
+            if stack.run
+            else ""
+        )
+        + "."
+    )
+    updated = entry.model_copy(
+        update={
+            "files": (*entry.files, *orphans),
+            "description": entry.description + note,
+        }
+    )
+    return (
+        [updated if t.id == entry.id else t for t in tickets],
+        [
+            *init_concerns,
+            f"Ticket {entry.id}: added stack command file(s) {', '.join(orphans)} that no "
+            "ticket wrote.",
+        ],
+        (),
+    )
 
 
 def _is_python_test(path: str) -> bool:
@@ -1880,7 +2046,8 @@ def _is_python_test(path: str) -> bool:
 
 
 def _own_scenario_bindings(
-    tickets: Sequence[Ticket], stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
 ) -> tuple[list[Ticket], list[str]]:
     """On a pytest-bdd stack, give a feature ticket that carries scenarios but has no
     test ticket after it (the demo shape) a step module of its own to bind them from.
@@ -1897,20 +2064,29 @@ def _own_scenario_bindings(
         test = t.specialty is Specialty.TEST
         # A file-less feature ticket is an acceptance-only one: a file would make it
         # build work.
-        if (not t.scenario_ids or step_module(t.files, t.id) is not None
-                or (not test and (not t.files or set(t.scenario_ids) <= bound))):
+        if (
+            not t.scenario_ids
+            or step_module(t.files, t.id) is not None
+            or (not test and (not t.files or set(t.scenario_ids) <= bound))
+        ):
             out.append(t)
             continue
         path = ticket_step_module(t.id)
         out.append(t.model_copy(update={"files": (*t.files, path)}))
-        concerns.append(f"Ticket {t.id}: added {path} to bind its own scenarios "
-                        + ("(a test ticket with no test module)." if test
-                           else "(no test ticket depends on it)."))
+        concerns.append(
+            f"Ticket {t.id}: added {path} to bind its own scenarios "
+            + (
+                "(a test ticket with no test module)."
+                if test
+                else "(no test ticket depends on it)."
+            )
+        )
     return out, concerns
 
 
 def _fold_test_bindings(
-    tickets: Sequence[Ticket], stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
 ) -> tuple[list[Ticket], list[str]]:
     """On a pytest-bdd stack, move a scenario's binding off a test ticket that writes
     only step modules onto the feature ticket that builds it, when that changes
@@ -1936,8 +2112,12 @@ def _fold_test_bindings(
     protected = set(stack_files(stack)) if stack is not None else set()
     deps = {t.id: t.depends_on for t in tickets}
     by_id = {t.id: t for t in tickets}
-    owner = {c: t.id for t in tickets
-             if t.specialty is not Specialty.TEST and t.files for c in t.scenario_ids}
+    owner = {
+        c: t.id
+        for t in tickets
+        if t.specialty is not Specialty.TEST and t.files
+        for c in t.scenario_ids
+    }
     # A file-less acceptance-only ticket builds nothing a scenario could wait for.
     features = {t.id for t in _features(tickets) if t.files}
     out: list[Ticket] = []
@@ -1948,17 +2128,21 @@ def _fold_test_bindings(
         if t.specialty is not Specialty.TEST or t.id in _GENERATED_TICKETS or not borrowed:
             out.append(t)
             continue
-        steps_only = all(_is_python_test(f) and not is_helper_module(f)
-                         and f not in protected for f in t.files)
+        steps_only = all(
+            _is_python_test(f) and not is_helper_module(f) and f not in protected for f in t.files
+        )
         if t.implements:
-            concerns.append(f"Test ticket {t.id} implements contract(s) "
-                            f"{', '.join(t.implements)}: left it binding its scenarios.")
+            concerns.append(
+                f"Test ticket {t.id} implements contract(s) "
+                f"{', '.join(t.implements)}: left it binding its scenarios."
+            )
         if t.implements or not t.files:
             out.append(t)
             continue
         upstream = _ancestors(deps, t.id) & features
         moved = [
-            c for c in borrowed
+            c
+            for c in borrowed
             if step_module(by_id[owner[c]].files, owner[c]) is not None
             or (steps_only and upstream - {owner[c]} <= _ancestors(deps, owner[c]))
         ]
@@ -1966,9 +2150,11 @@ def _fold_test_bindings(
             out.append(t)
             continue
         kept = tuple(c for c in t.scenario_ids if c not in moved)
-        note = (f"Test ticket {t.id}: moved the binding of scenario(s) {', '.join(moved)} "
-                f"to the ticket(s) that build them "
-                f"({', '.join(_uniq(owner[c] for c in moved))})")
+        note = (
+            f"Test ticket {t.id}: moved the binding of scenario(s) {', '.join(moved)} "
+            f"to the ticket(s) that build them "
+            f"({', '.join(_uniq(owner[c] for c in moved))})"
+        )
         if not kept and steps_only:
             dropped[t.id] = t.depends_on
             concerns.append(note + "; dropped the ticket, which had nothing else to write.")
@@ -1982,15 +2168,20 @@ def _fold_test_bindings(
         return tuple(d for up in dropped[dep] for d in resolve(up)) if dep in dropped else (dep,)
 
     return [
-        t.model_copy(update={"depends_on": _uniq(
-            d for dep in t.depends_on for d in resolve(dep) if d != t.id)})
-        if set(t.depends_on) & set(dropped) else t
+        t.model_copy(
+            update={
+                "depends_on": _uniq(d for dep in t.depends_on for d in resolve(dep) if d != t.id)
+            }
+        )
+        if set(t.depends_on) & set(dropped)
+        else t
         for t in out
     ], concerns
 
 
 def _one_step_module_per_ticket(
-    tickets: Sequence[Ticket], stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
 ) -> tuple[list[Ticket], list[str]]:
     """On a pytest-bdd stack, a ticket carrying scenarios writes ONE step module, the
     one its packet binds them from (:func:`step_module`): four modules split by layer
@@ -2004,8 +2195,11 @@ def _one_step_module_per_ticket(
     concerns: list[str] = []
     for t in tickets:
         binder = step_module(t.files, t.id)
-        extra = [f for f in t.files if _is_python_test(f) and f != binder
-                 and not is_helper_module(f) and f not in protected]
+        extra = [
+            f
+            for f in t.files
+            if _is_python_test(f) and f != binder and not is_helper_module(f) and f not in protected
+        ]
         if not t.scenario_ids or not extra:
             out.append(t)
             continue
@@ -2018,7 +2212,9 @@ def _one_step_module_per_ticket(
 
 
 def _own_package_inits(
-    tickets: Sequence[Ticket], stack: StackDecision, existing: frozenset[str] = frozenset(),
+    tickets: Sequence[Ticket],
+    stack: StackDecision,
+    existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str]]:
     """Give every Python source directory's ``__init__.py`` an owner. Without one
     mypy maps ``finance/contracts.py`` to both ``contracts`` and ``finance.contracts``
@@ -2048,19 +2244,31 @@ def _own_package_inits(
     for init, first in dirs.items():
         added.setdefault(holder or first, []).append(init)
     out = [
-        t.model_copy(update={
-            "files": (*t.files, *added[t.id]),
-            "description": t.description + " Also create the package marker(s) "
-            + ", ".join(added[t.id]) + " (empty unless this ticket needs exports there).",
-        }) if t.id in added else t
+        t.model_copy(
+            update={
+                "files": (*t.files, *added[t.id]),
+                "description": t.description
+                + " Also create the package marker(s) "
+                + ", ".join(added[t.id])
+                + " (empty unless this ticket needs exports there).",
+            }
+        )
+        if t.id in added
+        else t
         for t in tickets
     ]
-    return out, [*concerns, *(f"Ticket {tid}: added package marker(s) {', '.join(inits)} "
-                              "that no ticket wrote." for tid, inits in added.items())]
+    return out, [
+        *concerns,
+        *(
+            f"Ticket {tid}: added package marker(s) {', '.join(inits)} that no ticket wrote."
+            for tid, inits in added.items()
+        ),
+    ]
 
 
 def _merge_shadowed_modules(
-    tickets: Sequence[Ticket], existing: frozenset[str] = frozenset(),
+    tickets: Sequence[Ticket],
+    existing: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[str]]:
     """Plan a module ``x.py`` as ``x/__init__.py`` when the plan (or the base tree)
     also writes files under ``x/``: a package directory shadows the sibling module,
@@ -2070,13 +2278,17 @@ def _merge_shadowed_modules(
     A base-tree module or a generated ticket's file is left as it is."""
     planned = {f for t in tickets for f in t.files}
     dirs = {f.rsplit("/", 1)[0] for f in planned | existing if "/" in f}
-    dirs |= {"/".join(d.split("/")[:i]) for d in tuple(dirs)
-             for i in range(1, d.count("/") + 1)}
+    dirs |= {"/".join(d.split("/")[:i]) for d in tuple(dirs) for i in range(1, d.count("/") + 1)}
     frozen = {f for t in tickets if t.id in _GENERATED_TICKETS for f in t.files}
-    moves = {f: f.removesuffix(".py") + "/__init__.py" for f in planned
-             if f.endswith(".py") and f.removesuffix(".py") in dirs
-             and f not in existing and f not in frozen
-             and not any(p.startswith("test") for p in f.split("/"))}
+    moves = {
+        f: f.removesuffix(".py") + "/__init__.py"
+        for f in planned
+        if f.endswith(".py")
+        and f.removesuffix(".py") in dirs
+        and f not in existing
+        and f not in frozen
+        and not any(p.startswith("test") for p in f.split("/"))
+    }
     if not moves:
         return list(tickets), []
     out: list[Ticket] = []
@@ -2091,13 +2303,20 @@ def _merge_shadowed_modules(
         note = "".join(
             f" Write {f}'s code as {moves[f]}: the plan also has a {f.removesuffix('.py')}/ "
             f"package, which would shadow a {f} module (`import "
-            f"{f.removesuffix('.py').replace('/', '.')}` is unchanged)." for f in mine)
-        out.append(t.model_copy(update={"files": files, "reads": reads,
-                                        "description": t.description + note}))
+            f"{f.removesuffix('.py').replace('/', '.')}` is unchanged)."
+            for f in mine
+        )
+        out.append(
+            t.model_copy(
+                update={"files": files, "reads": reads, "description": t.description + note}
+            )
+        )
         if mine:
-            concerns.append(f"Ticket {t.id}: planned {', '.join(mine)} as "
-                            f"{', '.join(moves[f] for f in mine)}: a package of that "
-                            "name shadows the module.")
+            concerns.append(
+                f"Ticket {t.id}: planned {', '.join(mine)} as "
+                f"{', '.join(moves[f] for f in mine)}: a package of that "
+                "name shadows the module."
+            )
     return out, concerns
 
 
@@ -2134,8 +2353,10 @@ def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[st
                 continue
             cur = out[t.id]
             out[t.id] = cur.model_copy(update={"depends_on": (*cur.depends_on, dep)})
-            concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which "
-                            f"implements the contract {name} it consumes.")
+            concerns.append(
+                f"Ticket {t.id}: added a dependency on {dep}, which "
+                f"implements the contract {name} it consumes."
+            )
     return [out[t.id] for t in tickets], concerns
 
 
@@ -2161,10 +2382,13 @@ def _add_read_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
             if dep in _ancestors(deps, t.id) or t.id in _ancestors(deps, dep):
                 continue
             deps[t.id] = (*deps[t.id], dep)
-            concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which writes "
-                            f"{path} it reads.")
-    return [t.model_copy(update={"depends_on": deps[t.id]}) if deps[t.id] != t.depends_on
-            else t for t in tickets], concerns
+            concerns.append(
+                f"Ticket {t.id}: added a dependency on {dep}, which writes {path} it reads."
+            )
+    return [
+        t.model_copy(update={"depends_on": deps[t.id]}) if deps[t.id] != t.depends_on else t
+        for t in tickets
+    ], concerns
 
 
 def _ancestors(deps: dict[str, tuple[str, ...]], tid: str) -> set[str]:
@@ -2187,16 +2411,16 @@ def _drop_self_consumes(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[s
         own = [n for n in t.consumes if n in t.implements]
         if own:
             t = t.model_copy(update={"consumes": tuple(n for n in t.consumes if n not in own)})
-            concerns.append(f"Ticket {t.id}: dropped consumes {', '.join(own)}, which it "
-                            "implements itself.")
+            concerns.append(
+                f"Ticket {t.id}: dropped consumes {', '.join(own)}, which it implements itself."
+            )
         out.append(t)
     return out, concerns
 
 
 def _features(tickets: Sequence[Ticket]) -> list[Ticket]:
     return [
-        t for t in tickets
-        if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
+        t for t in tickets if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
     ]
 
 
@@ -2296,7 +2520,8 @@ def _declaration_only(contract: InterfaceContract) -> bool:
 
 
 def _contract_findings(
-    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion],
+    tickets: Sequence[Ticket],
+    criteria: Sequence[AcceptanceCriterion],
     declared: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """The plan-time contract fit check over the model's tickets: every consumed
@@ -2323,7 +2548,8 @@ def _contract_findings(
     out = [
         f"Contract {name} is implemented by {len(ids)} tickets ({', '.join(ids)}); "
         "exactly one ticket may implement it."
-        for name, ids in producers.items() if len(ids) > 1
+        for name, ids in producers.items()
+        if len(ids) > 1
     ]
     for t in work:
         for name in t.consumes:
@@ -2384,11 +2610,14 @@ def _builtin_method_findings(
     for i in interfaces:
         if i.kind not in CODE_CONTRACT_KINDS:
             continue
-        clashes = sorted({
-            name for name in _PY_METHOD.findall(i.signature)
-            if name in _BUILTIN_TYPES
-            and re.search(rf"(?:->|:)\s*(?:[\w.]+\[)*{name}\b", i.signature)
-        })
+        clashes = sorted(
+            {
+                name
+                for name in _PY_METHOD.findall(i.signature)
+                if name in _BUILTIN_TYPES
+                and re.search(rf"(?:->|:)\s*(?:[\w.]+\[)*{name}\b", i.signature)
+            }
+        )
         if clashes:
             out.append(
                 f"Contract {i.name} names method(s) {', '.join(clashes)} after a builtin "
@@ -2447,10 +2676,11 @@ def _goal_rows(brief: IntentBrief | None) -> list[tuple[str, str, str]]:
     if brief is None:
         return []
     return [
-        *(("Must-have", g, t) for g, t in zip(brief.must_have_ids, brief.must_haves,
-                                               strict=False)),
-        *(("Success criterion", g, t) for g, t in zip(
-            brief.success_criterion_ids, brief.success_criteria, strict=False)),
+        *(("Must-have", g, t) for g, t in zip(brief.must_have_ids, brief.must_haves, strict=False)),
+        *(
+            ("Success criterion", g, t)
+            for g, t in zip(brief.success_criterion_ids, brief.success_criteria, strict=False)
+        ),
     ]
 
 
@@ -2458,11 +2688,11 @@ def _goals_text(brief: IntentBrief | None) -> str:
     if brief is None:
         return ""
     lines = [f"- {gid} ({kind.lower()}): {text}" for kind, gid, text in _goal_rows(brief)]
-    return (
-        f"\nDeliverable: {brief.deliverable or 'app'}"
-        + ("\nMUST-HAVES AND SUCCESS CRITERIA (cite these ids in scenario covers[]; each "
-           "needs at least one covering scenario across the plan):\n" + "\n".join(lines)
-           if lines else "")
+    return f"\nDeliverable: {brief.deliverable or 'app'}" + (
+        "\nMUST-HAVES AND SUCCESS CRITERIA (cite these ids in scenario covers[]; each "
+        "needs at least one covering scenario across the plan):\n" + "\n".join(lines)
+        if lines
+        else ""
     )
 
 
@@ -2501,23 +2731,24 @@ def _coverage_findings(
                 out.append(
                     f"Scenario {c.id} covers unknown id {raw!r}; cite must-have / "
                     "success-criterion ids ("
-                    + (", ".join(g for _, g, _ in goals) or "none declared") + ")."
+                    + (", ".join(g for _, g, _ in goals) or "none declared")
+                    + ")."
                 )
             else:
                 covered.add(gid)
     out += [
-        f"{kind} {gid} ({text[:80]!r}) has no covering scenario; add one whose covers "
-        f"lists {gid}."
-        for kind, gid, text in goals if gid not in covered
+        f"{kind} {gid} ({text[:80]!r}) has no covering scenario; add one whose covers lists {gid}."
+        for kind, gid, text in goals
+        if gid not in covered
     ]
     features = [
-        t for t in tickets
-        if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
+        t for t in tickets if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
     ]
     out += [
         f"Feature ticket {t.id} has no scenarios; give it at least one (or fold it "
         "into the ticket whose behaviour it serves)."
-        for t in features if t.id not in owned
+        for t in features
+        if t.id not in owned
     ]
     entries = [t for t in features if t.entrypoint]
     if features and not entries and not change:
@@ -2576,7 +2807,8 @@ def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple
 # Web frameworks whose app entry serves until killed.
 _WEB_FRAMEWORK = re.compile(
     r"\b(express|fastify|koa|hapi|nest(js)?|next(\.js)?|hono|flask|fastapi|django|"
-    r"starlette|aiohttp|sanic|bottle|tornado|quart|litestar)\b", re.I,
+    r"starlette|aiohttp|sanic|bottle|tornado|quart|litestar)\b",
+    re.I,
 )
 # Commands that always start a server.
 _SERVER_COMMAND = re.compile(
@@ -2595,8 +2827,10 @@ def _run_findings(stack: StackDecision) -> tuple[str, ...]:
     """A web stack whose run command is the bare server entry: the smoke gate waits
     for it to exit, and a server never does."""
     run = " ".join(stack.run.split())
-    if not (_SERVER_COMMAND.match(run)
-            or (_APP_ENTRY.match(run) and _WEB_FRAMEWORK.search(stack.framework))):
+    if not (
+        _SERVER_COMMAND.match(run)
+        or (_APP_ENTRY.match(run) and _WEB_FRAMEWORK.search(stack.framework))
+    ):
         return ()
     return (
         f"stack.run `{stack.run}` starts the server, which never exits, so the smoke "
@@ -2694,12 +2928,19 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     over = list(overflow)
     base = frame.base
     tickets, criteria, concerns = _build_tickets(
-        raw, frame.tickets_seq, frame.criteria_seq, frame.names, cap=frame.cap,
-        epics=frame.epics, overflow=over,
+        raw,
+        frame.tickets_seq,
+        frame.criteria_seq,
+        frame.names,
+        cap=frame.cap,
+        epics=frame.epics,
+        overflow=over,
         reserved=base.feature_names if base is not None else frozenset(),
     )
-    generated = (*frame.generated, *_python_deps_ticket(
-        tickets, frame.generated, frame.stack, base, frame.tickets_seq))
+    generated = (
+        *frame.generated,
+        *_python_deps_ticket(tickets, frame.generated, frame.stack, base, frame.tickets_seq),
+    )
     tickets, more = _attach_generated(tickets, generated, frame.tickets_seq)
     concerns += more
     for repair in (_drop_self_consumes, _add_contract_deps):
@@ -2729,9 +2970,12 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),
     )
     concerns += [*_unused_contracts(tickets, criteria), *frame.compiled.concerns, *over]
-    coverage = (*stack_findings, *_coverage_findings(
-        tickets, criteria, frame.brief, run=frame.run, change=base is not None
-    ), *_offline_scenario_findings(criteria), *frame.stack_findings)
+    coverage = (
+        *stack_findings,
+        *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
+        *_offline_scenario_findings(criteria),
+        *frame.stack_findings,
+    )
     return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
 
 
@@ -2743,12 +2987,15 @@ def _redeclared_findings(
     return tuple(
         f"Contract {i.name} already exists in the base tree: drop it from interfaces "
         "and consume it by name instead of redeclaring it."
-        for i in interfaces if i.name in existing
+        for i in interfaces
+        if i.name in existing
     )
 
 
 def _compile(
-    interfaces: Sequence[InterfaceContract], language: str, stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    language: str,
+    stack: StackDecision | None,
     base: BaseView | None = None,
 ) -> CompileResult:
     code = [(i.name, i.signature) for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
@@ -2756,7 +3003,8 @@ def _compile(
         # New contracts may reference the base's: compile them together.
         new = {name for name, _ in code}
         code = [
-            (c["name"], c["signature"]) for c in base.contracts
+            (c["name"], c["signature"])
+            for c in base.contracts
             if c.get("kind") in CODE_CONTRACT_KINDS and c["name"] not in new
         ] + code
     strict = stack is not None and "--strict" in stack.typecheck
@@ -2765,7 +3013,8 @@ def _compile(
 
 def _ticket_epics(tickets: Sequence[Ticket]) -> dict[str, str]:
     return {
-        t.id: m.group(1) for t in tickets
+        t.id: m.group(1)
+        for t in tickets
         if t.id not in _GENERATED_TICKETS and (m := _EPIC_OF_TICKET.match(t.id))
     }
 
@@ -2853,11 +3102,16 @@ def _stack_constraints(
     if stack is None or stack.language != "python":
         return []
     text = str(payload).lower()
-    return [c for c, words in ((_SQLITE_MEMORY_CONSTRAINT, ("sqlite",)),
-                               (_SQLALCHEMY_TYPED_CONSTRAINT, ("sqlalchemy",)),
-                               (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, ("sqlalchemy",)),
-                               (_SQLALCHEMY_SQLITE_CONSTRAINT, ("sqlite", "sqlalchemy")))
-            if all(w in text for w in words)]
+    return [
+        c
+        for c, words in (
+            (_SQLITE_MEMORY_CONSTRAINT, ("sqlite",)),
+            (_SQLALCHEMY_TYPED_CONSTRAINT, ("sqlalchemy",)),
+            (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, ("sqlalchemy",)),
+            (_SQLALCHEMY_SQLITE_CONSTRAINT, ("sqlite", "sqlalchemy")),
+        )
+        if all(w in text for w in words)
+    ]
 
 
 def ticket_owner(ticket: Ticket) -> str:
@@ -2898,9 +3152,7 @@ def _retired_constraints(
         key=lambda c: c.id,
     )
     return [
-        c.model_copy(
-            update={"supersedes": c.id, "seq": seq._replace(local=len(emitted) + i)}
-        )
+        c.model_copy(update={"supersedes": c.id, "seq": seq._replace(local=len(emitted) + i)})
         for i, c in enumerate(stale)
     ]
 
@@ -2908,9 +3160,7 @@ def _retired_constraints(
 _M = TypeVar("_M")
 
 
-def _newest_by_id(
-    state: FactoryState, rt: AgentRuntime, kind: str, cls: type[_M]
-) -> dict[str, _M]:
+def _newest_by_id(state: FactoryState, rt: AgentRuntime, kind: str, cls: type[_M]) -> dict[str, _M]:
     """This node's newest record per id (``name`` for contracts) of ``kind``, in
     Seq order of each id's first record; empty without a store."""
     if rt.cas is None:
@@ -2961,8 +3211,11 @@ def _latest_epics(state: FactoryState, rt: AgentRuntime) -> list[_Epic]:
     if rt.cas is None:
         return []
     handles = sorted(
-        (a for a in state.get("artifacts") or ()
-         if a.kind == EPIC_KIND and a.seq.node_id == NODE_ID),
+        (
+            a
+            for a in state.get("artifacts") or ()
+            if a.kind == EPIC_KIND and a.seq.node_id == NODE_ID
+        ),
         key=lambda a: a.seq,
     )
     if not handles:
@@ -2977,11 +3230,17 @@ def _latest_epics(state: FactoryState, rt: AgentRuntime) -> list[_Epic]:
         except Exception:
             continue
         if isinstance(body, Epic):
-            out.append(_Epic(
-                id=body.id, title=body.title, summary=body.summary,
-                specialty_mix=body.specialty_mix, depends_on=body.depends_on,
-                provides=body.provides, consumes=body.consumes,
-            ))
+            out.append(
+                _Epic(
+                    id=body.id,
+                    title=body.title,
+                    summary=body.summary,
+                    specialty_mix=body.specialty_mix,
+                    depends_on=body.depends_on,
+                    provides=body.provides,
+                    consumes=body.consumes,
+                )
+            )
     return out
 
 
@@ -2993,15 +3252,17 @@ def _epics_from_tickets(live: Sequence[Ticket], epic_of: dict[str, str]) -> list
     for eid in order:
         mine = [t for t in live if epic_of[t.id] == eid]
         upstream = {epic_of[d] for t in mine for d in t.depends_on if epic_of.get(d, eid) != eid}
-        epics.append(_Epic(
-            id=eid,
-            title=eid,
-            summary="; ".join(t.title for t in mine)[:_BRIEF_CAP],
-            specialty_mix=_uniq(t.specialty.value for t in mine),
-            depends_on=tuple(e for e in order if e in upstream),
-            provides=_uniq(x for t in mine for x in t.implements),
-            consumes=_uniq(x for t in mine for x in t.consumes),
-        ))
+        epics.append(
+            _Epic(
+                id=eid,
+                title=eid,
+                summary="; ".join(t.title for t in mine)[:_BRIEF_CAP],
+                specialty_mix=_uniq(t.specialty.value for t in mine),
+                depends_on=tuple(e for e in order if e in upstream),
+                provides=_uniq(x for t in mine for x in t.implements),
+                consumes=_uniq(x for t in mine for x in t.consumes),
+            )
+        )
     return epics
 
 
@@ -3017,8 +3278,7 @@ def _prior_plan(
     (an inline plan has no epics to target) and the PRD resolves. ``inline`` asks
     instead for a plan none of whose tickets carries an epic prefix, with no epics."""
     every = sorted(
-        (t for t in _newest_by_id(state, rt, TICKET_KIND, Ticket).values()
-         if t.supersedes != t.id),
+        (t for t in _newest_by_id(state, rt, TICKET_KIND, Ticket).values() if t.supersedes != t.id),
         key=lambda t: t.seq,
     )
     live = [t for t in every if t.id not in _GENERATED_TICKETS]
@@ -3045,8 +3305,8 @@ def _prior_plan(
     # scenario a later pass dropped stays dropped.
     current = set(prd.criterion_ids)
     criteria = {
-        cid: c for cid, c in
-        _newest_by_id(state, rt, "acceptance_criterion", AcceptanceCriterion).items()
+        cid: c
+        for cid, c in _newest_by_id(state, rt, "acceptance_criterion", AcceptanceCriterion).items()
         if c.ticket_id in owned and cid in current
     }
     critiques = list(_newest_by_id(state, rt, "criteria_findings", CriteriaCritique).values())
@@ -3059,15 +3319,26 @@ def _prior_plan(
     brief = (
         "PLAN (from the previous pass):\n"
         f"Product: {prd.title}\n{_prose(rt, prd.prd_uri)[:_BRIEF_CAP]}"
-        + (f"\nArchitecture: {design.title}\n{_prose(rt, design.design_uri)[:_BRIEF_CAP]}\n"
-           f"Components: {', '.join(design.components) or '(none)'}" if design else "")
+        + (
+            f"\nArchitecture: {design.title}\n{_prose(rt, design.design_uri)[:_BRIEF_CAP]}\n"
+            f"Components: {', '.join(design.components) or '(none)'}"
+            if design
+            else ""
+        )
         + _goals_text(intent)
     )
     return _PriorPlan(
-        epics=tuple(epics), epic_of=epic_of, tickets=tuple(live),
-        generated=tuple(t for t in every if t.id in _GENERATED_TICKETS), criteria=criteria,
-        prd=prd, critique=max(critiques, key=lambda c: c.seq) if critiques else None,
-        interfaces=interfaces, declared=declared, brief=brief, intent=intent,
+        epics=tuple(epics),
+        epic_of=epic_of,
+        tickets=tuple(live),
+        generated=tuple(t for t in every if t.id in _GENERATED_TICKETS),
+        criteria=criteria,
+        prd=prd,
+        critique=max(critiques, key=lambda c: c.seq) if critiques else None,
+        interfaces=interfaces,
+        declared=declared,
+        brief=brief,
+        intent=intent,
     )
 
 
@@ -3081,7 +3352,8 @@ def _target_epics(findings: tuple[str, ...], prior: _PriorPlan) -> tuple[str, ..
         named = {t for t in tokens if t in ids}
         named |= {prior.epic_of[t] for t in tokens if t in prior.epic_of}
         named |= {
-            prior.epic_of[c.ticket_id] for cid, c in prior.criteria.items()
+            prior.epic_of[c.ticket_id]
+            for cid, c in prior.criteria.items()
             if cid in tokens and c.ticket_id in prior.epic_of
         }
         if not named:
@@ -3091,7 +3363,8 @@ def _target_epics(findings: tuple[str, ...], prior: _PriorPlan) -> tuple[str, ..
 
 
 def _ticket_items(
-    tickets: Iterable[Ticket], criteria: Iterable[AcceptanceCriterion],
+    tickets: Iterable[Ticket],
+    criteria: Iterable[AcceptanceCriterion],
     epic_of: dict[str, str],
 ) -> list[dict[str, Any]]:
     """Checked tickets back as raw items (scenarios from their criteria), the
@@ -3100,26 +3373,39 @@ def _ticket_items(
     scenarios: dict[str, list[dict[str, Any]]] = {}
     for c in criteria:
         scenarios.setdefault(c.ticket_id or "", []).append(
-            {"id": c.id, "text": c.text, "given": list(c.given), "when": list(c.when),
-             "then": list(c.then), "criticality": c.criticality.value,
-             "security_abuse": c.security_abuse, "covers": list(c.covers)}
+            {
+                "id": c.id,
+                "text": c.text,
+                "given": list(c.given),
+                "when": list(c.when),
+                "then": list(c.then),
+                "criticality": c.criticality.value,
+                "security_abuse": c.security_abuse,
+                "covers": list(c.covers),
+            }
         )
     return [
         {
-            "id": t.id, "title": t.title, "description": t.description,
-            "specialty": t.specialty.value, "difficulty": t.difficulty.value,
+            "id": t.id,
+            "title": t.title,
+            "description": t.description,
+            "specialty": t.specialty.value,
+            "difficulty": t.difficulty.value,
             "depends_on": [
-                d for d in t.depends_on
-                if (epic_of.get(d) == epic_of.get(t.id) if epic_of
-                    else d not in _GENERATED_TICKETS)
+                d
+                for d in t.depends_on
+                if (epic_of.get(d) == epic_of.get(t.id) if epic_of else d not in _GENERATED_TICKETS)
             ],
-            "files": list(t.files), "reads": list(t.reads),
-            "implements": list(t.implements), "consumes": list(t.consumes),
+            "files": list(t.files),
+            "reads": list(t.reads),
+            "implements": list(t.implements),
+            "consumes": list(t.consumes),
             "entrypoint": t.entrypoint,
             "scenarios": scenarios.get(t.id, []),
             **({_EPIC_KEY: epic_of.get(t.id, "")} if epic_of else {}),
         }
-        for t in tickets if t.id not in _GENERATED_TICKETS
+        for t in tickets
+        if t.id not in _GENERATED_TICKETS
     ]
 
 
@@ -3128,7 +3414,8 @@ def _prior_items(prior: _PriorPlan, epic_id: str) -> list[dict[str, Any]]:
     every dependency against the re-planned epics."""
     return _ticket_items(
         (t for t in prior.tickets if prior.epic_of[t.id] == epic_id),
-        prior.criteria.values(), prior.epic_of,
+        prior.criteria.values(),
+        prior.epic_of,
     )
 
 
@@ -3147,7 +3434,8 @@ def _match_prior_epics(epics: Sequence[_Epic], prior: _PriorPlan) -> dict[str, s
     found: dict[str, str] = {}
     for e in epics:
         hits = {
-            p.id for p in prior.epics
+            p.id
+            for p in prior.epics
             if (_norm_title(e.title) and _norm_title(p.title) == _norm_title(e.title))
             or ((e.provides or e.consumes) and contracts(p) == contracts(e))
         }
@@ -3158,8 +3446,11 @@ def _match_prior_epics(epics: Sequence[_Epic], prior: _PriorPlan) -> dict[str, s
 
 
 def _epic_revision_text(
-    findings: tuple[str, ...], prior: _PriorPlan | None, epic_id: str,
-    continues: str | None, source: tuple[str, str] = _GATE,
+    findings: tuple[str, ...],
+    prior: _PriorPlan | None,
+    epic_id: str,
+    continues: str | None,
+    source: tuple[str, str] = _GATE,
 ) -> str:
     """The revision block of one epic call. ``continues`` is the previous pass's
     epic this one carries on: its tickets are reproduced under this epic's id.
@@ -3170,12 +3461,17 @@ def _epic_revision_text(
     )
     tail = f"{source[1]}:\n- " + "\n- ".join(findings) + "\n\n"
     if prior is None or continues is None:
-        refs = "\n".join(
-            f"- {t.id} [{t.specialty.value}] {t.title}" for t in prior.tickets
-        )[:_BRIEF_CAP] if prior is not None else ""
+        refs = (
+            "\n".join(f"- {t.id} [{t.specialty.value}] {t.title}" for t in prior.tickets)[
+                :_BRIEF_CAP
+            ]
+            if prior is not None
+            else ""
+        )
         return (
             head + ", numbered afresh, AND add scenarios that close every finding below "
-            "that concerns this epic.\n" + tail
+            "that concerns this epic.\n"
+            + tail
             + "The previous plan's tickets (reference only — the epics were re-split, so "
             f"do not reuse these ids):\n{refs or '(none)'}"
         )
@@ -3185,18 +3481,18 @@ def _epic_revision_text(
 
     lines: list[str] = []
     for t in (t for t in prior.tickets if prior.epic_of[t.id] == continues):
-        lines.append(
-            f"- {rebased(t.id)} [{t.specialty.value}] {t.title} files={list(t.files)}"
-        )
+        lines.append(f"- {rebased(t.id)} [{t.specialty.value}] {t.title} files={list(t.files)}")
         lines += [
             f"    - {rebased(c.id)}: {c.text} (criticality={c.criticality.value}; "
             f"security_abuse={c.security_abuse})"
-            for c in prior.criteria.values() if c.ticket_id == t.id
+            for c in prior.criteria.values()
+            if c.ticket_id == t.id
         ]
     return (
         head + ": reproduce every ticket and scenario below (same ids, never weakened; "
         "fix in place any a finding names) AND add scenarios that close every finding "
-        "below that concerns this epic.\n" + tail
+        "below that concerns this epic.\n"
+        + tail
         + f"This epic's previous tickets:\n{chr(10).join(lines) or '(none)'}"
     )
 
@@ -3214,10 +3510,13 @@ def _retired_tickets(
         key=lambda t: t.id,
     )
     return [
-        t.model_copy(update={
-            "supersedes": t.id, "version": t.version + 1,
-            "seq": seq._replace(local=len(emitted) + i),
-        })
+        t.model_copy(
+            update={
+                "supersedes": t.id,
+                "version": t.version + 1,
+                "seq": seq._replace(local=len(emitted) + i),
+            }
+        )
         for i, t in enumerate(stale)
     ]
 
@@ -3226,9 +3525,7 @@ def _route_cap(state: FactoryState) -> int:
     return _ROUTE_CAP_MICROUSD.get(str(state.get("route")), _DEFAULT_CAP_MICROUSD)
 
 
-def _scope_decision(
-    state: FactoryState, payload: dict[str, Any], seq: Seq
-) -> ScopeDecision:
+def _scope_decision(state: FactoryState, payload: dict[str, Any], seq: Seq) -> ScopeDecision:
     if _forced_standard(state):
         return ScopeDecision(
             tier=ScopeTier.STANDARD,
@@ -3259,10 +3556,14 @@ def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
                 for what, found in (
                     ("contract fit", critique.contract_findings),
                     ("coverage", critique.coverage_findings),
-                ) if found
+                )
+                if found
             )
-            + (f" Security/abuse omissions: {'; '.join(critique.security_abuse_omissions)}."
-               if critique.security_abuse_omissions else "")
+            + (
+                f" Security/abuse omissions: {'; '.join(critique.security_abuse_omissions)}."
+                if critique.security_abuse_omissions
+                else ""
+            )
             + " Any of these fails the Spec gate."
         )
     elif critique.spec_gate_blocking():
@@ -3273,14 +3574,16 @@ def _triage(critique: CriteriaCritique, prd_uri: str, seq: Seq) -> GateTriage:
         )
     elif critique.missing:
         explanation = (
-            "Non-blocking: missing or under-specified criteria — "
-            f"{'; '.join(critique.missing)}."
+            f"Non-blocking: missing or under-specified criteria — {'; '.join(critique.missing)}."
         )
     else:
         explanation = "No criteria-completeness omissions found."
     return GateTriage(
-        name=_SPEC_GATE, run_against=prd_uri, explanation=explanation,
-        produced_by=NODE_ID, seq=seq,
+        name=_SPEC_GATE,
+        run_against=prd_uri,
+        explanation=explanation,
+        produced_by=NODE_ID,
+        seq=seq,
     )
 
 
@@ -3325,7 +3628,9 @@ def _draft_prior(draft: _Draft, prd_seq: Seq) -> _PriorPlan:
     payload = draft.payload
     prd = _section(payload, "prd")
     base = _PriorPlan(
-        epics=tuple(draft.epics), epic_of={}, tickets=(),
+        epics=tuple(draft.epics),
+        epic_of={},
+        tickets=(),
         generated=tuple(t for t in draft.fit.tickets if t.id in _GENERATED_TICKETS),
         criteria={},
         prd=PRD(title=_str(prd.get("title")), prd_uri="", seq=prd_seq),
@@ -3333,7 +3638,9 @@ def _draft_prior(draft: _Draft, prd_seq: Seq) -> _PriorPlan:
         interfaces=tuple(
             (_str(i.get("name")), _contract_text(i)) for i in _objs(payload.get("interfaces"))
         ),
-        declared=draft.frame.declared, brief=draft.epic_inputs[1], intent=draft.brief,
+        declared=draft.frame.declared,
+        brief=draft.epic_inputs[1],
+        intent=draft.brief,
     )
     return _with_fit(base, draft.fit)
 
@@ -3356,10 +3663,11 @@ def _not_of(overflow: Iterable[str], epic_ids: Iterable[str]) -> list[str]:
 
 def _revision_note(what: str, before: int, after: int, kept: bool) -> str:
     if kept:
-        return (f" Revised {what} once in-node after its own plan check but kept the "
-                f"original ({before} finding(s); the revision had {after}).")
-    return (f" Revised {what} once in-node after its own plan check: {before} -> "
-            f"{after} finding(s).")
+        return (
+            f" Revised {what} once in-node after its own plan check but kept the "
+            f"original ({before} finding(s); the revision had {after})."
+        )
+    return f" Revised {what} once in-node after its own plan check: {before} -> {after} finding(s)."
 
 
 # ---- patch, don't re-plan: one delta over only the tickets the findings name -------
@@ -3368,12 +3676,15 @@ def _revision_note(what: str, before: int, after: int, kept: bool) -> str:
 def _ticket_frame(frame: _Frame) -> _Frame:
     """``frame`` checking only what a ticket delta can change: the contracts, their
     compile and the run command are held as they are."""
-    return replace(frame, interfaces=(), language="", compiled=CompileResult(), run=None,
-                   stack_findings=())
+    return replace(
+        frame, interfaces=(), language="", compiled=CompileResult(), run=None, stack_findings=()
+    )
 
 
 def _patchable(
-    findings: Iterable[str], items: Sequence[dict[str, Any]], frame: _Frame,
+    findings: Iterable[str],
+    items: Sequence[dict[str, Any]],
+    frame: _Frame,
     overflow: Sequence[str],
 ) -> bool:
     """True when there are tickets to patch, none was dropped at a cap (the full
@@ -3423,7 +3734,8 @@ def _affected(
     tokens = {tok.strip(".") for f in findings for tok in _SAFE_TICKET_ID.findall(f)}
     named = {n for n in contracts if n and any(n in f for f in findings)}
     return {
-        i["id"] for i in items
+        i["id"]
+        for i in items
         if i["id"] in tokens
         or named.intersection((*i["implements"], *i["consumes"]))
         or any(s["id"] in tokens for s in i["scenarios"])
@@ -3431,14 +3743,25 @@ def _affected(
 
 
 _INDEX_KEYS = (
-    "id", "title", "specialty", "difficulty", "depends_on", "files", "implements",
-    "consumes", "entrypoint",
+    "id",
+    "title",
+    "specialty",
+    "difficulty",
+    "depends_on",
+    "files",
+    "implements",
+    "consumes",
+    "entrypoint",
 )
 
 
 def _delta_text(
-    request: str, findings: Sequence[str], items: Sequence[dict[str, Any]],
-    shown: set[str], contracts: Sequence[tuple[str, str]], brief: IntentBrief | None,
+    request: str,
+    findings: Sequence[str],
+    items: Sequence[dict[str, Any]],
+    shown: set[str],
+    contracts: Sequence[tuple[str, str]],
+    brief: IntentBrief | None,
     epic_ids: frozenset[str],
 ) -> str:
     """The delta call's prompt: the findings, the ``shown`` tickets in full and
@@ -3446,31 +3769,41 @@ def _delta_text(
     full = [{k: v for k, v in i.items() if k != _EPIC_KEY} for i in items if i["id"] in shown]
     index = [
         {**{k: i[k] for k in _INDEX_KEYS}, "scenario_ids": [s["id"] for s in i["scenarios"]]}
-        for i in items if i["id"] not in shown
+        for i in items
+        if i["id"] not in shown
     ]
     used = {
         *(n for n, _ in contracts if any(n in f for f in findings)),
         *(n for i in full for n in (*i["implements"], *i["consumes"])),
     }
     return (
-        f"REQUEST:\n{request}\n\nPLAN CHECK FINDINGS:\n- " + "\n- ".join(findings)
+        f"REQUEST:\n{request}\n\nPLAN CHECK FINDINGS:\n- "
+        + "\n- ".join(findings)
         + _goals_text(brief)
         + "\n\nINTERFACE CONTRACTS (fixed):\n"
-        + ("\n".join(f"- {n}: {spec}" if n in used else f"- {n}" for n, spec in contracts)
-           or "(none)")
+        + (
+            "\n".join(f"- {n}: {spec}" if n in used else f"- {n}" for n, spec in contracts)
+            or "(none)"
+        )
         + "\n\nTICKETS THE FINDINGS NAME (in full; only these may be changed):\n"
         + (as_text(full) if full else "(none)")
         + "\n\nEVERY OTHER TICKET (summary for reference: never change one, list its "
         "scenarios or move one off it; you may still remove the ticket):\n"
         + (as_text(index) if index else "(none)")
-        + (f"\n\nEPICS: {', '.join(sorted(epic_ids))}. Every ticket id keeps its epic "
-           "prefix (E1-T01); a new ticket's id starts with the prefix of its epic, and "
-           "its depends_on names only tickets of that epic." if epic_ids else "")
+        + (
+            f"\n\nEPICS: {', '.join(sorted(epic_ids))}. Every ticket id keeps its epic "
+            "prefix (E1-T01); a new ticket's id starts with the prefix of its epic, and "
+            "its depends_on names only tickets of that epic."
+            if epic_ids
+            else ""
+        )
     )
 
 
 def _merge_delta(
-    items: Sequence[dict[str, Any]], delta: dict[str, Any], epic_ids: frozenset[str],
+    items: Sequence[dict[str, Any]],
+    delta: dict[str, Any],
+    epic_ids: frozenset[str],
     shown: set[str],
 ) -> list[dict[str, Any]] | None:
     """``items`` with ``delta`` applied by id. A listed ticket's fields replace the
@@ -3503,15 +3836,19 @@ def _merge_delta(
                 return None
     owner = {s["id"]: i["id"] for i in items for s in i["scenarios"]}
     if moved := [sid for sid in (*listed, *dropped) if owner.get(sid) in summarized]:
-        _rejected(f"it moves or removes scenario(s) {', '.join(moved)} "
-                         "of a summary-only ticket")
+        _rejected(f"it moves or removes scenario(s) {', '.join(moved)} of a summary-only ticket")
         return None
     out: dict[str, dict[str, Any]] = {
-        i["id"]: {**i, "scenarios": [
-            s for s in i["scenarios"]
-            if s["id"] not in dropped and listed.get(s["id"], i["id"]) == i["id"]
-        ]}
-        for i in items if i["id"] not in removed
+        i["id"]: {
+            **i,
+            "scenarios": [
+                s
+                for s in i["scenarios"]
+                if s["id"] not in dropped and listed.get(s["id"], i["id"]) == i["id"]
+            ],
+        }
+        for i in items
+        if i["id"] not in removed
     }
     for tid, u in upserts.items():
         epic = _EPIC_OF_TICKET.match(tid)
@@ -3522,10 +3859,16 @@ def _merge_delta(
         new = _objs(u.get("scenarios"))
         mine = {sid: s for s in new if (sid := _str(s.get("id")).strip())}
         kept = [mine.pop(s["id"], s) for s in _objs(old.get("scenarios"))]
-        entry = {**old, **u, "id": tid, "scenarios": [
-            s for s in (*kept, *mine.values(), *(s for s in new if not _str(s.get("id")).strip()))
-            if _str(s.get("id")).strip() not in dropped
-        ]}
+        entry = {
+            **old,
+            **u,
+            "id": tid,
+            "scenarios": [
+                s
+                for s in (*kept, *mine.values(), *(s for s in new if not _str(s.get("id")).strip()))
+                if _str(s.get("id")).strip() not in dropped
+            ],
+        }
         if epic_ids and epic is not None:
             eid = epic.group(1)
             entry[_EPIC_KEY] = eid
@@ -3545,8 +3888,10 @@ def _rejected(why: str) -> None:
 
 
 def _patch_note(before: int) -> str:
-    return (f" Patched the plan in-node with one delta call after its own plan check: "
-            f"{before} -> 0 finding(s).")
+    return (
+        f" Patched the plan in-node with one delta call after its own plan check: "
+        f"{before} -> 0 finding(s)."
+    )
 
 
 def make_planner_node(
@@ -3589,8 +3934,11 @@ def make_planner_node(
         return payload, bool(gaps)
 
     def _plan_epics(
-        epics: Sequence[_Epic], contents: Sequence[str], overflow: list[str],
-        *, self_review: bool = True,
+        epics: Sequence[_Epic],
+        contents: Sequence[str],
+        overflow: list[str],
+        *,
+        self_review: bool = True,
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str], list[str]]:
         """Run the epic calls; returns their raw items, tagged review gaps
         (missing, omissions), the self-revised epic ids and concerns. Tickets an
@@ -3613,8 +3961,12 @@ def make_planner_node(
         return raw, tuple(missing), tuple(omissions), revised, concerns
 
     def _rerun_epics(
-        epics: Sequence[_Epic], raw: Sequence[dict[str, Any]], targets: tuple[str, ...],
-        findings: tuple[str, ...], mem: _PriorPlan, inputs: tuple[str, str, str],
+        epics: Sequence[_Epic],
+        raw: Sequence[dict[str, Any]],
+        targets: tuple[str, ...],
+        findings: tuple[str, ...],
+        mem: _PriorPlan,
+        inputs: tuple[str, str, str],
         overflow: list[str],
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str]]:
         """The in-node revision of only the epics ``targets`` names, each handed the
@@ -3623,26 +3975,43 @@ def make_planner_node(
         intake, brief, iface_text = inputs
         chosen = [e for e in epics if e.id in targets]
         contents = [
-            _epic_content(intake, brief, epics, e, iface_text, _epic_revision_text(
-                tuple(f for f in findings if e.id in (_target_epics((f,), mem) or ())),
-                mem, e.id, e.id, _CHECK,
-            ))
+            _epic_content(
+                intake,
+                brief,
+                epics,
+                e,
+                iface_text,
+                _epic_revision_text(
+                    tuple(f for f in findings if e.id in (_target_epics((f,), mem) or ())),
+                    mem,
+                    e.id,
+                    e.id,
+                    _CHECK,
+                ),
+            )
             for e in chosen
         ]
         fresh, missing, omissions, _, concerns = _plan_epics(
             chosen, contents, overflow, self_review=False
         )
         merged = [
-            item for e in epics for item in (
-                [i for i in fresh if i.get(_EPIC_KEY) == e.id] if e.id in targets
+            item
+            for e in epics
+            for item in (
+                [i for i in fresh if i.get(_EPIC_KEY) == e.id]
+                if e.id in targets
                 else [i for i in raw if i.get(_EPIC_KEY) == e.id]
             )
         ]
         return merged, missing, omissions, concerns
 
     def _patch(
-        state: FactoryState, findings: Sequence[str], items: Sequence[dict[str, Any]],
-        contracts: Sequence[tuple[str, str]], frame: _Frame, structural: frozenset[str],
+        state: FactoryState,
+        findings: Sequence[str],
+        items: Sequence[dict[str, Any]],
+        contracts: Sequence[tuple[str, str]],
+        frame: _Frame,
+        structural: frozenset[str],
     ) -> _Fit | None:
         """One delta call closing ``findings``, merged into ``items`` and put through
         the same assembly as a full plan; the merged plan's fit. None (re-plan in
@@ -3653,10 +4022,19 @@ def make_planner_node(
         epic_ids = frozenset(e.id for e in frame.epics)
         shown = _affected(findings, items, (n for n, _ in contracts))
         try:
-            delta = _call(DELTA_SOP, DELTA_SCHEMA, _delta_text(
-                str(state.get("request", "")), findings, items, shown, contracts,
-                frame.brief, epic_ids,
-            ))
+            delta = _call(
+                DELTA_SOP,
+                DELTA_SCHEMA,
+                _delta_text(
+                    str(state.get("request", "")),
+                    findings,
+                    items,
+                    shown,
+                    contracts,
+                    frame.brief,
+                    epic_ids,
+                ),
+            )
         except ProxyUnavailable as exc:
             # Only an unparseable reply falls back: a transport outage stays one.
             if not isinstance(exc.__cause__, StructuredOutputError):
@@ -3671,8 +4049,9 @@ def make_planner_node(
             return None
         fit = _assemble(merged, frame)
         if fit.blocking:
-            _rejected(f"{len(fit.blocking)} finding(s) still open: "
-                             + " | ".join(fit.blocking)[:400])
+            _rejected(
+                f"{len(fit.blocking)} finding(s) still open: " + " | ".join(fit.blocking)[:400]
+            )
             return None
         if fit.overflow:
             _rejected("the merged plan drops work at a cap")
@@ -3684,9 +4063,15 @@ def make_planner_node(
         return fit
 
     def _draft(
-        state: FactoryState, payload: dict[str, Any], seqs: dict[str, Seq],
-        languages: set[str], findings: tuple[str, ...] | None, prior: _PriorPlan | None,
-        source: tuple[str, str] = _GATE, *, self_review: bool = True,
+        state: FactoryState,
+        payload: dict[str, Any],
+        seqs: dict[str, Seq],
+        languages: set[str],
+        findings: tuple[str, ...] | None,
+        prior: _PriorPlan | None,
+        source: tuple[str, str] = _GATE,
+        *,
+        self_review: bool = True,
     ) -> _Draft:
         """Call 1's reply -> the epic calls (when it has epics) -> repaired, checked
         tickets. ``findings``/``prior`` make the epic calls revisions."""
@@ -3728,7 +4113,8 @@ def make_planner_node(
                     f"{len(epics)} epics, each planned in its own call."
                 )
             inputs = (
-                _intake_text(state), _plan_brief(payload, brief),
+                _intake_text(state),
+                _plan_brief(payload, brief),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
                     for i in _objs(payload.get("interfaces"))
@@ -3737,9 +4123,14 @@ def make_planner_node(
             continues = _match_prior_epics(epics, prior) if prior else {}
             contents = [
                 _epic_content(
-                    inputs[0], inputs[1], epics, e, inputs[2],
+                    inputs[0],
+                    inputs[1],
+                    epics,
+                    e,
+                    inputs[2],
                     _epic_revision_text(findings, prior, e.id, continues.get(e.id), source)
-                    if findings else "",
+                    if findings
+                    else "",
                 )
                 for e in epics
             ]
@@ -3760,15 +4151,21 @@ def make_planner_node(
         concerns += [*stack_concerns, *gen_concerns]
         raw_run = _str(raw_stack.get("run")).strip()
         stack_update = decided
-        if (pinned is not None and not pinned.profile and not pinned.run and raw_run
-                and _str(raw_stack.get("language")).strip().lower() == pinned.language):
+        if (
+            pinned is not None
+            and not pinned.profile
+            and not pinned.run
+            and raw_run
+            and _str(raw_stack.get("language")).strip().lower() == pinned.language
+        ):
             # A planner-chosen stack (no operator profile) from an earlier pass may
             # gain its run command, so a missing-run finding is fixable by re-plan.
             stack_update = pinned.model_copy(update={"run": raw_run})
         current = stack_update or pinned
         chosen = pinned or decided
         language = (
-            chosen.language if chosen is not None
+            chosen.language
+            if chosen is not None
             else _str(raw_stack.get("language")).strip().lower()
         )
         frame = _Frame(
@@ -3778,7 +4175,8 @@ def make_planner_node(
             generated=generated,
             stack=current,
             brief=brief,
-            run=None if current is not None and current.profile
+            run=None
+            if current is not None and current.profile
             else (current.run if current is not None else raw_run),
             declared=frozenset(i.name for i in interfaces if _declaration_only(i)) | existing,
             interfaces=interfaces,
@@ -3790,16 +4188,31 @@ def make_planner_node(
             stack_findings=_stack_command_findings(decided),
         )
         return _Draft(
-            payload=payload, brief=brief, interfaces=interfaces, epics=epics,
-            per_epic=per_epic, raw=raw, epic_overflow=tuple(overflow), epic_inputs=inputs,
-            missing=missing, omissions=omissions, revised_epics=tuple(revised),
-            concerns=tuple(concerns), decided=decided, stack_update=stack_update,
-            frame=frame, fit=_assemble(raw, frame, overflow),
+            payload=payload,
+            brief=brief,
+            interfaces=interfaces,
+            epics=epics,
+            per_epic=per_epic,
+            raw=raw,
+            epic_overflow=tuple(overflow),
+            epic_inputs=inputs,
+            missing=missing,
+            omissions=omissions,
+            revised_epics=tuple(revised),
+            concerns=tuple(concerns),
+            decided=decided,
+            stack_update=stack_update,
+            frame=frame,
+            fit=_assemble(raw, frame, overflow),
         )
 
     def _self_check(
-        state: FactoryState, draft: _Draft, content: str, schema: dict[str, Any],
-        seqs: dict[str, Seq], languages: set[str],
+        state: FactoryState,
+        draft: _Draft,
+        content: str,
+        schema: dict[str, Any],
+        seqs: dict[str, Seq],
+        languages: set[str],
     ) -> tuple[_Draft, str]:
         """The one in-node revision of a plan the checks still fault: an epic plan
         re-runs only the epics the findings name; a finding naming none (or an
@@ -3817,29 +4230,37 @@ def make_planner_node(
                 draft.epics, draft.raw, targets, notes, mem, draft.epic_inputs, over
             )
             revised = replace(
-                draft, raw=raw, epic_overflow=tuple(over),
+                draft,
+                raw=raw,
+                epic_overflow=tuple(over),
                 missing=(*_untagged(draft.missing, targets), *missing),
                 omissions=(*_untagged(draft.omissions, targets), *omissions),
-                concerns=(*draft.concerns, *concerns), fit=_assemble(raw, draft.frame, over),
+                concerns=(*draft.concerns, *concerns),
+                fit=_assemble(raw, draft.frame, over),
             )
             what = f"epic(s) {', '.join(targets)}"
         else:
             items = _ticket_items(
-                draft.fit.tickets, draft.fit.criteria,
+                draft.fit.tickets,
+                draft.fit.criteria,
                 _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
             )
             # An open review gap needs the full re-plan: the delta never sees it.
             if draft.missing or draft.omissions:
                 progress.log("planner delta skipped: the review has an open gap")
             elif not _patchable(blocking, items, draft.frame, draft.fit.overflow):
-                progress.log("planner delta skipped: a finding needs more than the tickets "
-                             "changed")
+                progress.log("planner delta skipped: a finding needs more than the tickets changed")
             else:
                 fit = _patch(
-                    state, notes, items,
-                    [(_str(i.get("name")), _contract_text(i))
-                     for i in _objs(draft.payload.get("interfaces"))],
-                    draft.frame, frozenset(_structural_findings(draft.fit.criteria)),
+                    state,
+                    notes,
+                    items,
+                    [
+                        (_str(i.get("name")), _contract_text(i))
+                        for i in _objs(draft.payload.get("interfaces"))
+                    ],
+                    draft.frame,
+                    frozenset(_structural_findings(draft.fit.criteria)),
                 )
                 if fit is not None:
                     return replace(draft, fit=fit), _patch_note(len(blocking))
@@ -3847,8 +4268,14 @@ def make_planner_node(
                 notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
             )
             revised = _draft(
-                state, _call(SOP, schema, content + text), seqs, languages, notes, mem,
-                _CHECK, self_review=False,
+                state,
+                _call(SOP, schema, content + text),
+                seqs,
+                languages,
+                notes,
+                mem,
+                _CHECK,
+                self_review=False,
             )
             what = "the plan"
         before, after = len(blocking), len(revised.fit.blocking)
@@ -3900,14 +4327,16 @@ def make_planner_node(
         draft = _draft(state, payload, seqs, languages, findings, prior)
         draft, check_note = _self_check(state, draft, content, schema, seqs, languages)
         payload, brief, interfaces, epics = (
-            draft.payload, draft.brief, draft.interfaces, draft.epics
+            draft.payload,
+            draft.brief,
+            draft.interfaces,
+            draft.epics,
         )
         per_epic, fit, tickets_seq = draft.per_epic, draft.fit, seqs["tickets"]
         tickets, criteria = fit.tickets, fit.criteria
         # Only a Spec-gate re-plan replaces an earlier plan of this run.
         dropped = (
-            _retired_tickets(state, rt, tickets, tickets_seq)
-            if latest_spec_failure(state) else []
+            _retired_tickets(state, rt, tickets, tickets_seq) if latest_spec_failure(state) else []
         )
         prd_section = _section(payload, "prd")
         prd_seq = seqs["prd"]
@@ -3958,8 +4387,10 @@ def make_planner_node(
         )
         constraints_seq = seq("pinned_constraints")
         constraints = _build_constraints(
-            [*_objs(payload.get("pinned_constraints")),
-             *_stack_constraints(draft.frame.stack, payload)],
+            [
+                *_objs(payload.get("pinned_constraints")),
+                *_stack_constraints(draft.frame.stack, payload),
+            ],
             constraints_seq,
         )
         retired = _retired_constraints(state, constraints, constraints_seq)
@@ -3967,8 +4398,13 @@ def make_planner_node(
         epics_seq = seq("artifact:epics")
         epic_records = [
             Epic(
-                id=e.id, title=e.title, summary=e.summary, specialty_mix=e.specialty_mix,
-                depends_on=e.depends_on, provides=e.provides, consumes=e.consumes,
+                id=e.id,
+                title=e.title,
+                summary=e.summary,
+                specialty_mix=e.specialty_mix,
+                depends_on=e.depends_on,
+                provides=e.provides,
+                consumes=e.consumes,
                 seq=epics_seq._replace(local=i),
             )
             for i, e in enumerate(epics if per_epic else ())
@@ -4030,9 +4466,13 @@ def make_planner_node(
         epic_note = (
             f" Tickets planned per epic in {len(epics)} parallel call(s)"
             f" ({', '.join(e.id for e in epics)})."
-            + (f" Self-revised epic(s) {', '.join(draft.revised_epics)} once."
-               if draft.revised_epics else "")
-            if per_epic else ""
+            + (
+                f" Self-revised epic(s) {', '.join(draft.revised_epics)} once."
+                if draft.revised_epics
+                else ""
+            )
+            if per_epic
+            else ""
         )
         out["agent_journal"] = [
             journal_entry(
@@ -4046,9 +4486,12 @@ def make_planner_node(
                     f"{len(tickets)} tickets, "
                     f"{len(ownership.owners)} ownership units, {len(constraints)} "
                     "pinned constraints."
-                    + (f" Stack: {stack.language}"
-                       + (f" ({stack.profile} profile)." if stack.profile else ".")
-                       if stack else "")
+                    + (
+                        f" Stack: {stack.language}"
+                        + (f" ({stack.profile} profile)." if stack.profile else ".")
+                        if stack
+                        else ""
+                    )
                     + epic_note
                     + (" Revised after a Spec-gate failure." if findings else "")
                     + (" Self-revised once after its own criteria review." if gaps else "")
@@ -4084,10 +4527,16 @@ def make_planner_node(
         inputs = (_intake_text(state), prior.brief, _interfaces_text(prior.interfaces))
         contents = [
             _epic_content(
-                inputs[0], inputs[1], prior.epics, e, inputs[2],
+                inputs[0],
+                inputs[1],
+                prior.epics,
+                e,
+                inputs[2],
                 _epic_revision_text(
                     tuple(f for f in findings if e.id in (_target_epics((f,), prior) or ())),
-                    prior, e.id, e.id,
+                    prior,
+                    e.id,
+                    e.id,
                 ),
             )
             for e in chosen
@@ -4098,7 +4547,8 @@ def make_planner_node(
             item
             for e in prior.epics
             for item in (
-                [i for i in fresh if i[_EPIC_KEY] == e.id] if e.id in targets
+                [i for i in fresh if i[_EPIC_KEY] == e.id]
+                if e.id in targets
                 else _prior_items(prior, e.id)
             )
         ]
@@ -4129,10 +4579,15 @@ def make_planner_node(
         replanned = (*targets, *rerun)
         old = prior.critique
         return _emit_replan(
-            config, state, prior, fit, tickets_seq,
+            config,
+            state,
+            prior,
+            fit,
+            tickets_seq,
             missing=(*_untagged(old.missing if old else (), replanned), *missing),
             omissions=(
-                *_untagged(old.security_abuse_omissions if old else (), replanned), *omissions
+                *_untagged(old.security_abuse_omissions if old else (), replanned),
+                *omissions,
             ),
             what=f"Re-planned epic(s) {', '.join(targets)}",
             note=(f" Self-revised epic(s) {', '.join(revised)} once." if revised else "")
@@ -4196,13 +4651,23 @@ def make_planner_node(
         criteria_seq = rt.seq(config, NODE_ID, "artifact:acceptance_criteria")
         fit = replace(
             fit,
-            tickets=[t.model_copy(update={"seq": tickets_seq._replace(local=t.seq.local)})
-                     for t in fit.tickets],
-            criteria=[c.model_copy(update={"seq": criteria_seq._replace(local=c.seq.local)})
-                      for c in fit.criteria],
+            tickets=[
+                t.model_copy(update={"seq": tickets_seq._replace(local=t.seq.local)})
+                for t in fit.tickets
+            ],
+            criteria=[
+                c.model_copy(update={"seq": criteria_seq._replace(local=c.seq.local)})
+                for c in fit.criteria
+            ],
         )
         return _emit_replan(
-            config, state, prior, fit, tickets_seq, missing=(), omissions=(),
+            config,
+            state,
+            prior,
+            fit,
+            tickets_seq,
+            missing=(),
+            omissions=(),
             what="Patched the plan",
             note=" Patched with one delta call instead of a full re-plan.",
             concerns=[],
@@ -4280,8 +4745,7 @@ def make_planner_node(
                         f"{len(tickets)} tickets"
                         + (f" across {len(prior.epics)} epics" if prior.epics else "")
                         + f", {len(ownership.owners)} ownership units. "
-                        "Revised after a Spec-gate failure."
-                        + note
+                        "Revised after a Spec-gate failure." + note
                     ),
                     concerns=tuple(concerns),
                 )

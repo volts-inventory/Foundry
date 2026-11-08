@@ -65,19 +65,24 @@ _CONTRACTS = "class Category:\n    name: str\n\n\nclass Account:\n    id: int\n"
 
 def test_ticket_and_fixer_packets_carry_the_stack_commands_to_run(tmp_path: Path) -> None:
     script = tmp_path / "typecheck.py"
-    script.write_text("import sys; sys.exit(any('BROKEN' in open(p).read() "
-                      "for p in sys.argv[1:] if __import__('os').path.exists(p)))")
+    script.write_text(
+        "import sys; sys.exit(any('BROKEN' in open(p).read() "
+        "for p in sys.argv[1:] if __import__('os').path.exists(p)))"
+    )
     typecheck = f"{sys.executable} {script} contracts.py app.py"
-    stack = StackDecision(language="python", build="true", typecheck=typecheck,
-                          test="pytest -q")
+    stack = StackDecision(language="python", build="true", typecheck=typecheck, test="pytest -q")
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
         _ticket("T-002", 2, files=("cli.py",), deps=("T-001",)),
     ]
-    rec = _Recorder(writes={"contracts": {"contracts.py": _CONTRACTS},
-                            "T-001": {"app.py": "BROKEN\n"},
-                            "fix-1": {"app.py": "x = 1\n"}})
+    rec = _Recorder(
+        writes={
+            "contracts": {"contracts.py": _CONTRACTS},
+            "T-001": {"app.py": "BROKEN\n"},
+            "fix-1": {"app.py": "x = 1\n"},
+        }
+    )
     out, ran, _ = _wave_run(tmp_path, rec, tickets=tickets, stack=stack)
     assert "fixer" in ran and set(_diffs(out)) >= {"contracts", "T-001", "T-002"}
 
@@ -118,21 +123,29 @@ def test_a_ticket_redeclaring_contract_types_is_flagged_and_sent_to_the_fixer(
         "sys.exit(any('class Category' in p.read_text() for p in pathlib.Path('.')"
         ".rglob('*.py') if p.name != 'contracts.py'))\n"
     )
-    stack = StackDecision(language="python", build="true",
-                          typecheck=f"{sys.executable} {script}")
+    stack = StackDecision(language="python", build="true", typecheck=f"{sys.executable} {script}")
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",)),
         _ticket("T-001", 1, files=("models.py",), deps=("contracts",)),
         _ticket("T-002", 2, files=("app.py",), deps=("T-001",)),
     ]
-    rec = _Recorder(writes={
-        "contracts": {"contracts.py": _CONTRACTS},
-        "T-001": {"models.py": "class Category:\n    name: str\n"},
-        "fix-1": {"models.py": "from contracts import Category\n"},
-    })
+    rec = _Recorder(
+        writes={
+            "contracts": {"contracts.py": _CONTRACTS},
+            "T-001": {"models.py": "class Category:\n    name: str\n"},
+            "fix-1": {"models.py": "from contracts import Category\n"},
+        }
+    )
     out, ran, _ = _wave_run(tmp_path, rec, tickets=tickets, stack=stack)
-    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
-                   "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+    ]
     assert _builds(out) == [GateStatus.PASS, GateStatus.FAIL, GateStatus.PASS]
     flagged = [t for t in out["gate_triage"] if t.name == CONTRACT_DUP_TRIAGE]
     assert [t.run_against for t in flagged] == ["task/T-001"]
@@ -142,22 +155,28 @@ def test_a_ticket_redeclaring_contract_types_is_flagged_and_sent_to_the_fixer(
     assert any("models.py redeclares contract type(s) Category" in f for f in failures)
 
 
-@pytest.mark.parametrize(("files", "want"), [
-    ({"models.py": "class Category:\n    pass\n"}, ["models.py: Category"]),
-    ({"models.py": "from contracts import Category, Account\n"}, []),
-    ({"tests/test_x.py": "def test():\n    class Category: ...\n"}, []),  # not top level
-    ({"src/store.ts": "export interface Account { id: number }\n"}, ["src/store.ts: Account"]),
-    ({"src/store.ts": "export type { Account } from './contracts';\n"}, []),
-    ({"notes.md": "class Category\n"}, []),  # not source
-])
+@pytest.mark.parametrize(
+    ("files", "want"),
+    [
+        ({"models.py": "class Category:\n    pass\n"}, ["models.py: Category"]),
+        ({"models.py": "from contracts import Category, Account\n"}, []),
+        ({"tests/test_x.py": "def test():\n    class Category: ...\n"}, []),  # not top level
+        ({"src/store.ts": "export interface Account { id: number }\n"}, ["src/store.ts: Account"]),
+        ({"src/store.ts": "export type { Account } from './contracts';\n"}, []),
+        ({"notes.md": "class Category\n"}, []),  # not source
+    ],
+)
 def test_contract_duplicates_names_only_top_level_copies(
     files: dict[str, str], want: list[str]
 ) -> None:
-    contract = {"contracts.py": _CONTRACTS, "src/contracts.ts":
-                "export interface Account { id: number }\nexport type Category = string;\n"}
+    contract = {
+        "contracts.py": _CONTRACTS,
+        "src/contracts.ts": (
+            "export interface Account { id: number }\nexport type Category = string;\n"
+        ),
+    }
     found = contract_duplicates({**contract, **files}, tuple(contract))
-    got = [f"{f.split(' ', 1)[0]}: {f.split('type(s) ', 1)[1].split(' ', 1)[0]}"
-           for f in found]
+    got = [f"{f.split(' ', 1)[0]}: {f.split('type(s) ', 1)[1].split(' ', 1)[0]}" for f in found]
     assert got == want
 
 
@@ -165,12 +184,11 @@ def test_the_contracts_ticket_itself_is_never_flagged(tmp_path: Path) -> None:
     sandbox = Sandbox(tmp_path)
     try:
         (sandbox.worktree / "contracts.py").write_text(_CONTRACTS)
-        blob = json.dumps({"kind": "full-file-snapshot",
-                           "files": {"contracts.py": _CONTRACTS}}).encode()
-        result = AdapterResult(diff_uri=sandbox.put_blob(blob),
-                               snapshot_digest=sandbox.snapshot())
-        same = _flag_contract_duplicates(result, sandbox, {"contracts.py": _CONTRACTS},
-                                         "contracts")
+        blob = json.dumps(
+            {"kind": "full-file-snapshot", "files": {"contracts.py": _CONTRACTS}}
+        ).encode()
+        result = AdapterResult(diff_uri=sandbox.put_blob(blob), snapshot_digest=sandbox.snapshot())
+        same = _flag_contract_duplicates(result, sandbox, {"contracts.py": _CONTRACTS}, "contracts")
         assert same.triage == ()
     finally:
         sandbox.destroy()
@@ -180,23 +198,32 @@ def test_the_contracts_ticket_itself_is_never_flagged(tmp_path: Path) -> None:
 
 
 def _iface(signature: str, kind: str = "class") -> InterfaceContract:
-    return InterfaceContract(name="BookRepository", spec_uri="cas://x", kind=kind,
-                             signature=signature, seq=Seq("run", 1, 1, "planner", 0))
+    return InterfaceContract(
+        name="BookRepository",
+        spec_uri="cas://x",
+        kind=kind,
+        signature=signature,
+        seq=Seq("run", 1, 1, "planner", 0),
+    )
 
 
 def test_a_method_named_after_a_builtin_its_annotations_use_is_a_contract_finding() -> None:
     # The api trial: `def list(...) -> list[BookOut]` — mypy: "Function
     # contracts.BookRepository.list is not valid as a type".
-    api = _iface("class BookRepository(Protocol):\n"
-                 "    def get(self, book_id: int) -> BookOut | None: ...\n"
-                 "    def list(self, limit: int | None = None) -> list[BookOut]: ...")
+    api = _iface(
+        "class BookRepository(Protocol):\n"
+        "    def get(self, book_id: int) -> BookOut | None: ...\n"
+        "    def list(self, limit: int | None = None) -> list[BookOut]: ..."
+    )
     (finding,) = _builtin_method_findings([api], "python")
     assert "BookRepository" in finding and "list" in finding and "rename" in finding
     assert _builtin_method_findings([api], "typescript") == ()
     assert _builtin_method_findings([api.model_copy(update={"kind": "http"})], "python") == ()
-    fine = _iface("class BookRepository(Protocol):\n"
-                  "    def list_books(self) -> list[BookOut]: ...\n"
-                  "    def id(self) -> int: ...")  # `id` is no type: no annotation breaks
+    fine = _iface(
+        "class BookRepository(Protocol):\n"
+        "    def list_books(self) -> list[BookOut]: ...\n"
+        "    def id(self) -> int: ..."
+    )  # `id` is no type: no annotation breaks
     assert _builtin_method_findings([fine], "python") == ()
 
 
@@ -211,8 +238,9 @@ def test_the_wave_check_skips_install_and_build_until_the_manifest_is_built(
     # while package.json is missing, so only skipping them passes wave 0.
     monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
     needs = "test -f package.json"
-    stack = StackDecision(language="typescript", install=needs, build=needs,
-                          typecheck=needs, test="true")
+    stack = StackDecision(
+        language="typescript", install=needs, build=needs, typecheck=needs, test="true"
+    )
     tickets = [
         _ticket("contracts", 0, files=("src/contracts.ts",)),
         _ticket("T-setup", 1, files=("package.json",), deps=("contracts",)),
@@ -243,8 +271,14 @@ def _cfg() -> RunnableConfig:
 def test_the_run_wide_fix_cap_halts_even_with_a_fresh_boundary_budget() -> None:
     def route(total: int) -> str:
         state: FactoryState = {"gates": [], "budget": BudgetLedger(fix_attempts_total=total)}
-        return route_after_gates(state, _cfg(), boundary=BUILD_BOUNDARY,
-                                 records=GlobalRecords(), max_fix_attempts=3, total_cap=9)
+        return route_after_gates(
+            state,
+            _cfg(),
+            boundary=BUILD_BOUNDARY,
+            records=GlobalRecords(),
+            max_fix_attempts=3,
+            total_cap=9,
+        )
 
     assert route(8) == FIX
     assert route(9) == HALT
@@ -254,8 +288,15 @@ def test_build_side_fixes_count_toward_the_total_and_spec_replans_do_not() -> No
     state: FactoryState = {"gates": [], "budget": BudgetLedger()}
     for boundary, total in ((SPEC_BOUNDARY, 0), (BUILD_BOUNDARY, 1)):
         out: dict[str, object] = {}
-        bump_fix_attempts(state, _cfg(), out, boundary=boundary, records=GlobalRecords(),
-                          max_fix_attempts=3, total_cap=9)
+        bump_fix_attempts(
+            state,
+            _cfg(),
+            out,
+            boundary=boundary,
+            records=GlobalRecords(),
+            max_fix_attempts=3,
+            total_cap=9,
+        )
         ledger = out["budget"]
         assert isinstance(ledger, BudgetLedger)
         assert ledger.fix_attempts_since_all_green == 1
@@ -308,8 +349,15 @@ def test_claude_code_sandboxes_get_the_toolchain_proxy_and_ca_settings(
 
 
 def test_toolchain_output_never_enters_the_authored_slice(tmp_path: Path) -> None:
-    for rel in ("app.py", ".venv/lib/x.py", "venv/bin/pip", ".mypy_cache/a.json",
-                "pkg/.pytest_cache/v", "web/node_modules/x/index.js", "pkg/__pycache__/a.pyc"):
+    for rel in (
+        "app.py",
+        ".venv/lib/x.py",
+        "venv/bin/pip",
+        ".mypy_cache/a.json",
+        "pkg/.pytest_cache/v",
+        "web/node_modules/x/index.js",
+        "pkg/__pycache__/a.pyc",
+    ):
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / rel).write_text("x")
     assert list(walk_worktree(tmp_path)) == ["app.py"]

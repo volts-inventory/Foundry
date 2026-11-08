@@ -46,13 +46,15 @@ def test_read_repo_materializes_tree_from_the_store(tmp_path: Path) -> None:
 def test_a_mock_builds_repo_is_the_tree_its_gates_judged(tmp_path: Path) -> None:
     state_dir = str(tmp_path / "state")
     out = tmp_path / "out"
-    result = run("build a todo app", thread_id="repo-3", state_dir=state_dir,
-                 output_dir=str(out))
+    result = run("build a todo app", thread_id="repo-3", state_dir=state_dir, output_dir=str(out))
     assert result.passed is True
 
     repo = read_repo("repo-3", state_dir, backend="mock")
-    exported = {str(p.relative_to(out)): p.read_bytes() for p in out.rglob("*")
-                if p.is_file() and not p.name.startswith("BUILD-MANIFEST")}
+    exported = {
+        str(p.relative_to(out)): p.read_bytes()
+        for p in out.rglob("*")
+        if p.is_file() and not p.name.startswith("BUILD-MANIFEST")
+    }
     assert {f.path: repo.file_bytes(f.path) for f in repo.files} == exported
     manifest = json.loads((out / "BUILD-MANIFEST.json").read_text())
     for key in ("request", "thread_id", "stack", "contracts", "contracts_files"):

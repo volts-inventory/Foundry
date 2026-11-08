@@ -278,8 +278,10 @@ def cap_stopped(state: FactoryState) -> tuple[GateTriage, ...]:
     those tickets clears it."""
     settled = built_task_ids(state) | _skipped_task_ids(state)
     return tuple(
-        note for tid, notes in sorted(_ticket_notes(state, CAP_TRIAGE).items())
-        if tid not in settled for note in notes
+        note
+        for tid, notes in sorted(_ticket_notes(state, CAP_TRIAGE).items())
+        if tid not in settled
+        for note in notes
     )
 
 
@@ -299,15 +301,21 @@ def _is_local(rt: AgentRuntime, tier: str | None) -> bool:
 
 def escalated_task_ids(state: FactoryState) -> set[str]:
     """Tickets that already spent their one escalation this run (whatever its outcome)."""
-    return {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
-            if t.name == ESCALATED_TRIAGE}
+    return {
+        t.run_against.removeprefix("task/")
+        for t in state.get("gate_triage") or ()
+        if t.name == ESCALATED_TRIAGE
+    }
 
 
 def pending_escalations(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
     """Task ids of planned tickets a wave check asked to re-run on the cloud level,
     not yet re-run."""
-    asked = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
-             if t.name == ESCALATE_REQUEST_TRIAGE}
+    asked = {
+        t.run_against.removeprefix("task/")
+        for t in state.get("gate_triage") or ()
+        if t.name == ESCALATE_REQUEST_TRIAGE
+    }
     planned = {task_id_for_ticket(t.id) for t in read_tickets(state, resolve)}
     return tuple(sorted((asked & planned) - _escalation_settled(state)))
 
@@ -315,15 +323,20 @@ def pending_escalations(state: FactoryState, resolve: ArtifactResolver) -> tuple
 def stopped_tickets(state: FactoryState) -> dict[str, str]:
     """Task id -> why its kept local session stopped early (turn cap, repeat or
     read-thrash detector), for tickets whose stopped attempt was integrated."""
-    return {t.run_against.removeprefix("task/"): t.explanation
-            for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
-            if t.name == STOPPED_TRIAGE and t.produced_by == NODE_ID}
+    return {
+        t.run_against.removeprefix("task/"): t.explanation
+        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+        if t.name == STOPPED_TRIAGE and t.produced_by == NODE_ID
+    }
 
 
 def _escalation_settled(state: FactoryState) -> set[str]:
     """Tickets whose escalation is spent, or whose request the quota declined."""
-    declined = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
-                if t.name == ESCALATE_DECLINED_TRIAGE}
+    declined = {
+        t.run_against.removeprefix("task/")
+        for t in state.get("gate_triage") or ()
+        if t.name == ESCALATE_DECLINED_TRIAGE
+    }
     return escalated_task_ids(state) | declined
 
 
@@ -334,8 +347,7 @@ def _latest_built_wave(
     done: set[str] = set()
     last: list[Ticket] = []
     while True:
-        part = [t for t in next_wave(tickets, done, skipped)
-                if task_id_for_ticket(t.id) in built]
+        part = [t for t in next_wave(tickets, done, skipped) if task_id_for_ticket(t.id) in built]
         if not part:
             return last
         last = part
@@ -393,10 +405,14 @@ def escalation_pick(
             return any(tok.startswith(f) or f"/{f}" in tok for tok in tokens)
         return any(tok == f or tok.endswith(f"/{f}") for tok in tokens)
 
-    named = [t for t in fresh
-             if scenarios & set(t.scenario_ids) or any(names_file(f) for f in t.files)]
-    fell_back = {t.run_against.removeprefix("task/") for t in state.get("gate_triage") or ()
-                 if t.name == ESCALATE_FALLBACK_TRIAGE}
+    named = [
+        t for t in fresh if scenarios & set(t.scenario_ids) or any(names_file(f) for f in t.files)
+    ]
+    fell_back = {
+        t.run_against.removeprefix("task/")
+        for t in state.get("gate_triage") or ()
+        if t.name == ESCALATE_FALLBACK_TRIAGE
+    }
     fallback = False
     if stopped_only:
         chosen = named or (fresh if len(latest) == 1 else [])
@@ -415,13 +431,22 @@ _PATH_TOKEN = re.compile(r"[\w./-]+")
 
 
 def _escalation_context(
-    *, tier: str | None, target: str, reason: str, touched: str,
-    reported: Iterable[str], kept: bool, failures: Sequence[str],
+    *,
+    tier: str | None,
+    target: str,
+    reason: str,
+    touched: str,
+    reported: Iterable[str],
+    kept: bool,
+    failures: Sequence[str],
 ) -> tuple[str, ...]:
     """The head of an escalated attempt's input: why the cheaper level stopped, what
     it touched and reported, then the failing gates (the fixer's context)."""
-    tree = ("the working directory holds that attempt and every fix since" if kept
-            else "that attempt's writes were discarded; you start from the integrated tree")
+    tree = (
+        "the working directory holds that attempt and every fix since"
+        if kept
+        else "that attempt's writes were discarded; you start from the integrated tree"
+    )
     return (
         "[escalation]",
         f"this ticket first ran on {tier or 'a local level'} (a local model), which could "
@@ -459,7 +484,8 @@ def _scopes_overlap(a: Sequence[str], b: Sequence[str]) -> bool:
         return True
     return any(
         x == y or (x.endswith("/") and y.startswith(x)) or (y.endswith("/") and x.startswith(y))
-        for x in a for y in b
+        for x in a
+        for y in b
     )
 
 
@@ -501,8 +527,7 @@ def _is_gate_input(path: str) -> bool:
 # owner installs, so they belong to that ticket's scope (dropping one leaves a
 # lockfile-strict install like `npm ci` nothing to install from).
 _LOCKFILES: dict[str, tuple[str, ...]] = {
-    "package.json": ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock",
-                     "pnpm-lock.yaml"),
+    "package.json": ("package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"),
     "Cargo.toml": ("Cargo.lock",),
     "go.mod": ("go.sum",),
     "pyproject.toml": ("uv.lock", "poetry.lock"),
@@ -530,15 +555,16 @@ def _is_lockfile_of(path: str, manifest: str) -> bool:
     return m_dir == p_dir and p_name in _LOCKFILES.get(m_name, ())
 
 
-def _result_ops(
-    result: AdapterResult, get_blob: BlobResolver, task_id: str
-) -> _DiffOps | None:
+def _result_ops(result: AdapterResult, get_blob: BlobResolver, task_id: str) -> _DiffOps | None:
     """The adapter diff's ops, or None for an unparseable body (integration fails it)."""
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops
 
     probe = FeatureDiff(
-        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
-        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+        diff_uri=result.diff_uri,
+        task_id=task_id,
+        branch=f"task/{task_id}",
+        base_tree_sha="",
+        seq=Seq("scope", 0, 0, NODE_ID, 0),
     )
     try:
         return _diff_ops(probe, get_blob)
@@ -564,22 +590,28 @@ def note_fix_writes(
     outside = sorted(p for p in touched if focus and not in_write_scope(p, focus))
     notes: list[GateTriage] = []
     if outside:
-        notes.append(GateTriage(
-            name=FIX_SCOPE_TRIAGE, run_against=f"task/{task_id}",
-            explanation="the fixer wrote outside the built tickets' files (kept): "
-                        + ", ".join(outside),
-            produced_by=FIXER_NODE_ID,
-            seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage)),
-        ))
+        notes.append(
+            GateTriage(
+                name=FIX_SCOPE_TRIAGE,
+                run_against=f"task/{task_id}",
+                explanation="the fixer wrote outside the built tickets' files (kept): "
+                + ", ".join(outside),
+                produced_by=FIXER_NODE_ID,
+                seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage)),
+            )
+        )
     for path in sorted(touched & set(contracts)):
         how = "deleted" if path in ops.deletes else "changed"
-        notes.append(GateTriage(
-            name=f"{CONTRACT_CHANGE_TRIAGE}:{path}", run_against=f"task/{task_id}",
-            explanation=f"the fixer {how} the contract file {path}; this version is now "
-                        "the agreed one every later ticket builds against",
-            produced_by=FIXER_NODE_ID,
-            seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage) + len(notes)),
-        ))
+        notes.append(
+            GateTriage(
+                name=f"{CONTRACT_CHANGE_TRIAGE}:{path}",
+                run_against=f"task/{task_id}",
+                explanation=f"the fixer {how} the contract file {path}; this version is now "
+                "the agreed one every later ticket builds against",
+                produced_by=FIXER_NODE_ID,
+                seq=Seq("scope", 0, 0, FIXER_NODE_ID, len(result.triage) + len(notes)),
+            )
+        )
     if not notes:
         return result
     return result.model_copy(update={"triage": (*result.triage, *notes)})
@@ -676,8 +708,7 @@ class _ScopedAdapter:
             raise
         if tid in self._names:
             required, strict = self._names[tid]
-            result = _check_contract_names(result, sandbox, files, tid, required,
-                                           strict=strict)
+            result = _check_contract_names(result, sandbox, files, tid, required, strict=strict)
         if tid in self._stubs:
             stubs, strict = self._stubs[tid]
             result = _check_stub_signatures(result, sandbox, tid, stubs, strict=strict)
@@ -723,15 +754,22 @@ def contract_drift(
     for contract, names in sorted(required.items()):
         missing = [n for n in names if not re.search(rf"\b{re.escape(n)}\b", text)]
         if missing:
-            out.append(f"contract {contract} declares {', '.join(missing)}, which "
-                       f"{', '.join(sorted(files)) or 'the contract files'} never "
-                       "declare(s)")
+            out.append(
+                f"contract {contract} declares {', '.join(missing)}, which "
+                f"{', '.join(sorted(files)) or 'the contract files'} never "
+                "declare(s)"
+            )
     return tuple(out)
 
 
 def _check_contract_names(
-    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str,
-    required: Mapping[str, Sequence[str]], *, strict: bool,
+    result: AdapterResult,
+    sandbox: Sandbox,
+    files: Sequence[str],
+    task_id: str,
+    required: Mapping[str, Sequence[str]],
+    *,
+    strict: bool,
 ) -> AdapterResult:
     """Every later ticket is handed the planned contract text and told to match it,
     while it imports the contract files: a name the contracts ticket renamed or
@@ -752,13 +790,18 @@ def _check_contract_names(
     findings = contract_drift(written, required)
     if not findings:
         return result
-    why = ("; ".join(findings) + ". Every other ticket codes against these exact names: "
-           "declare each one exactly as its contract gives it (never rename one)")
+    why = (
+        "; ".join(findings) + ". Every other ticket codes against these exact names: "
+        "declare each one exactly as its contract gives it (never rename one)"
+    )
     if strict:
         raise ContractDriftError(why)
     note = GateTriage(
-        name=CONTRACT_DRIFT_TRIAGE, run_against=f"task/{task_id}", explanation=why[:2000],
-        produced_by=NODE_ID, seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
+        name=CONTRACT_DRIFT_TRIAGE,
+        run_against=f"task/{task_id}",
+        explanation=why[:2000],
+        produced_by=NODE_ID,
+        seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
     )
     return result.model_copy(update={"triage": (*result.triage, note)})
 
@@ -768,8 +811,12 @@ class SignatureChangeError(ContractDriftError):
 
 
 def _check_stub_signatures(
-    result: AdapterResult, sandbox: Sandbox, task_id: str, stubs: Mapping[str, str],
-    *, strict: bool,
+    result: AdapterResult,
+    sandbox: Sandbox,
+    task_id: str,
+    stubs: Mapping[str, str],
+    *,
+    strict: bool,
 ) -> AdapterResult:
     """The ticket's stub files must keep every stubbed name, parameter list and
     return annotation: the other tickets code against them. ``strict`` fails the
@@ -790,14 +837,18 @@ def _check_stub_signatures(
         findings += [f"{path}: {f}" for f in signature_changes(stub, text)]
     if not findings:
         return result
-    why = ("; ".join(findings) + ". These are the planned public signatures every other "
-           "ticket codes against: keep each exactly as the typed stub gives it and only "
-           "fill in the bodies")
+    why = (
+        "; ".join(findings) + ". These are the planned public signatures every other "
+        "ticket codes against: keep each exactly as the typed stub gives it and only "
+        "fill in the bodies"
+    )
     if strict:
         raise SignatureChangeError(why)
     note = GateTriage(
-        name=SIGNATURE_CHANGE_TRIAGE, run_against=f"task/{task_id}",
-        explanation=why[:2000], produced_by=NODE_ID,
+        name=SIGNATURE_CHANGE_TRIAGE,
+        run_against=f"task/{task_id}",
+        explanation=why[:2000],
+        produced_by=NODE_ID,
         seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
     )
     return result.model_copy(update={"triage": (*result.triage, note)})
@@ -809,13 +860,17 @@ def skeleton_files(
     """The typed stub files the skeleton diff wrote (path -> stub text)."""
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops, _resolve_typed
 
-    handles = [a for a in state.get("artifacts") or ()
-               if a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID]
+    handles = [
+        a
+        for a in state.get("artifacts") or ()
+        if a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID
+    ]
     if not handles or resolve_blob is None:
         return {}
     try:
-        diff = _resolve_typed(max(handles, key=lambda a: a.seq), resolve, FeatureDiff,
-                              _FEATURE_DIFF_KIND)
+        diff = _resolve_typed(
+            max(handles, key=lambda a: a.seq), resolve, FeatureDiff, _FEATURE_DIFF_KIND
+        )
         return dict(_diff_ops(diff, resolve_blob).writes)
     except MaterializationError:
         return {}
@@ -848,22 +903,36 @@ def stub_rules(
             base = sig.removeprefix("class ").strip()
             if sig.startswith("class ") and base.isidentifier():
                 impls[base] = f"{name} in {path}"
-    wanted = {n for c in ticket.consumes
-              for n in (c, c.rpartition(".")[0],
-                        *(contract_members(contracts[c].signature) if c in contracts else ()))}
-    named = [f"{cls} is implemented by {where}" for cls, where in sorted(impls.items())
-             if cls in wanted]
+    wanted = {
+        n
+        for c in ticket.consumes
+        for n in (
+            c,
+            c.rpartition(".")[0],
+            *(contract_members(contracts[c].signature) if c in contracts else ()),
+        )
+    }
+    named = [
+        f"{cls} is implemented by {where}" for cls, where in sorted(impls.items()) if cls in wanted
+    ]
     if named:
-        rules.append("IMPLEMENTATIONS: " + "; ".join(named) + ". Construct those classes "
-                     "by these names and annotate with the contract types.")
+        rules.append(
+            "IMPLEMENTATIONS: " + "; ".join(named) + ". Construct those classes "
+            "by these names and annotate with the contract types."
+        )
     return rules
 
 
 def _skeleton_diff(
-    rt: AgentRuntime, config: RunnableConfig, tickets: Sequence[Ticket],
-    contracts: Mapping[str, InterfaceContract], contract_files: Sequence[str],
-    overlay: Mapping[str, str | None], built: Sequence[AdapterResult],
-    blobs: BlobResolver, base: str,
+    rt: AgentRuntime,
+    config: RunnableConfig,
+    tickets: Sequence[Ticket],
+    contracts: Mapping[str, InterfaceContract],
+    contract_files: Sequence[str],
+    overlay: Mapping[str, str | None],
+    built: Sequence[AdapterResult],
+    blobs: BlobResolver,
+    base: str,
 ) -> tuple[dict[str, list[Any]], tuple[str, ...]]:
     """The skeleton FeatureDiff on top of ``overlay`` plus this wave's ``built``
     diffs (the contracts file as just built), with the generator's concerns."""
@@ -872,8 +941,13 @@ def _skeleton_diff(
     tree = dict(overlay)
     try:
         for got in built:
-            probe = FeatureDiff(diff_uri=got.diff_uri, task_id="probe", branch="task/probe",
-                                base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0))
+            probe = FeatureDiff(
+                diff_uri=got.diff_uri,
+                task_id="probe",
+                branch="task/probe",
+                base_tree_sha="",
+                seq=Seq("scope", 0, 0, NODE_ID, 0),
+            )
             ops = _diff_ops(probe, blobs)
             tree.update(ops.writes)
             tree.update(dict.fromkeys(ops.deletes))
@@ -883,36 +957,52 @@ def _skeleton_diff(
     except MaterializationError as exc:
         return {}, (f"No typed skeleton: the contracts could not be read ({exc}).",)
     texts = {f: t for f in contract_files if isinstance(t := tree.get(f), str)}
-    sk = python_skeleton(list(contracts.values()), tickets, texts,
-                         exists=(p for p, t in tree.items() if t is not None))
+    sk = python_skeleton(
+        list(contracts.values()),
+        tickets,
+        texts,
+        exists=(p for p, t in tree.items() if t is not None),
+    )
     if not sk.files or rt.cas is None:
         return {}, tuple(sk.concerns)
-    blob = json.dumps({"kind": "full-file-snapshot", "files": sk.files}, sort_keys=True,
-                      ensure_ascii=False).encode("utf-8")
+    blob = json.dumps(
+        {"kind": "full-file-snapshot", "files": sk.files}, sort_keys=True, ensure_ascii=False
+    ).encode("utf-8")
     key = content_digest({"skeleton": sk.files})
     diff = FeatureDiff(
-        diff_uri=rt.cas.put_blob(blob), task_id=SKELETON_TASK_ID,
-        branch=f"task/{SKELETON_TASK_ID}", base_tree_sha=base,
+        diff_uri=rt.cas.put_blob(blob),
+        task_id=SKELETON_TASK_ID,
+        branch=f"task/{SKELETON_TASK_ID}",
+        base_tree_sha=base,
         seq=rt.seq(config, NODE_ID, f"diff:{SKELETON_TASK_ID}"),
     )
     artifact = Artifact(
-        kind=_FEATURE_DIFF_KIND, uri=f"cas://feature_diff/{SKELETON_TASK_ID}-{key}",
-        produced_by=NODE_ID, task_id=SKELETON_TASK_ID,
+        kind=_FEATURE_DIFF_KIND,
+        uri=f"cas://feature_diff/{SKELETON_TASK_ID}-{key}",
+        produced_by=NODE_ID,
+        task_id=SKELETON_TASK_ID,
         seq=rt.seq(config, NODE_ID, f"artifact:{SKELETON_TASK_ID}"),
     )
     rt.cas.put_body_at(artifact.uri, diff)
     note = GateTriage(
-        name=SKELETON_TRIAGE, run_against=f"task/{SKELETON_TASK_ID}",
-        explanation=("typed stubs: " + ", ".join(
-            f"{p} ({sk.owners[p]})" for p in sorted(sk.files))
-            + "".join(f"; {c}" for c in sk.concerns))[:2000],
-        produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, SKELETON_TRIAGE),
+        name=SKELETON_TRIAGE,
+        run_against=f"task/{SKELETON_TASK_ID}",
+        explanation=(
+            "typed stubs: "
+            + ", ".join(f"{p} ({sk.owners[p]})" for p in sorted(sk.files))
+            + "".join(f"; {c}" for c in sk.concerns)
+        )[:2000],
+        produced_by=NODE_ID,
+        seq=rt.seq(config, NODE_ID, SKELETON_TRIAGE),
     )
     return {"artifacts": [artifact], "gate_triage": [note]}, tuple(sk.concerns)
 
 
 def _require_scope_written(
-    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str,
+    result: AdapterResult,
+    sandbox: Sandbox,
+    files: Sequence[str],
+    task_id: str,
     skeleton: Mapping[str, str] | None = None,
 ) -> None:
     """Fail a ticket whose diff touches none of its ``files`` while none of them
@@ -927,8 +1017,11 @@ def _require_scope_written(
     if not files:
         return
     probe = FeatureDiff(
-        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
-        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+        diff_uri=result.diff_uri,
+        task_id=task_id,
+        branch=f"task/{task_id}",
+        base_tree_sha="",
+        seq=Seq("scope", 0, 0, NODE_ID, 0),
     )
     try:
         ops = _diff_ops(probe, sandbox.get_blob)
@@ -956,8 +1049,8 @@ def _require_scope_written(
     report = "; ".join(t.explanation for t in result.triage)
     raise EmptyTicketError(
         f"the session wrote none of the ticket's files ({', '.join(files)}) "
-        f"after {result.turns_used} turn(s)" + (f"; adapter report: {report[:800]}"
-                                                 if report else "")
+        f"after {result.turns_used} turn(s)"
+        + (f"; adapter report: {report[:800]}" if report else "")
     )
 
 
@@ -970,8 +1063,24 @@ _TYPE_DECL = re.compile(
     r"(?:class|interface|type|struct|enum|trait|record)\s+([A-Za-z_]\w*)",
     re.MULTILINE,
 )
-_SOURCE_SUFFIXES = (".py", ".pyi", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs",
-                    ".cjs", ".go", ".rs", ".java", ".kt", ".cs", ".swift")
+_SOURCE_SUFFIXES = (
+    ".py",
+    ".pyi",
+    ".ts",
+    ".tsx",
+    ".mts",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".cjs",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".cs",
+    ".swift",
+)
 
 
 def _declared_types(text: str) -> set[str]:
@@ -1015,8 +1124,11 @@ def _written_sources(
     from foundry.graph.gate_wiring import MaterializationError, _diff_ops
 
     probe = FeatureDiff(
-        diff_uri=result.diff_uri, task_id=task_id, branch=f"task/{task_id}",
-        base_tree_sha="", seq=Seq("scope", 0, 0, NODE_ID, 0),
+        diff_uri=result.diff_uri,
+        task_id=task_id,
+        branch=f"task/{task_id}",
+        base_tree_sha="",
+        seq=Seq("scope", 0, 0, NODE_ID, 0),
     )
     try:
         ops = _diff_ops(probe, sandbox.get_blob)
@@ -1058,9 +1170,10 @@ _VERIFY_STEPS = ("install", "build", "typecheck", "test", "bdd")
 
 def _python_test_files(files: Sequence[str]) -> tuple[str, ...]:
     return tuple(
-        f for f in files
-        if f.endswith(".py") and (PurePosixPath(f).name.startswith("test_")
-                                  or f.endswith("_test.py"))
+        f
+        for f in files
+        if f.endswith(".py")
+        and (PurePosixPath(f).name.startswith("test_") or f.endswith("_test.py"))
     )
 
 
@@ -1068,9 +1181,9 @@ def _python_test_files(files: Sequence[str]) -> tuple[str, ...]:
 # pytest-bdd then looks for a fixture of that name and fails every scenario.
 _PYTEST_BDD_ARGS = (
     "A step function's parameters come only from its step text, a pytest fixture, or "
-    "an earlier step's target_fixture, e.g. `@given(\"a registered user\", "
-    "target_fixture=\"user_email\")` returning the email, then `@when(parsers.parse("
-    "\"they log in as {name}\"))` with `def step(user_email, name)`; a step's plain "
+    'an earlier step\'s target_fixture, e.g. `@given("a registered user", '
+    'target_fixture="user_email")` returning the email, then `@when(parsers.parse('
+    '"they log in as {name}"))` with `def step(user_email, name)`; a step\'s plain '
     "return value is passed to nothing. Scenarios that share a step line share ONE "
     "step definition: pytest-bdd runs only the last definition of a step text, so "
     "never define the same step text twice in a module."
@@ -1115,25 +1228,37 @@ def scenario_rules(
             f"from the repo root; every Given/When/Then of {', '.join(paths)} needs a "
             "step definition the runner loads (an undefined or skipped step fails the "
             "gate). "
-            + ("`check` runs them as the gate does: each of these scenarios must pass."
-               if check else "Run the bdd command and confirm each of these scenarios passed.")
+            + (
+                "`check` runs them as the gate does: each of these scenarios must pass."
+                if check
+                else "Run the bdd command and confirm each of these scenarios passed."
+            )
         )
     elif _pytest_bdd(stack):
         binder = step_module(files, ticket_id)
         if binder is not None:
             calls = " ".join(
                 f'scenarios("{posixpath.relpath(p, posixpath.dirname(binder) or ".")}")'
-                for p in paths)
+                for p in paths
+            )
             others = [f for f in _python_test_files(files) if f != binder]
             rules.append(
                 f"BIND THEM with pytest-bdd in {binder} ONLY, the path relative to it: "
                 f"{calls}. Binding any other file leaves these scenarios unexecuted, "
                 "which fails the gate"
-                + (f"; {', '.join(others)} must not call scenarios() on them, or every "
-                   "scenario runs again" if others else "")
-                + (". `check` runs them as the gate does" if check else
-                   ". The `scenarios` command in `verify` checks the binding and runs them")
-                + ": every scenario above must pass. " + _PYTEST_BDD_ARGS
+                + (
+                    f"; {', '.join(others)} must not call scenarios() on them, or every "
+                    "scenario runs again"
+                    if others
+                    else ""
+                )
+                + (
+                    ". `check` runs them as the gate does"
+                    if check
+                    else ". The `scenarios` command in `verify` checks the binding and runs them"
+                )
+                + ": every scenario above must pass. "
+                + _PYTEST_BDD_ARGS
             )
         elif files and not test:
             rules.append(
@@ -1150,7 +1275,9 @@ def scenario_rules(
 
 
 def scenario_verify(
-    files: Sequence[str], scenarios: Mapping[str, Sequence[str]], stack: StackDecision | None,
+    files: Sequence[str],
+    scenarios: Mapping[str, Sequence[str]],
+    stack: StackDecision | None,
     ticket_id: str = "",
 ) -> dict[str, str]:
     """The ``verify`` entry that runs a pytest-bdd ticket's own scenarios: check its
@@ -1193,26 +1320,37 @@ def verify_rules(
     contracts ticket writes declarations only and type-checks its file alone; every
     other ticket uses the contract types instead of re-declaring them."""
     cmds = verify_commands(stack)
-    rules = [CHECK_RULE if check else (
-        "VERIFY BEFORE YOU FINISH: from this directory run "
-        + ("the commands in `verify` (install only once its package manifest exists; "
-           "then build and typecheck; then the tests that cover your files)"
-           if cmds else "the project's build, type checker and the tests that cover "
-           "your files")
-        + ". Fix every failure in the files you may write and re-run until they pass. "
-        "Failures in other files, or caused by files later tickets have not written "
-        "yet, are expected: leave them and name them in a TRIAGE line. If a command "
-        "cannot run here (missing tool, no network), say so in a TRIAGE line."
-    )]
+    rules = [
+        CHECK_RULE
+        if check
+        else (
+            "VERIFY BEFORE YOU FINISH: from this directory run "
+            + (
+                "the commands in `verify` (install only once its package manifest exists; "
+                "then build and typecheck; then the tests that cover your files)"
+                if cmds
+                else "the project's build, type checker and the tests that cover your files"
+            )
+            + ". Fix every failure in the files you may write and re-run until they pass. "
+            "Failures in other files, or caused by files later tickets have not written "
+            "yet, are expected: leave them and name them in a TRIAGE line. If a command "
+            "cannot run here (missing tool, no network), say so in a TRIAGE line."
+        )
+    ]
     if "bdd" in cmds and "FOUNDRY_BDD_REPORT" in cmds["bdd"]:
-        rules.append("The bdd command writes its report to $FOUNDRY_BDD_REPORT: set it "
-                     "to a scratch file outside this directory when you run it.")
+        rules.append(
+            "The bdd command writes its report to $FOUNDRY_BDD_REPORT: set it "
+            "to a scratch file outside this directory when you run it."
+        )
     if ticket_id == task_id_for_ticket(CONTRACTS_TICKET_ID):
         files = ", ".join(contract_files) or "the contracts file"
         language = stack.language if stack else ""
         single = _SINGLE_FILE_TYPECHECK.get(language, "")
-        alone = (single.format(file=" ".join(contract_files)) if single and contract_files
-                 else cmds.get("typecheck", "the language's type checker"))
+        alone = (
+            single.format(file=" ".join(contract_files))
+            if single and contract_files
+            else cmds.get("typecheck", "the language's type checker")
+        )
         rules.append(
             f"DECLARATIONS ONLY in {files}: types, interfaces and signatures with no "
             "logic — Python: Protocol, dataclass, TypedDict and Enum classes whose "
@@ -1281,11 +1419,14 @@ def unwritten_ticket_files(
             continue
         binder = step_module(t.files, t.id)
         binds = [
-            f"in {f}: " + " ".join(
+            f"in {f}: "
+            + " ".join(
                 f'scenarios("{posixpath.relpath(p, posixpath.dirname(f) or ".")}")'
-                for p in failing[t.id])
-            for f in ((binder,) if binder is not None and _pytest_bdd(stack)
-                      and binder in missing else ())
+                for p in failing[t.id]
+            )
+            for f in (
+                (binder,) if binder is not None and _pytest_bdd(stack) and binder in missing else ()
+            )
         ]
         out.append(
             f"Create these files first: {', '.join(missing)}. Ticket {t.id} owns them and "
@@ -1296,9 +1437,7 @@ def unwritten_ticket_files(
     return tuple(out)
 
 
-def group_failures_by_ticket(
-    failures: Sequence[str], tickets: Sequence[Ticket]
-) -> tuple[str, ...]:
+def group_failures_by_ticket(failures: Sequence[str], tickets: Sequence[Ticket]) -> tuple[str, ...]:
     """``failures`` with the per-scenario BDD findings folded into one line per
     (tickets, feature file, reason): the tickets that carry those scenarios and the
     files they own, so a fixer facing dozens of unbound scenarios sees which step
@@ -1317,9 +1456,10 @@ def group_failures_by_ticket(
             out.append(line)
             continue
         cid, feature, why = m.groups()
-        owners = ", ".join(
-            f"{t.id} ({', '.join(t.files) or 'any file'})" for t in carriers.get(cid, ())
-        ) or "no ticket"
+        owners = (
+            ", ".join(f"{t.id} ({', '.join(t.files) or 'any file'})" for t in carriers.get(cid, ()))
+            or "no ticket"
+        )
         groups.setdefault((owners, feature, why), []).append(cid)
         if anchor < 0:
             anchor = len(out)
@@ -1329,8 +1469,12 @@ def group_failures_by_ticket(
         f"[{feature}] scenarios {', '.join(ids)} {why} — ticket(s): {owners}"
         for (owners, feature, why), ids in sorted(groups.items(), key=lambda kv: kv[0][1])
     ]
-    return (*out[:anchor], f"[BDD failures by feature file: {len(block)} group(s)]",
-            *block, *out[anchor:])
+    return (
+        *out[:anchor],
+        f"[BDD failures by feature file: {len(block)} group(s)]",
+        *block,
+        *out[anchor:],
+    )
 
 
 # ---- context ------------------------------------------------------------------
@@ -1375,9 +1519,13 @@ def _contract_body(rt: AgentRuntime, contract: InterfaceContract) -> str:
         if isinstance(body, ProseBody):
             return body.text
     return json.dumps(
-        {"name": contract.name, "spec_uri": contract.spec_uri,
-         "consumers": list(contract.consumers)},
-        sort_keys=True, ensure_ascii=False,
+        {
+            "name": contract.name,
+            "spec_uri": contract.spec_uri,
+            "consumers": list(contract.consumers),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
     )
 
 
@@ -1442,13 +1590,25 @@ def ticket_signature_map(
     :func:`~foundry.agents.implementation.interface_map.signature_map`)."""
     by_id = {t.id: t for t in tickets}
     deps = [f for d in ticket.depends_on if (t := by_id.get(d)) is not None for f in t.files]
-    mention = "\n".join([
-        ticket.title, ticket.description, *ticket.files, *ticket.reads,
-        *ticket.implements, *ticket.consumes,
-        *(text for f in ticket.files if isinstance(text := tree.get(f), str)),
-    ])
-    return signature_map(tree, contract_files=contract_files, reads=ticket.reads,
-                         dependency_files=deps, exclude=ticket.files, mention_text=mention)
+    mention = "\n".join(
+        [
+            ticket.title,
+            ticket.description,
+            *ticket.files,
+            *ticket.reads,
+            *ticket.implements,
+            *ticket.consumes,
+            *(text for f in ticket.files if isinstance(text := tree.get(f), str)),
+        ]
+    )
+    return signature_map(
+        tree,
+        contract_files=contract_files,
+        reads=ticket.reads,
+        dependency_files=deps,
+        exclude=ticket.files,
+        mention_text=mention,
+    )
 
 
 def _feature_texts(
@@ -1509,8 +1669,14 @@ def _check_rules(
     """A ticket packet's scenario and verify rules (``check``: for a session that
     has the ``check`` tool; ``scenarios_checked``: that runs its scenarios)."""
     return [
-        *scenario_rules(ticket.files, scenarios, stack, test=ticket.specialty is Specialty.TEST,
-                        ticket_id=ticket.id, check=check and scenarios_checked),
+        *scenario_rules(
+            ticket.files,
+            scenarios,
+            stack,
+            test=ticket.specialty is Specialty.TEST,
+            ticket_id=ticket.id,
+            check=check and scenarios_checked,
+        ),
         *verify_rules(stack, ticket_id=task.id, contract_files=contract_files, check=check),
     ]
 
@@ -1531,16 +1697,25 @@ def _ticket_check(
     from foundry.graph.gate_wiring import wave_scenarios
 
     stack = state.get("stack")
-    own = frozenset(scenario_ref(c.ticket_id or ticket.id, c.id) for c in criteria.values()
-                    if c.id in ticket.scenario_ids or c.ticket_id == ticket.id)
+    own = frozenset(
+        scenario_ref(c.ticket_id or ticket.id, c.id)
+        for c in criteria.values()
+        if c.id in ticket.scenario_ids or c.ticket_id == ticket.id
+    )
     scope = wave_scenarios(state, resolve, also=(task.id,))
     plain = _check_rules(task, ticket, stack, contract_files, scenarios)
     # A scenario another unbuilt ticket also carries (a paired ticket in this wave)
     # is out of the check's scope: its rule keeps "run them yourself".
-    checked = _check_rules(task, ticket, stack, contract_files, scenarios, check=True,
-                           scenarios_checked=own <= scope)
-    return CheckSpec(base=base, scope=scope, own_refs=own, own_files=tuple(ticket.files),
-                     rules=check_rewrites(plain, checked))
+    checked = _check_rules(
+        task, ticket, stack, contract_files, scenarios, check=True, scenarios_checked=own <= scope
+    )
+    return CheckSpec(
+        base=base,
+        scope=scope,
+        own_refs=own,
+        own_files=tuple(ticket.files),
+        rules=check_rewrites(plain, checked),
+    )
 
 
 def _ticket_packet(
@@ -1565,8 +1740,12 @@ def _ticket_packet(
         *_check_rules(task, ticket, stack, contract_files, scenarios),
     ]
     if ticket.files:
-        rules.insert(1, "Write ONLY these paths; changes anywhere else are discarded: "
-                     + ", ".join(ticket.files) + ".")
+        rules.insert(
+            1,
+            "Write ONLY these paths; changes anywhere else are discarded: "
+            + ", ".join(ticket.files)
+            + ".",
+        )
     return TaskPacket(
         task={
             "id": task.id,
@@ -1584,11 +1763,12 @@ def _ticket_packet(
             "reads": list(ticket.reads),
             "feature_files": list(feature_files),
             "rules": rules,
-            "verify": {**verify_commands(stack),
-                       **scenario_verify(ticket.files, scenarios, stack, ticket.id)},
+            "verify": {
+                **verify_commands(stack),
+                **scenario_verify(ticket.files, scenarios, stack, ticket.id),
+            },
         },
-        persona=persona_for(ticket.specialty.value, stack,
-                            harness=ticket.id == HARNESS_TICKET_ID),
+        persona=persona_for(ticket.specialty.value, stack, harness=ticket.id == HARNESS_TICKET_ID),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=spans,
         prior_failures=prior_failures,
@@ -1604,17 +1784,25 @@ def _failure_notes(
 ) -> list[GateTriage]:
     """The triage for a ticket's ``attempt``-th failure, plus the skip marker once
     :data:`MAX_TICKET_ATTEMPTS` is spent (so the wave loop terminates)."""
-    notes = [GateTriage(
-        name=f"{FAIL_TRIAGE}:{attempt}", run_against=f"task/{tid}",
-        explanation=f"attempt {attempt} failed: {exc}"[:2000], produced_by=NODE_ID,
-        seq=rt.seq(config, NODE_ID, f"fail:{tid}"),
-    )]
+    notes = [
+        GateTriage(
+            name=f"{FAIL_TRIAGE}:{attempt}",
+            run_against=f"task/{tid}",
+            explanation=f"attempt {attempt} failed: {exc}"[:2000],
+            produced_by=NODE_ID,
+            seq=rt.seq(config, NODE_ID, f"fail:{tid}"),
+        )
+    ]
     if attempt >= MAX_TICKET_ATTEMPTS:
-        notes.append(GateTriage(
-            name=SKIP_TRIAGE, run_against=f"task/{tid}",
-            explanation=f"not built: failed {attempt} attempt(s); last error: {exc}"[:2000],
-            produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
-        ))
+        notes.append(
+            GateTriage(
+                name=SKIP_TRIAGE,
+                run_against=f"task/{tid}",
+                explanation=f"not built: failed {attempt} attempt(s); last error: {exc}"[:2000],
+                produced_by=NODE_ID,
+                seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
+            )
+        )
     return notes
 
 
@@ -1627,14 +1815,18 @@ def _order_after_integrated(state: FactoryState, merged: dict[str, list[Any]]) -
     superstep index. A later wave builds on the integrated tree and may rewrite a
     file an earlier diff wrote, so its diff must apply last or its edit is lost."""
     top = max(
-        (a.seq.emission_epoch for a in (state.get("artifacts") or ())
-         if a.kind == _FEATURE_DIFF_KIND),
+        (
+            a.seq.emission_epoch
+            for a in (state.get("artifacts") or ())
+            if a.kind == _FEATURE_DIFF_KIND
+        ),
         default=0,
     )
     if top and merged.get("artifacts"):
         merged["artifacts"] = [
             a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
-            if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top else a
+            if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top
+            else a
             for a in merged["artifacts"]
         ]
 
@@ -1696,8 +1888,9 @@ def make_engineering_node(
             # The tasks channel keeps a task's FIRST record; a re-planned ticket's
             # tier and dependencies come from its newest version, re-derived here.
             existing = on_channel.get(tid)
-            seq = (existing.seq if existing
-                   else rt.seq(config, SENIOR_NODE_ID, f"task:{tid}", local=i))
+            seq = (
+                existing.seq if existing else rt.seq(config, SENIOR_NODE_ID, f"task:{tid}", local=i)
+            )
             tasks[tid] = task_from_ticket(ticket, seq, ticket_tiers=ticket_tiers, known=known)
             if existing is None:
                 new_tasks.append(tasks[tid].model_dump(mode="json"))
@@ -1783,33 +1976,49 @@ def make_engineering_node(
             )
 
             fix_context = (
-                *_fix_summary(state, resolve, blobs or (lambda _u: b""),
-                              attempt=_fix_attempts(state, config), scoped=False),
+                *_fix_summary(
+                    state,
+                    resolve,
+                    blobs or (lambda _u: b""),
+                    attempt=_fix_attempts(state, config),
+                    scoped=False,
+                ),
                 *group_failures_by_ticket(prior, tickets),
             )
-            asked = {t.run_against.removeprefix("task/"): t.explanation
-                     for t in state.get("gate_triage") or ()
-                     if t.name == ESCALATE_REQUEST_TRIAGE}
-            newest = {a.task_id: a for a in sorted(_of_kind(state, FEATURE_DIFF_KIND),
-                                                   key=lambda a: a.seq)}
+            asked = {
+                t.run_against.removeprefix("task/"): t.explanation
+                for t in state.get("gate_triage") or ()
+                if t.name == ESCALATE_REQUEST_TRIAGE
+            }
+            newest = {
+                a.task_id: a
+                for a in sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
+            }
             for tid in requested:
                 reasons[tid] = asked.get(tid, "the wave check failed twice")
                 diff = newest.get(tid)
                 touched = "no files"
                 if diff is not None and blobs is not None:
                     try:
-                        touched = touched_files(_diff_ops(
-                            _resolve_typed(diff, resolve, FeatureDiff, FEATURE_DIFF_KIND),
-                            blobs))
+                        touched = touched_files(
+                            _diff_ops(
+                                _resolve_typed(diff, resolve, FeatureDiff, FEATURE_DIFF_KIND), blobs
+                            )
+                        )
                     except MaterializationError:
                         touched = "an unreadable diff"
                 rebuild[tid] = _escalation_context(
-                    tier=tasks[tid].tier, target=str(target),
-                    reason=reasons[tid], touched=touched,
-                    reported=[t.explanation for t in sorted(state.get("gate_triage") or (),
-                                                            key=lambda t: t.seq)
-                              if t.run_against == f"task/{tid}" and t.name == "adapter-report"],
-                    kept=True, failures=fix_context,
+                    tier=tasks[tid].tier,
+                    target=str(target),
+                    reason=reasons[tid],
+                    touched=touched,
+                    reported=[
+                        t.explanation
+                        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+                        if t.run_against == f"task/{tid}" and t.name == "adapter-report"
+                    ],
+                    kept=True,
+                    failures=fix_context,
                 )
 
         def make_sandbox(etask: ExecutionTask) -> Sandbox:
@@ -1824,8 +2033,11 @@ def make_engineering_node(
         for t in wave:
             if t.id != CONTRACTS_TICKET_ID or not t.files:
                 continue
-            required = {n: m for n in t.implements if (c := contracts.get(n)) is not None
-                        and (m := contract_members(c.signature))}
+            required = {
+                n: m
+                for n in t.implements
+                if (c := contracts.get(n)) is not None and (m := contract_members(c.signature))
+            }
             if required:
                 tid = task_id_for_ticket(t.id)
                 names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
@@ -1833,8 +2045,11 @@ def make_engineering_node(
         for t in wave:
             # Judged against the stub as the ticket finds it (a wave-0 fixer may have
             # re-signed it to satisfy the type checker), unless that is no longer a stub.
-            stubbed = {p: cur if isinstance(cur := overlay.get(p), str) and is_stub(cur)
-                       else text for p, text in skeleton.items() if p in t.files and text}
+            stubbed = {
+                p: cur if isinstance(cur := overlay.get(p), str) and is_stub(cur) else text
+                for p, text in skeleton.items()
+                if p in t.files and text
+            }
             if stubbed:
                 tid = task_id_for_ticket(t.id)
                 stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
@@ -1849,32 +2064,55 @@ def make_engineering_node(
             from foundry.gates.self_check import check_base
 
             # A restart's sessions start on the reset tree: so do their checks.
-            base = base_scope.enter_context(check_base(
-                state, resolve=resolve, resolve_blob=blobs, rt=rt, settings=self_check,
-                reset=reset))
+            base = base_scope.enter_context(
+                check_base(
+                    state,
+                    resolve=resolve,
+                    resolve_blob=blobs,
+                    rt=rt,
+                    settings=self_check,
+                    reset=reset,
+                )
+            )
         checks: dict[str, CheckSpec] = {}
-        scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
-                                built_contracts, names, stubs, skeleton, checks)
+        scoped = _ScopedAdapter(
+            rt,
+            {task_id_for_ticket(t.id): t.files for t in wave},
+            built_contracts,
+            names,
+            stubs,
+            skeleton,
+            checks,
+        )
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         packets: dict[str, TaskPacket] = {}
         diagnosed: dict[str, str] = {}  # task id -> the cloud diagnosis its retry got
         if overlay_error is not None:
             # This wave builds on the bare base, not on the earlier waves: say so.
-            merged.setdefault("gate_triage", []).append(GateTriage(
-                name=OVERLAY_TRIAGE, run_against=f"wave/{wave[0].id}",
-                explanation="the integrated tree could not be materialized, so this wave "
-                f"builds on the bare base without the earlier waves' work: {overlay_error}"[:2000],
-                produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"overlay:{wave[0].id}"),
-            ))
-        with base_scope, LocalWorkPool(
-            sandbox_factory=make_sandbox,
-            adapter_factory=lambda _name: scoped,
-            max_slots=min(len(wave), max_slots),
-            quota=quota,
-            limits=limits,
-            on_task=on_task,
-        ) as pool:
+            merged.setdefault("gate_triage", []).append(
+                GateTriage(
+                    name=OVERLAY_TRIAGE,
+                    run_against=f"wave/{wave[0].id}",
+                    explanation="the integrated tree could not be materialized, so this wave "
+                    f"builds on the bare base without the earlier waves' work: {overlay_error}"[
+                        :2000
+                    ],
+                    produced_by=NODE_ID,
+                    seq=rt.seq(config, NODE_ID, f"overlay:{wave[0].id}"),
+                )
+            )
+        with (
+            base_scope,
+            LocalWorkPool(
+                sandbox_factory=make_sandbox,
+                adapter_factory=lambda _name: scoped,
+                max_slots=min(len(wave), max_slots),
+                quota=quota,
+                limits=limits,
+                on_task=on_task,
+            ) as pool,
+        ):
             for ticket in _round_robin(wave):
                 tid = task_id_for_ticket(ticket.id)
                 spans, features = _ticket_context(rt, ticket, criteria, contracts)
@@ -1883,28 +2121,43 @@ def make_engineering_node(
                 spans = (
                     *spans,
                     *((sigmap,) if sigmap else ()),
-                    *bdd_scaffold_spans(ticket.files, _feature_texts(owned, overlay, criteria),
-                                        state.get("stack"), ticket.id),
+                    *bdd_scaffold_spans(
+                        ticket.files,
+                        _feature_texts(owned, overlay, criteria),
+                        state.get("stack"),
+                        ticket.id,
+                    ),
                 )
                 # A retry must see why its last attempt failed: an identical packet is an
                 # identical model request, which the call cache replays turn for turn.
-                own = tuple(n.explanation for n in sorted(failures.get(tid, ()),
-                                                          key=lambda n: n.seq))
+                own = tuple(
+                    n.explanation for n in sorted(failures.get(tid, ()), key=lambda n: n.seq)
+                )
                 packet = _ticket_packet(
-                    tasks[tid], ticket, constraints, spans=spans, feature_files=features,
+                    tasks[tid],
+                    ticket,
+                    constraints,
+                    spans=spans,
+                    feature_files=features,
                     prior_failures=(*own, *prior),
-                    turn_budget=(max(turn_budget, _LOCAL_TURN_BUDGET)
-                                 if _is_local(rt, tasks[tid].tier) else turn_budget),
-                    cost_budget_microusd=cost_budget_microusd, stack=state.get("stack"),
+                    turn_budget=(
+                        max(turn_budget, _LOCAL_TURN_BUDGET)
+                        if _is_local(rt, tasks[tid].tier)
+                        else turn_budget
+                    ),
+                    cost_budget_microusd=cost_budget_microusd,
+                    stack=state.get("stack"),
                     contract_files=contract_files,
                     scenarios=owned,
                 )
                 if base is not None:
-                    checks[tid] = _ticket_check(base, state, resolve, tasks[tid], ticket,
-                                                criteria, contract_files, owned)
+                    checks[tid] = _ticket_check(
+                        base, state, resolve, tasks[tid], ticket, criteria, contract_files, owned
+                    )
                 if extra := stub_rules(ticket, skeleton, contracts):
-                    packet = packet.model_copy(update={"task": {
-                        **packet.task, "rules": [*packet.task["rules"], *extra]}})
+                    packet = packet.model_copy(
+                        update={"task": {**packet.task, "rules": [*packet.task["rules"], *extra]}}
+                    )
                 if tid in restart_memo:
                     packet = packet.model_copy(update={"prior_failures": restart_memo[tid]})
                 if tid in rebuild:
@@ -1912,19 +2165,29 @@ def make_engineering_node(
                 elif target and tid in already and _is_local(rt, tasks[tid].tier):
                     # Its escalation is spent and its local attempt was discarded: a
                     # retry stays on the cloud level rather than repeat the local stop.
-                    packet = _escalated_packet(packet, target, packet.prior_failures,
-                                               turn_budget)
+                    packet = _escalated_packet(packet, target, packet.prior_failures, turn_budget)
                 elif own and (cloud := diagnosis_tier(rt, tasks[tid].tier)) is not None:
-                    found = diagnose(rt, cloud, label=f"{tid} retry", summary=own,
-                                     files=(*ticket.files, *ticket.reads), tree=overlay,
-                                     allowed=ticket.files)
+                    found = diagnose(
+                        rt,
+                        cloud,
+                        label=f"{tid} retry",
+                        summary=own,
+                        files=(*ticket.files, *ticket.reads),
+                        tree=overlay,
+                        allowed=ticket.files,
+                    )
                     if found is not None:
                         diagnosed[tid] = f"{cloud}: {found.summary()}"
-                        packet = packet.model_copy(update={"prior_failures": (
-                            *found.packet_lines(), *packet.prior_failures)})
+                        packet = packet.model_copy(
+                            update={
+                                "prior_failures": (*found.packet_lines(), *packet.prior_failures)
+                            }
+                        )
                 packets[tid] = packet
                 etask = ExecutionTask(
-                    packet=packet, adapter=adapter_name, lineage=ticket.specialty.value,
+                    packet=packet,
+                    adapter=adapter_name,
+                    lineage=ticket.specialty.value,
                     est_cost_microusd=cost_budget_microusd,
                 )
                 try:
@@ -1935,23 +2198,31 @@ def make_engineering_node(
                         continue
                     if tid in rebuild:  # already built: decline the escalation, keep it
                         progress.log(f"escalation of {tid} not admitted: {exc}")
-                        merged.setdefault("gate_triage", []).append(GateTriage(
-                            name=ESCALATE_DECLINED_TRIAGE, run_against=f"task/{tid}",
-                            explanation=f"escalation not admitted: {exc}"[:2000],
-                            produced_by=NODE_ID,
-                            seq=rt.seq(config, NODE_ID, f"declined:{tid}"),
-                        ))
+                        merged.setdefault("gate_triage", []).append(
+                            GateTriage(
+                                name=ESCALATE_DECLINED_TRIAGE,
+                                run_against=f"task/{tid}",
+                                explanation=f"escalation not admitted: {exc}"[:2000],
+                                produced_by=NODE_ID,
+                                seq=rt.seq(config, NODE_ID, f"declined:{tid}"),
+                            )
+                        )
                         continue
-                    merged.setdefault("gate_triage", []).append(GateTriage(
-                        name=SKIP_TRIAGE, run_against=f"task/{tid}",
-                        explanation=f"not built: {exc}", produced_by=NODE_ID,
-                        seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
-                    ))
+                    merged.setdefault("gate_triage", []).append(
+                        GateTriage(
+                            name=SKIP_TRIAGE,
+                            run_against=f"task/{tid}",
+                            explanation=f"not built: {exc}",
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"skip:{tid}"),
+                        )
+                    )
                     continue
                 if tid in rebuild:
                     escalations[tid] = reasons[tid]
-                    progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} "
-                                 f"({reasons[tid][:120]})")
+                    progress.log(
+                        f"escalate {tid}: {tasks[tid].tier} -> {target} ({reasons[tid][:120]})"
+                    )
             results: dict[str, AdapterResult | Exception] = {}
             for tid, pool_id in submitted.items():
                 try:
@@ -1959,8 +2230,9 @@ def make_engineering_node(
                 except Exception as exc:
                     results[tid] = exc
             if restart_memo:
-                _retry_restarts(pool, scoped, results, packets, restart_memo,
-                                adapter_name, cost_budget_microusd)
+                _retry_restarts(
+                    pool, scoped, results, packets, restart_memo, adapter_name, cost_budget_microusd
+                )
             stopped: dict[str, str] = {}
             if target and not requested and not restarts:
                 # A local session that hit its turn cap or was stopped early keeps its
@@ -1979,35 +2251,45 @@ def make_engineering_node(
                     if (reason := scoped.empty.get(tid)) is None:
                         continue
                     ctx = _escalation_context(
-                        tier=tasks[tid].tier, target=target, reason=reason,
-                        touched="none of its files", reported=[],
-                        kept=False, failures=prior,
+                        tier=tasks[tid].tier,
+                        target=target,
+                        reason=reason,
+                        touched="none of its files",
+                        reported=[],
+                        kept=False,
+                        failures=prior,
                     )
                     epacket = _escalated_packet(packets[tid], target, ctx, turn_budget)
                     try:
-                        retry[tid] = pool.submit(ExecutionTask(
-                            packet=epacket, adapter=adapter_name,
-                            lineage=packets[tid].task["specialty"],
-                            est_cost_microusd=cost_budget_microusd,
-                        ))
+                        retry[tid] = pool.submit(
+                            ExecutionTask(
+                                packet=epacket,
+                                adapter=adapter_name,
+                                lineage=packets[tid].task["specialty"],
+                                est_cost_microusd=cost_budget_microusd,
+                            )
+                        )
                     except BudgetExceededError as exc:
                         progress.log(f"escalation of {tid} not admitted: {exc}")
                         continue
                     escalations[tid] = reason
-                    progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} "
-                                 f"({reason[:120]})")
+                    progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} ({reason[:120]})")
                 for tid, pool_id in retry.items():
                     try:
                         results[tid] = pool.result(pool_id)
                     except Exception as exc:
                         results[tid] = exc
             for tid, why in sorted(escalations.items()):
-                merged.setdefault("gate_triage", []).append(GateTriage(
-                    name=ESCALATED_TRIAGE, run_against=f"task/{tid}",
-                    explanation=f"escalated from {tasks[tid].tier if tid in tasks else '?'} "
-                                f"to {target}: {why}"[:2000],
-                    produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"escalated:{tid}"),
-                ))
+                merged.setdefault("gate_triage", []).append(
+                    GateTriage(
+                        name=ESCALATED_TRIAGE,
+                        run_against=f"task/{tid}",
+                        explanation=f"escalated from {tasks[tid].tier if tid in tasks else '?'} "
+                        f"to {target}: {why}"[:2000],
+                        produced_by=NODE_ID,
+                        seq=rt.seq(config, NODE_ID, f"escalated:{tid}"),
+                    )
+                )
             # Finalize in Seq order, single-threaded: rt.seq and rt.cas body writes
             # never race. A failed ticket never takes its siblings' diffs with it.
             built: list[Ticket] = []
@@ -2029,10 +2311,15 @@ def make_engineering_node(
                     if tid in restart_memo:
                         out.pop("tasks", None)
                 except RunCapExceeded as exc:
-                    merged.setdefault("gate_triage", []).append(GateTriage(
-                        name=CAP_TRIAGE, run_against=f"task/{tid}", explanation=str(exc),
-                        produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"cap:{tid}"),
-                    ))
+                    merged.setdefault("gate_triage", []).append(
+                        GateTriage(
+                            name=CAP_TRIAGE,
+                            run_against=f"task/{tid}",
+                            explanation=str(exc),
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"cap:{tid}"),
+                        )
+                    )
                     continue
                 except Exception as exc:
                     if tid in restart_memo:  # its earlier build stays integrated
@@ -2046,25 +2333,44 @@ def make_engineering_node(
                 for channel, records in out.items():
                     merged.setdefault(channel, []).extend(records)
                 if tid in stopped:
-                    merged.setdefault("gate_triage", []).append(GateTriage(
-                        name=STOPPED_TRIAGE, run_against=f"task/{tid}",
-                        explanation=stopped[tid][:2000], produced_by=NODE_ID,
-                        seq=rt.seq(config, NODE_ID, f"{STOPPED_TRIAGE}:{tid}"),
-                    ))
+                    merged.setdefault("gate_triage", []).append(
+                        GateTriage(
+                            name=STOPPED_TRIAGE,
+                            run_against=f"task/{tid}",
+                            explanation=stopped[tid][:2000],
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"{STOPPED_TRIAGE}:{tid}"),
+                        )
+                    )
 
         stack = state.get("stack")
         built_ids = {t.id for t in built}
-        if (CONTRACTS_TICKET_ID in built_ids and not skeleton and blobs is not None
-                and (stack is None or stack.language == "python")
-                and not any(a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID
-                            for a in state.get("artifacts") or ())):
+        if (
+            CONTRACTS_TICKET_ID in built_ids
+            and not skeleton
+            and blobs is not None
+            and (stack is None or stack.language == "python")
+            and not any(
+                a.kind == _FEATURE_DIFF_KIND and a.task_id == SKELETON_TASK_ID
+                for a in state.get("artifacts") or ()
+            )
+        ):
             # Right after the contracts build, in the same wave, so this wave's check
             # type-checks the stubs against the contracts before any ticket fills them.
             sk_writes, sk_concerns = _skeleton_diff(
-                rt, config, tickets, contracts, contract_files, overlay,
-                [r for t in built if isinstance(r := results.get(task_id_for_ticket(t.id)),
-                                                AdapterResult)],
-                blobs, bases.get(task_id_for_ticket(CONTRACTS_TICKET_ID), ""),
+                rt,
+                config,
+                tickets,
+                contracts,
+                contract_files,
+                overlay,
+                [
+                    r
+                    for t in built
+                    if isinstance(r := results.get(task_id_for_ticket(t.id)), AdapterResult)
+                ],
+                blobs,
+                bases.get(task_id_for_ticket(CONTRACTS_TICKET_ID), ""),
             )
             for channel, records in sk_writes.items():
                 merged.setdefault(channel, []).extend(records)
@@ -2075,31 +2381,47 @@ def make_engineering_node(
         if restarts and len(built) < len(wave):
             # The reset covers every restarted ticket's files: landing it without each
             # rebuild would delete the code of a ticket whose rebuild failed.
-            merged["artifacts"] = [a for a in merged.get("artifacts") or ()
-                                   if not (a.task_id or "").startswith(RESTART_PREFIX)]
+            merged["artifacts"] = [
+                a
+                for a in merged.get("artifacts") or ()
+                if not (a.task_id or "").startswith(RESTART_PREFIX)
+            ]
         elif restarts and (reset[0] or reset[1]):
             _land_reset(rt, config, state, resolve, merged, reset, wave)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
-        writes.setdefault("agent_journal", []).append(journal_entry(
-            node_id=NODE_ID, role="Engineering",
-            seq=rt.seq(config, NODE_ID, f"journal:wave:{wave[0].id}"),
-            summary=f"Built {len(built)} ticket(s) this wave: " + ", ".join(
-                f"{t.id} ({t.specialty.value}, {tasks[task_id_for_ticket(t.id)].tier})"
-                for t in built
-            ),
-            concerns=(
-                *((f"Integrated tree unavailable, built on the bare base: {overlay_error}",)
-                  if overlay_error else ()),
-                *(f"{tid} escalated from {tasks[tid].tier if tid in tasks else '?'} to "
-                  f"{target}: {why[:300]}" for tid, why in sorted(escalations.items())),
-                *(f"{tid} stopped early on {tasks[tid].tier}, its partial work kept: "
-                  f"{why[:300]}" for tid, why in sorted(stopped.items())
-                  if any(task_id_for_ticket(t.id) == tid for t in built)),
-                *skeleton_concerns,
-                *(f"{tid} retry diagnosed on {why}" for tid, why in sorted(diagnosed.items())),
-            ),
-        ))
+        writes.setdefault("agent_journal", []).append(
+            journal_entry(
+                node_id=NODE_ID,
+                role="Engineering",
+                seq=rt.seq(config, NODE_ID, f"journal:wave:{wave[0].id}"),
+                summary=f"Built {len(built)} ticket(s) this wave: "
+                + ", ".join(
+                    f"{t.id} ({t.specialty.value}, {tasks[task_id_for_ticket(t.id)].tier})"
+                    for t in built
+                ),
+                concerns=(
+                    *(
+                        (f"Integrated tree unavailable, built on the bare base: {overlay_error}",)
+                        if overlay_error
+                        else ()
+                    ),
+                    *(
+                        f"{tid} escalated from {tasks[tid].tier if tid in tasks else '?'} to "
+                        f"{target}: {why[:300]}"
+                        for tid, why in sorted(escalations.items())
+                    ),
+                    *(
+                        f"{tid} stopped early on {tasks[tid].tier}, its partial work kept: "
+                        f"{why[:300]}"
+                        for tid, why in sorted(stopped.items())
+                        if any(task_id_for_ticket(t.id) == tid for t in built)
+                    ),
+                    *skeleton_concerns,
+                    *(f"{tid} retry diagnosed on {why}" for tid, why in sorted(diagnosed.items())),
+                ),
+            )
+        )
         return writes
 
     return _node
@@ -2110,11 +2432,13 @@ def _escalated_packet(
 ) -> TaskPacket:
     """``packet`` re-aimed at the cloud ``target``, on the cloud turn budget (a local
     packet carries :data:`_LOCAL_TURN_BUDGET`)."""
-    return packet.model_copy(update={
-        "task": {**packet.task, "tier": target, "escalated": True},
-        "prior_failures": context,
-        "turn_budget": turn_budget,
-    })
+    return packet.model_copy(
+        update={
+            "task": {**packet.task, "tier": target, "escalated": True},
+            "prior_failures": context,
+            "turn_budget": turn_budget,
+        }
+    )
 
 
 # ---- a fix loop's ticket restart ------------------------------------------------
@@ -2123,10 +2447,13 @@ _RESTART_FAILURE_LINES = 30
 
 
 def _restart_prep(
-    rt: AgentRuntime, config: RunnableConfig, state: FactoryState, resolve: ArtifactResolver,
-    blobs: BlobResolver | None, wave: Sequence[Ticket],
-) -> tuple[tuple[dict[str, str], tuple[str, ...]], dict[str, tuple[str, ...]],
-           list[GateTriage]]:
+    rt: AgentRuntime,
+    config: RunnableConfig,
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    blobs: BlobResolver | None,
+    wave: Sequence[Ticket],
+) -> tuple[tuple[dict[str, str], tuple[str, ...]], dict[str, tuple[str, ...]], list[GateTriage]]:
     """For a planned restart of ``wave``: the reset of its files to the tree before
     it (:func:`~foundry.graph.gate_wiring.ticket_reset`), each ticket's memo of what
     the fix loop tried (its pass log and the failures left), and the notes that
@@ -2145,8 +2472,10 @@ def _restart_prep(
         try:
             reset = ticket_reset(state, wave, resolve=resolve, resolve_blob=blobs)
         except MaterializationError as exc:
-            why = (" (the tree before it could not be built, so it starts from the current "
-                   f"one: {exc})")
+            why = (
+                " (the tree before it could not be built, so it starts from the current "
+                f"one: {exc})"
+            )
     passes = window_passes(state, resolve)
     tried = sum(p.outcome not in ("initial", "restored") for p in passes)
     log = _pass_log(state, passes, resolve, blobs) if blobs is not None and tried else []
@@ -2166,20 +2495,30 @@ def _restart_prep(
             "the failures the earlier attempts left (the rebuild must not repeat them):",
             *failing,
         )
-        notes.append(GateTriage(
-            name=RESTARTED_TRIAGE, run_against=f"task/{tid}",
-            explanation=(f"rebuilt from scratch after {tried} fix pass(es) did not "
-                         f"converge; files reset: {files or 'none'}")[:2000],
-            produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"{RESTARTED_TRIAGE}:{tid}"),
-        ))
+        notes.append(
+            GateTriage(
+                name=RESTARTED_TRIAGE,
+                run_against=f"task/{tid}",
+                explanation=(
+                    f"rebuilt from scratch after {tried} fix pass(es) did not "
+                    f"converge; files reset: {files or 'none'}"
+                )[:2000],
+                produced_by=NODE_ID,
+                seq=rt.seq(config, NODE_ID, f"{RESTARTED_TRIAGE}:{tid}"),
+            )
+        )
         progress.log(f"restart {tid} from scratch (reset {files or 'nothing'})")
     return reset, memo, notes
 
 
 def _retry_restarts(
-    pool: LocalWorkPool, scoped: _ScopedAdapter,
-    results: dict[str, AdapterResult | Exception], packets: Mapping[str, TaskPacket],
-    restart_memo: Mapping[str, tuple[str, ...]], adapter_name: str, est_cost: int,
+    pool: LocalWorkPool,
+    scoped: _ScopedAdapter,
+    results: dict[str, AdapterResult | Exception],
+    packets: Mapping[str, TaskPacket],
+    restart_memo: Mapping[str, tuple[str, ...]],
+    adapter_name: str,
+    est_cost: int,
 ) -> None:
     """A restart whose session failed (an empty session, a changed planned
     signature, contract drift) gets one more attempt in the same pass, told why,
@@ -2194,13 +2533,23 @@ def _retry_restarts(
         for table in (scoped._names, scoped._stubs):
             if tid in table:
                 table[tid] = (table[tid][0], False)  # type: ignore[assignment]
-        packet = packets[tid].model_copy(update={"prior_failures": (
-            *packets[tid].prior_failures,
-            f"the restart's first attempt failed (fix this first): {str(got)[:1500]}")})
+        packet = packets[tid].model_copy(
+            update={
+                "prior_failures": (
+                    *packets[tid].prior_failures,
+                    f"the restart's first attempt failed (fix this first): {str(got)[:1500]}",
+                )
+            }
+        )
         try:
-            again[tid] = pool.submit(ExecutionTask(
-                packet=packet, adapter=adapter_name, lineage=packet.task["specialty"],
-                est_cost_microusd=est_cost))
+            again[tid] = pool.submit(
+                ExecutionTask(
+                    packet=packet,
+                    adapter=adapter_name,
+                    lineage=packet.task["specialty"],
+                    est_cost_microusd=est_cost,
+                )
+            )
         except BudgetExceededError as exc:
             progress.log(f"restart retry of {tid} not admitted: {exc}")
     for tid, pool_id in again.items():
@@ -2211,8 +2560,12 @@ def _retry_restarts(
 
 
 def _land_reset(
-    rt: AgentRuntime, config: RunnableConfig, state: FactoryState, resolve: ArtifactResolver,
-    merged: dict[str, list[Any]], reset: tuple[dict[str, str], tuple[str, ...]],
+    rt: AgentRuntime,
+    config: RunnableConfig,
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    merged: dict[str, list[Any]],
+    reset: tuple[dict[str, str], tuple[str, ...]],
     wave: Sequence[Ticket],
 ) -> None:
     """Put the restart's reset diff on ``merged``, ordered between the diffs it
@@ -2221,11 +2574,24 @@ def _land_reset(
 
     passes = window_passes(state, resolve)
     ids = "+".join(sorted(task_id_for_ticket(t.id) for t in wave))
-    art = snapshot_diff(state, config, reset[0], reset[1], task_id=f"{RESET_PREFIX}{ids}",
-                        base_tree=passes[-1].tree if passes else "", salt=ids, rt=rt,
-                        node_id=NODE_ID)
+    art = snapshot_diff(
+        state,
+        config,
+        reset[0],
+        reset[1],
+        task_id=f"{RESET_PREFIX}{ids}",
+        base_tree=passes[-1].tree if passes else "",
+        salt=ids,
+        rt=rt,
+        node_id=NODE_ID,
+    )
     top = art.seq.emission_epoch
-    merged["artifacts"] = [art, *(
-        a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
-        if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top else a
-        for a in merged.get("artifacts") or ())]
+    merged["artifacts"] = [
+        art,
+        *(
+            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
+            if a.kind == _FEATURE_DIFF_KIND and a.seq.emission_epoch <= top
+            else a
+            for a in merged.get("artifacts") or ()
+        ),
+    ]

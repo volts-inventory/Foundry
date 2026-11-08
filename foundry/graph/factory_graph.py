@@ -83,6 +83,7 @@ _EMIT = "emit"
 # advisory here — the deterministic gates own the release bit (LEARNINGS L5).
 TERMINAL_PASS_GATES: frozenset[str] = frozenset({"spec", "build", "test"})
 
+
 def _latest_by_name(state: FactoryState) -> dict[str, Any]:
     """Newest-by-``Seq`` verdict per gate name on the (trust-filtered) channel.
 

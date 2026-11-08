@@ -364,15 +364,30 @@ def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(
         {"action": "check"},
         {"action": "write_file", "path": "app.py", "content": "x = 2\n"},
         {"action": "check"},
-        {"action": "write_file", "path": "app.py", "content": "x = 3\n"},
         {"action": "check"},
+        {"action": "done", "summary": "a"},
+        {"action": "done", "summary": "b"},
         {"action": "done", "summary": "gave up"},
     ], budget=2)
     obs = _observations(seen)
-    assert "ERROR: no checks left" in obs[5]
-    # No check left to judge the new tree: done is not refused.
+    assert "CHECK FAILED" in obs[4] and "cached" in obs[4]  # no budget, same tree
     stop = session_stop_reason(result.triage)
     assert stop is not None and stop.startswith(CHECK_EXHAUSTED), result.triage
+
+
+def test_an_edit_after_the_last_check_is_not_reported_red(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen, _ = _run_loop(tmp_path, monkeypatch, [
+        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+        {"action": "check"},
+        {"action": "write_file", "path": "app.py", "content": "x = 2  # OK\n"},
+        {"action": "check"},
+        {"action": "done", "summary": "fixed, unchecked"},
+    ], budget=1)
+    assert "ERROR: no checks left" in _observations(seen)[3]
+    # No check left to judge the final tree: done is accepted, and nothing says red.
+    assert session_stop_reason(result.triage) is None, result.triage
 
 
 def test_check_without_a_gate_context_is_unavailable(tmp_path: Path) -> None:

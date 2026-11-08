@@ -378,7 +378,8 @@ class ProxyAgentAdapter:
         if not st.stopped:
             st.triage.append("turn budget exhausted before 'done' — partial work recorded")
         if st.checker is not None and st.checker.left <= 0 and (
-                last := st.checker.last) is not None and last.red:
+                last := st.checker.cached(*_changes(st))) is not None and last.red:
+            # Red on the final tree itself: an edit after the last check is unjudged.
             st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last check: "
                              + " | ".join(last.yours[:6])[:1500])
 

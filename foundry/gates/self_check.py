@@ -182,7 +182,20 @@ class GateOutcome:
 
 def _unattested(gate: GateImpl, workdir: Path) -> GateOutcome:
     """The gate's zone-A grounding and zone-B decision, as the runner calls them,
-    minus the seal, the signature and the latch. An exception is an ERROR."""
+    minus the seal, the signature and the latch. An exception is an ERROR. The
+    findings name the copy's random temp path as ``.``."""
+    out = _outcome(gate, workdir)
+    roots = sorted({str(workdir), str(workdir.resolve())}, key=len, reverse=True)
+
+    def rel(line: str) -> str:
+        for root in roots:
+            line = line.replace(root + "/", "./").replace(root, ".")
+        return line
+
+    return GateOutcome(out.name, out.status, tuple(rel(f) for f in out.findings), out.scenarios)
+
+
+def _outcome(gate: GateImpl, workdir: Path) -> GateOutcome:
     from foundry.gates.runner import timeout_findings
     from foundry.gates.test import BDD_KEY
 
@@ -319,6 +332,12 @@ def judge(
         mine = {r for r in red
                 if everything or r in (spec.own_refs or ()) or r not in start_red}
         theirs = red - mine
+        if not red and any(t.name == "test" and t.status is GateStatus.FAIL for t in before) \
+                and not everything and not _mentions(g.findings, spec.own_files):
+            # Red with no scenario to blame (a module failing to collect) and red at
+            # the start too: not the session's unless it names the session's files.
+            pre += [head, *g.findings]
+            continue
         if not theirs:
             yours += [head, *g.findings]
             continue
@@ -437,5 +456,6 @@ class SessionCheck:
     def check(self, files: Mapping[str, str], deleted: Iterable[str]) -> CheckVerdict:
         """A counted run; the caller checks :meth:`cached` and ``left`` first."""
         kept, gone, key = self._scoped(files, deleted)
-        self.left -= 1
-        return self._run(kept, gone, key)
+        verdict = self._run(kept, gone, key)
+        self.left -= 1  # only a check that judged the tree spends the budget
+        return verdict

@@ -1504,12 +1504,13 @@ def _check_rules(
     scenarios: Mapping[str, Sequence[str]],
     *,
     check: bool = False,
+    scenarios_checked: bool = True,
 ) -> list[str]:
     """A ticket packet's scenario and verify rules (``check``: for a session that
-    has the ``check`` tool)."""
+    has the ``check`` tool; ``scenarios_checked``: that runs its scenarios)."""
     return [
         *scenario_rules(ticket.files, scenarios, stack, test=ticket.specialty is Specialty.TEST,
-                        ticket_id=ticket.id, check=check),
+                        ticket_id=ticket.id, check=check and scenarios_checked),
         *verify_rules(stack, ticket_id=task.id, contract_files=contract_files, check=check),
     ]
 
@@ -1532,10 +1533,13 @@ def _ticket_check(
     stack = state.get("stack")
     own = frozenset(scenario_ref(c.ticket_id or ticket.id, c.id) for c in criteria.values()
                     if c.id in ticket.scenario_ids or c.ticket_id == ticket.id)
+    scope = wave_scenarios(state, resolve, also=(task.id,))
     plain = _check_rules(task, ticket, stack, contract_files, scenarios)
-    checked = _check_rules(task, ticket, stack, contract_files, scenarios, check=True)
-    return CheckSpec(base=base, scope=wave_scenarios(state, resolve, also=(task.id,)),
-                     own_refs=own, own_files=tuple(ticket.files),
+    # A scenario another unbuilt ticket also carries (a paired ticket in this wave)
+    # is out of the check's scope: its rule keeps "run them yourself".
+    checked = _check_rules(task, ticket, stack, contract_files, scenarios, check=True,
+                           scenarios_checked=own <= scope)
+    return CheckSpec(base=base, scope=scope, own_refs=own, own_files=tuple(ticket.files),
                      rules=check_rewrites(plain, checked))
 
 

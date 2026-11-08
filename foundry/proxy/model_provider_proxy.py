@@ -575,6 +575,9 @@ def _with_parse_correction(
     else:
         messages.append({"role": "user", "content": note.strip()})
     corrected = {**request, "messages": messages}
+    if miss.stop_reason == "length" and corrected.get("local_thinking") is True:
+        # The reasoning ran out the budget; a second thinking attempt would too.
+        corrected["local_thinking"] = False
     if "local_sampling" in request:
         corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
     return corrected
@@ -1095,6 +1098,10 @@ class ModelProviderProxy:
             requested_model, self._local_thinking, agent=node_id in _AGENT_NODE_IDS)
         if local:
             request["local_thinking"] = thinking
+        if thinking and node_id not in _AGENT_NODE_IDS and not tools:
+            # xhigh on a planner's plan JSON thought past 40K tokens without answering
+            # (twice, ~55 min each at ~11 tok/s); xhigh stays for agent turns only.
+            request["local_effort"] = "medium"
         if thinking:
             request["max_tokens"] = max(int(request["max_tokens"]), _LOCAL_THINKING_MAX_TOKENS)
         elif purpose == "judgment" and local:

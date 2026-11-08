@@ -437,7 +437,7 @@ def test_local_server_gets_a_json_schema_request_when_it_supports_one() -> None:
     sent = client.chat.completions.calls
     assert len(sent) == 1
     assert sent[0]["response_format"]["json_schema"]["schema"] == SCHEMA
-    assert sent[0]["reasoning_effort"] == "xhigh"  # Qwen3.8 thinks by default
+    assert sent[0]["reasoning_effort"] == "medium"  # Qwen3.8 thinks; xhigh is for agents
     assert transport.schema_supported is True
 
 
@@ -569,6 +569,24 @@ def test_the_local_seed_is_fixed_per_request_and_moves_with_the_prompt() -> None
         k: v for k, v in local.requests[0]["local_sampling"].items() if k != "seed"}
 
 
+def test_a_thinking_reply_cut_off_at_the_cap_is_retried_without_thinking() -> None:
+    request = {"messages": [{"role": "user", "content": "plan"}], "local_thinking": True}
+    cut = ProviderResponse(served_model="m", request_id="r", text="", usage={},
+                           stop_reason="length")
+    assert _with_parse_correction(request, cut, 1)["local_thinking"] is False
+    stopped = ProviderResponse(served_model="m", request_id="r", text="{", usage={},
+                               stop_reason="stop")
+    assert _with_parse_correction(request, stopped, 1)["local_thinking"] is True
+
+
+def test_the_local_effort_overrides_the_transports_xhigh() -> None:
+    client = _local_client(False, '{"answer": "42"}')
+    transport = LocalOpenAITransport(client=client)
+    transport.send({"model": "m", "messages": [{"role": "user", "content": "x"}],
+                    "local_thinking": True, "local_effort": "medium"})
+    assert client.chat.completions.calls[0]["reasoning_effort"] == "medium"
+
+
 def test_the_local_request_carries_the_sampling_params() -> None:
     client = _local_client(False, '{"answer": "42"}')
     transport = LocalOpenAITransport(client=client)
@@ -642,6 +660,10 @@ def test_local_thinking_is_routed_per_call_kind(
         assert req["max_tokens"] == (40960 if thinks else
                                      8192 if req is local.requests[2] else 16000)
     assert proxy.manifest[1]["thinking"] is expected[1]
+    # Agent turns think at the transport's xhigh; plan/verdict calls at medium.
+    efforts = [r.get("local_effort") for r in local.requests]
+    assert efforts == [("medium" if expected[0] else None), None,
+                       ("medium" if expected[2] else None)]
 
 
 def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early(

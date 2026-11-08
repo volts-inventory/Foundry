@@ -17,7 +17,8 @@ Sampling: the proxy's per-model local profile arrives as ``local_sampling``;
 OpenAI fields go as such, the rest as extra body fields (see ``_OPENAI_SAMPLING``).
 
 Thinking: the proxy's ``local_thinking`` flag picks ``reasoning_effort`` — ``xhigh``
-(Qwen3.8's level for agentic loops; Ollama maps any effort to plain "on" for a
+(Qwen3.8's level for agentic loops; ``local_effort`` overrides it, e.g. ``medium``
+for planner/judgment calls; Ollama maps any effort to plain "on" for a
 model with only on/off) or ``none``. The reasoning comes back in the message's
 ``reasoning`` field (or inline ``<think>``), never in the parsed text, and is
 replayed as the ``reasoning`` of that assistant turn on the session's next call —
@@ -198,7 +199,8 @@ class LocalOpenAITransport:
         # Ollama's /v1 ignores `think` and honours this; "none" turns a Qwen3.x
         # model's default thinking off.
         params: dict[str, Any] = {"model": model, "messages": messages,
-                                  "reasoning_effort": "xhigh" if thinking else "none"}
+                                  "reasoning_effort": (request.get("local_effort") or "xhigh")
+                                  if thinking else "none"}
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_tokens"] = max_tokens

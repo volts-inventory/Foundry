@@ -28,7 +28,7 @@ Work from evidence and answer:
 - Did the fix-loop machinery misbehave? That is keep_best/restore_diff,
   failure_clusters, restart_set, FixPolicy and fix_stop in foundry/graph/gate_wiring.py.
 - Is it a Foundry bug, a missing deterministic hint or constraint (foundry/gates/test.py
-  notes, foundry/agents/planner.py stack constraints), or model variance Foundry can't
+  notes, foundry/agents/planner/constraints.py stack constraints), or model variance Foundry can't
   reasonably fix?
 
 Fix the most significant Foundry-side cause generally, not for this one app, and add a

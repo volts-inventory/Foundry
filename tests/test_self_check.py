@@ -832,6 +832,16 @@ def test_the_check_can_be_kept_to_local_sessions(
         assert not self_check.wanted()
 
 
+def test_the_runs_self_check_mode_wins_over_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "0")
+    assert not SelfCheckSettings().enabled()
+    assert SelfCheckSettings(mode="local").enabled()
+    assert not self_check.wanted("local") and self_check.wanted("on")
+    monkeypatch.delenv("FOUNDRY_SELF_CHECK")
+    assert not SelfCheckSettings(mode="off").enabled()
+    assert not self_check.wanted("off")
+
+
 def test_concurrent_builds_reuse_a_failed_install_and_never_delete_a_held_venv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

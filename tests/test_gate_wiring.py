@@ -717,12 +717,13 @@ def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifi
     state = {**state, "gates": [_gate("build", GateStatus.PASS), _gate("test", GateStatus.FAIL)]}
     out = tmp_path / "draft"
     findings = {"test": ("FAILED tests/test_app.py::test_f", "E   assert f() == 2")}
-    draft_root = _write_draft_on_halt(
+    draft_root, text = _write_draft_on_halt(
         state, str(out), gate_findings=findings, resolve=resolve, resolve_blob=resolve_blob
     )
     assert draft_root is not None
     assert (out / "app.py").is_file()  # best-attempt source is there
     status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+    assert status == text
     assert "held at the gate" in status.lower()  # clearly marked not shipped
     assert "E   assert f() == 2" in status  # what's still failing
     assert "❌" in status and "✅" in status  # per-gate verdicts

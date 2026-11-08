@@ -47,6 +47,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 from __future__ import annotations
 
 import builtins
+import contextvars
 import re
 import shlex
 from collections import Counter
@@ -1372,7 +1373,7 @@ def _run_parallel(fn: Callable[[str], _R], args: Sequence[str]) -> list[_R]:
     with ThreadPoolExecutor(
         max_workers=min(len(args), _EPIC_WORKERS), thread_name_prefix="planner-epic"
     ) as pool:
-        futures = [pool.submit(fn, a) for a in args]
+        futures = [pool.submit(contextvars.copy_context().run, fn, a) for a in args]
         try:
             for done in as_completed(futures):
                 done.result()

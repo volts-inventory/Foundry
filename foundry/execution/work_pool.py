@@ -79,6 +79,7 @@ only verb is ``submit``; making slots is infra's job.
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -362,6 +363,9 @@ class LocalWorkPool:
         self._lock = threading.Lock()
         self._records: dict[str, TaskState] = {}
         self._futures: dict[str, Future[None]] = {}
+        # Each task runs in a copy of its submitter's context, so a run-scoped
+        # ContextVar (the progress sink) reaches the worker thread.
+        self._contexts: dict[str, contextvars.Context] = {}
         self._pending: list[str] = []
         self._running = 0
         self._running_by_lineage: dict[str, int] = {}
@@ -390,6 +394,7 @@ class LocalWorkPool:
             self._quota.commit(task)
             self._records[tid] = TaskState(task, TaskStatus.QUEUED)
             self._futures[tid] = Future()
+            self._contexts[tid] = contextvars.copy_context()
             self._pending.append(tid)
             self._dispatch()
         return tid
@@ -407,7 +412,8 @@ class LocalWorkPool:
             self._pending.remove(tid)
             self._running += 1
             self._running_by_lineage[lineage] = self._running_by_lineage.get(lineage, 0) + 1
-            self._executor.submit(self._worker, tid, lineage)
+            ctx = self._contexts.pop(tid)
+            self._executor.submit(ctx.run, self._worker, tid, lineage)
 
     def _worker(self, task_id: str, lineage: str) -> None:
         fut = self._futures[task_id]

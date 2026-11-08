@@ -1156,7 +1156,7 @@ def test_the_restored_tree_is_the_newest_checked_and_the_draft(tmp_path: Path) -
         **out,
         "artifacts": [*out["artifacts"], _diff_art(store, "fix-3", 99, {"e.py": "def e(:\n"})],
     }
-    draft = cli._write_draft_on_halt(
+    draft, _ = cli._write_draft_on_halt(
         ungated,
         str(tmp_path / "draft"),
         gate_findings={},

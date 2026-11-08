@@ -85,14 +85,15 @@ class SelfCheckSettings:
     profile: VerificationProfile | None = None
     budget: int = CHECK_BUDGET
     timeout_s: float = CHECK_TIMEOUT_S
+    # The run's ``FOUNDRY_SELF_CHECK`` value; None reads the env.
+    mode: str | None = None
 
-    @staticmethod
-    def enabled() -> bool:
-        return _mode() not in _OFF
+    def enabled(self) -> bool:
+        return _mode(self.mode) not in _OFF
 
 
-def _mode() -> str:
-    return os.environ.get(DISABLE_ENV, "").strip().lower()
+def _mode(mode: str | None = None) -> str:
+    return (os.environ.get(DISABLE_ENV, "") if mode is None else mode).strip().lower()
 
 
 _LOCAL: ContextVar[bool] = ContextVar("foundry_local_session", default=False)
@@ -108,9 +109,9 @@ def local_session() -> Iterator[None]:
         _LOCAL.reset(token)
 
 
-def wanted() -> bool:
-    """Does the session running now get the check (``FOUNDRY_SELF_CHECK``)?"""
-    mode = _mode()
+def wanted(mode: str | None = None) -> bool:
+    """Does the session running now get the check (``mode``, else ``FOUNDRY_SELF_CHECK``)?"""
+    mode = _mode(mode)
     if mode in _OFF:
         return False
     return _LOCAL.get() if mode == "local" else True

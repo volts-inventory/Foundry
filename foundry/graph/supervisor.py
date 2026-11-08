@@ -254,6 +254,7 @@ def build_supervisor_graph(
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
     fix_policy: FixPolicy | None = None,
+    self_check_mode: str | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -342,6 +343,7 @@ def build_supervisor_graph(
         workers=workers,
         ticket_tiers=ticket_tiers,
         on_task=on_task,
+        self_check_mode=self_check_mode,
         wave_check=WaveBuildCheck(
             rt,
             runner,

@@ -58,6 +58,8 @@ def test_native_tools_are_opt_in(proxy: Any, monkeypatch: pytest.MonkeyPatch) ->
     assert make_coding_adapter("proxy-agent", proxy=proxy)._tool_complete is None
     monkeypatch.setenv("FOUNDRY_NATIVE_TOOLS", "1")
     assert make_coding_adapter("proxy-agent", proxy=proxy)._tool_complete is not None
+    adapter = make_coding_adapter("proxy-agent", proxy=proxy, native_tools=False)
+    assert adapter._tool_complete is None  # the run's setting wins over the env
 
 
 # ---- derived default: --adapter omitted ⇒ substrate follows --backend --------

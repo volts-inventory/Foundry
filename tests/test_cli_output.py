@@ -48,6 +48,7 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     assert app.is_file()
     assert test_app.is_file()
     assert "VALUE = 42" in app.read_text(encoding="utf-8")
+    assert result.draft_status is None
 
     # The Spec gate's criteria.json INPUT is not a source file — it is excluded.
     assert not (out / "criteria.json").exists()
@@ -82,6 +83,21 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     assert (out / "DRAFT-STATUS.md").is_file()
     assert "held at the gate" in (out / "DRAFT-STATUS.md").read_text(encoding="utf-8").lower()
     assert "DRAFT written to" in result.summary()
+    assert result.draft_status == (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+
+
+def test_halted_run_carries_its_draft_status_without_an_output_dir() -> None:
+    result = run(
+        "build a broken service",
+        thread_id="cli-status-halt",
+        diff_body=_ERROR_DIFF,
+        max_fix_attempts=2,
+    )
+
+    assert result.passed is False and result.draft_root is None
+    assert result.draft_status is not None
+    assert "held at the gate" in result.draft_status.lower()
+    assert "❌ **test**" in result.draft_status
 
 
 def test_a_run_stopped_at_its_cap_still_writes_its_latest_tree(

@@ -162,6 +162,7 @@ def build_factory_graph(
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
     fix_policy: FixPolicy | None = None,
+    self_check_mode: str | None = None,
 ) -> CompiledStateGraph[FactoryState]:
     """Compile the full factory graph.
 
@@ -208,6 +209,9 @@ def build_factory_graph(
         behavior byte-for-byte (back-compat for every existing caller).
     fix_policy:
         How the build-side fix loops are bounded, forwarded to the supervisor.
+    self_check_mode:
+        The sessions' in-session check (``FOUNDRY_SELF_CHECK`` values; None reads
+        the env), forwarded to the implementation layer.
     Returns the COMPILED top-level graph.
     """
     supervisor = build_supervisor_graph(
@@ -226,6 +230,7 @@ def build_factory_graph(
         ticket_tiers=ticket_tiers,
         on_task=on_task,
         fix_policy=fix_policy,
+        self_check_mode=self_check_mode,
     ).compile()
 
     def emit(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

@@ -21,8 +21,8 @@ cage is unchanged. ``complete_fn(messages, schema) -> (text, parsed)`` is the
 injected proxy seam (a closure over ``proxy.complete`` in production; a fake in
 tests), mirroring raw_react's ``complete_fn`` discipline.
 
-Opt-in native tool calls (``tool_complete_fn``, wired when FOUNDRY_NATIVE_TOOLS
-is set): the same actions are offered as tools (:data:`TOOLS`), one model turn
+Opt-in native tool calls (``tool_complete_fn``, wired by ``run(native_tools=)``,
+else FOUNDRY_NATIVE_TOOLS): the same actions are offered as tools (:data:`TOOLS`), one model turn
 may request several, and each runs through exactly the guards a JSON action
 does. A backend without a tool channel raises ``ToolsUnsupported`` and the
 adapter drops to JSON actions for that packet tier (its transport + model) from
@@ -271,6 +271,17 @@ _LIST_MAX = 200
 # With this many turns left the observation says so: a session that never learns
 # its budget is cut off mid-change, before it re-runs the checks on its edits.
 _LOW_TURNS = 5
+# One activity line per action, in the claude-code adapter's style.
+_ACTIVITY: dict[str, tuple[str, str | None]] = {
+    "write_file": ("writing", "path"),
+    "read_file": ("reading", "path"),
+    "delete_file": ("deleting", "path"),
+    "run": ("running", "cmd"),
+    "search": ("searching for", "pattern"),
+    "check": ("checking the gates", None),
+    "done": ("done:", "summary"),
+}
+_ACTIVITY_MAX = 72
 
 
 @dataclass(frozen=True)
@@ -361,8 +372,10 @@ class ProxyAgentAdapter:
         run_timeout_s: float = 300.0,
         self_reported_model: str | None = None,
         tool_complete_fn: AgentToolCompleteFn | None = None,
+        activity_cb: Callable[[str], None] | None = None,
     ) -> None:
         self._complete = complete_fn
+        self._activity_cb = activity_cb
         self._tool_complete = tool_complete_fn
         # Packet tiers whose backend has no tool channel. Only ever added to, and
         # read once per session: a concurrent session's fallback never changes
@@ -575,7 +588,9 @@ class ProxyAgentAdapter:
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = True
+            self._activity(act)
             return None
+        self._activity(act)
         fp = _fingerprint(act)
         count, tree_then = st.repeats.get(fp, (0, st.tree))
         # Any tree change since the last identical action (a write, sed -i, a
@@ -630,6 +645,20 @@ class ProxyAgentAdapter:
                 "it — its content is above; make the edit or finish.\n" + observation
             )
         return observation, read
+
+    def _activity(self, act: dict[str, Any]) -> None:
+        """Tell the listener what this action does. Advisory: a listener that raises
+        never affects the session."""
+        cb = self._activity_cb
+        known = _ACTIVITY.get(str(act.get("action")))
+        if cb is None or known is None:
+            return
+        verb, key = known
+        detail = " ".join(str(act.get(key) or "").split()) if key else ""
+        if len(detail) > _ACTIVITY_MAX:
+            detail = detail[: _ACTIVITY_MAX - 1] + "…"
+        with contextlib.suppress(Exception):
+            cb(f"{verb} {detail}" if detail else verb.rstrip(":"))
 
     def _execute(
         self,
@@ -940,7 +969,7 @@ def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
     from foundry.gates.self_check import SessionCheck, current_check, render, wanted
 
     spec = current_check()
-    if spec is None or not wanted():
+    if spec is None or not wanted(spec.base.settings.mode):
         return None, None
     checker = SessionCheck(spec, label=str(packet.task.get("id", "")))
     try:

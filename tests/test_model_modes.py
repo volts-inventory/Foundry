@@ -780,6 +780,23 @@ def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early
         _hybrid(cloud, local)
 
 
+def test_the_runs_local_thinking_wins_over_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_LOCAL_THINKING", "on")
+    local = RecordingTransport()
+    levels = preset_levels(
+        "local", cloud_backend="mock", cloud_models=TIER_MODELS, local_model=DEFAULT_LOCAL_MODEL
+    )
+    proxy = build_level_proxy(
+        levels,
+        cloud_transport=lambda _b: RecordingTransport(),
+        local_transport=lambda _u: local,
+        signer=SIGNER,
+        local_thinking="agent",
+    )
+    got = _thinking_by_node(proxy, local)
+    assert (got["planner"], got["junior_engineer"], got["reviewer"]) == (False, True, False)
+
+
 class _ThinkingCompletions:
     """Replies with JSON content plus reasoning (in the `reasoning` field, or
     inline as Qwen's `<think>` block when ``inline``)."""

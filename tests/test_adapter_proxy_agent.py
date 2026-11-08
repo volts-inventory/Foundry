@@ -64,6 +64,39 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
     assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
 
 
+def test_each_action_reports_one_activity_line(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+
+    def listener(line: str) -> None:
+        seen.append(line)
+        raise RuntimeError("a broken listener must not break the session")
+
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "read_file", "path": "mod.py"},
+                {"action": "run", "cmd": "python -c 'import mod'"},
+                {"action": "search", "pattern": "X ="},
+                {"action": "done", "summary": "built mod"},
+            ]
+        ),
+        activity_cb=listener,
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert result.turns_used == 5
+    assert seen == [
+        "writing mod.py",
+        "reading mod.py",
+        "running python -c 'import mod'",
+        "searching for X =",
+        "done: built mod",
+    ]
+
+
 def test_observations_feed_back(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

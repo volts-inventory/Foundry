@@ -57,6 +57,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from foundry import progress
 from foundry.agents import AgentRuntime
 from foundry.agents.implementation import DEFAULT_WORKERS
 from foundry.agents.planner import TICKET_KIND
@@ -239,6 +240,7 @@ def make_coding_adapter(
     thread_id: str = "cli-run",
     activity_cb: Callable[[str], None] | None = None,
     tier_models: Mapping[str, str] | None = None,
+    native_tools: bool | None = None,
 ) -> Any:
     """Construct the selected coding substrate (``ADAPTERS``). ``None`` ⇒ the
     deterministic ``stub`` (back-compat). ``raw-react`` drives the chosen model
@@ -308,16 +310,19 @@ def make_coding_adapter(
 
         # Opt-in (Phase 5): the actions as native tool calls; a backend without a
         # tool channel (claude-cli, codex) falls back to JSON actions on its own.
-        native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
-            "",
-            "0",
-            "false",
-            "no",
-        )
+        native = native_tools
+        if native is None:
+            native = os.environ.get("FOUNDRY_NATIVE_TOOLS", "").strip().lower() not in (
+                "",
+                "0",
+                "false",
+                "no",
+            )
         return ProxyAgentAdapter(
             complete_fn=_agent_complete,
             run_id=thread_id,
             tool_complete_fn=_agent_tools if native else None,
+            activity_cb=activity_cb,
         )
     raise ValueError(f"unknown adapter {name!r}; choose one of {', '.join(ADAPTERS)}")
 
@@ -329,6 +334,7 @@ def _resolve_coding_adapter(
     thread_id: str,
     activity_cb: Callable[[str], None] | None = None,
     tier_models: Mapping[str, str] | None = None,
+    native_tools: bool | None = None,
 ) -> Any:
     """A WorkerAdapter instance passes through (tests inject one); a name (or None)
     is constructed via :func:`make_coding_adapter`."""
@@ -339,6 +345,7 @@ def _resolve_coding_adapter(
             thread_id=thread_id,
             activity_cb=activity_cb,
             tier_models=tier_models,
+            native_tools=native_tools,
         )
     return adapter
 
@@ -405,7 +412,7 @@ def _tier_models(backend: str) -> dict[str, str]:
     return base
 
 
-def _build_proxy(backend: str) -> ModelProviderProxy:
+def _build_proxy(backend: str, *, local_thinking: str | None = None) -> ModelProviderProxy:
     """Build the single-egress proxy for the chosen backend (the dev zone-B signer
     is injected so the judgment path can stamp verdicts regardless of backend).
 
@@ -419,7 +426,9 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
     drift = _drift_policy()
     if backend == _MOCK_BACKEND:
         tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
-        return ModelProviderProxy(tx, signer=signer, drift_policy=drift)
+        return ModelProviderProxy(
+            tx, signer=signer, drift_policy=drift, local_thinking=local_thinking
+        )
     # Past the guard above, `backend` is one of the real BackendName literals.
     # Pin the per-tier models (curated default + FOUNDRY_MODEL_T{1,2,3} overrides)
     # so an operator can name the EXACT ids their egress serves without code edits.
@@ -428,6 +437,7 @@ def _build_proxy(backend: str) -> ModelProviderProxy:
         signer=signer,
         drift_policy=drift,
         tier_models=_tier_models(backend),
+        local_thinking=local_thinking,
     )
 
 
@@ -445,7 +455,9 @@ def _local_transport(base_url: str) -> ProviderTransport:
     return LocalOpenAITransport(base_url)
 
 
-def _build_level_proxy(levels: Mapping[str, Level]) -> ModelProviderProxy:
+def _build_level_proxy(
+    levels: Mapping[str, Level], *, local_thinking: str | None = None
+) -> ModelProviderProxy:
     """One proxy routing each tier to its level's transport (model modes)."""
     return build_level_proxy(
         levels,
@@ -453,6 +465,7 @@ def _build_level_proxy(levels: Mapping[str, Level]) -> ModelProviderProxy:
         local_transport=_local_transport,
         signer=_zone_b_signer(),
         drift_policy=_drift_policy(),
+        local_thinking=local_thinking,
     )
 
 
@@ -464,6 +477,7 @@ def _level_adapter(
     proxy: ModelProviderProxy,
     thread_id: str,
     activity_cb: Callable[[str], None] | None,
+    native_tools: bool | None = None,
 ) -> Any:
     """The coding substrate under a level table: a ticket on a cloud level runs the
     run's cloud adapter (claude-code under claude-cli) with the cloud levels'
@@ -472,7 +486,13 @@ def _level_adapter(
     finish re-runs once on the strongest cloud level."""
     from foundry.execution.adapters.tiered import TieredAdapter
 
-    local = make_coding_adapter("proxy-agent", proxy=proxy, thread_id=thread_id)
+    local = make_coding_adapter(
+        "proxy-agent",
+        proxy=proxy,
+        thread_id=thread_id,
+        activity_cb=activity_cb,
+        native_tools=native_tools,
+    )
     cloud_models = {t: lvl.model for t, lvl in levels.items() if not lvl.local}
     cloud = local
     if cloud_models:
@@ -482,6 +502,7 @@ def _level_adapter(
             thread_id=thread_id,
             activity_cb=activity_cb,
             tier_models=cloud_models,
+            native_tools=native_tools,
         )
     return TieredAdapter(
         cloud=cloud,
@@ -791,37 +812,25 @@ def _write_output_tree(
     return str(out_root)
 
 
-def _write_draft_on_halt(
-    final_state: FactoryState,
-    output_dir: str,
-    *,
-    gate_findings: dict[str, tuple[str, ...]],
-    resolve: ArtifactResolver,
-    resolve_blob: BlobResolver,
-    stopped: str | None = None,
-) -> str | None:
-    """Write a best-effort DRAFT on a HALTED run: the best tree of the fix loop the
-    run ended in (:func:`~foundry.graph.gate_wiring.draft_best`), else the latest
-    attempt's source tree, plus a ``DRAFT-STATUS.md`` naming what's still failing on
-    it — so a held build hands back a usable starting point, never empty hands.
-    Best-effort: a tree that can't even be materialized (e.g. an unparseable diff) is
-    skipped (returns ``None``), never crashes the run. Clearly marked NOT shipped —
-    the gates rejected the tree."""
+def _draft_best(final_state: FactoryState, resolve: ArtifactResolver) -> Any:
     from foundry.graph.gate_wiring import draft_best
 
     try:
-        best = draft_best(final_state, resolve)
-        draft_root = _write_output_tree(
-            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
-        )
+        return draft_best(final_state, resolve)
     except Exception:
-        best = None
-        try:
-            draft_root = _write_output_tree(
-                final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
-            )
-        except Exception:
-            return None
+        return None
+
+
+def _draft_status(
+    final_state: FactoryState,
+    *,
+    gate_findings: Mapping[str, tuple[str, ...]],
+    best: Any = None,
+    stopped: str | None = None,
+) -> str:
+    """The ``DRAFT-STATUS.md`` text of a held run: the gate verdicts on ``best``
+    (:func:`~foundry.graph.gate_wiring.draft_best`'s tree; None = the newest
+    verdicts) and what's still failing."""
     gates = final_state.get("gates") or ()
     statuses = {g.name: g.status for g in gates}
     if best is not None:
@@ -853,8 +862,43 @@ def _write_draft_on_halt(
             if findings:
                 body = "\n".join(findings)
                 lines.append(f"\n### {name}\n\n```\n{body}\n```\n")
-    (Path(draft_root) / "DRAFT-STATUS.md").write_text("".join(lines), encoding="utf-8")
-    return draft_root
+    return "".join(lines)
+
+
+def _write_draft_on_halt(
+    final_state: FactoryState,
+    output_dir: str,
+    *,
+    gate_findings: dict[str, tuple[str, ...]],
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    stopped: str | None = None,
+) -> tuple[str | None, str]:
+    """Write a best-effort DRAFT on a HALTED run: the best tree of the fix loop the
+    run ended in (:func:`~foundry.graph.gate_wiring.draft_best`), else the latest
+    attempt's source tree, plus a ``DRAFT-STATUS.md`` naming what's still failing on
+    it — so a held build hands back a usable starting point, never empty hands.
+    Best-effort: a tree that can't even be materialized (e.g. an unparseable diff) is
+    skipped (root ``None``), never crashes the run. Clearly marked NOT shipped —
+    the gates rejected the tree. Returns the draft root and the status text."""
+    best = _draft_best(final_state, resolve)
+    draft_root: str | None
+    try:
+        draft_root = _write_output_tree(
+            final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
+        )
+    except Exception:
+        best = None
+        try:
+            draft_root = _write_output_tree(
+                final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
+            )
+        except Exception:
+            draft_root = None
+    text = _draft_status(final_state, gate_findings=gate_findings, best=best, stopped=stopped)
+    if draft_root is not None:
+        (Path(draft_root) / "DRAFT-STATUS.md").write_text(text, encoding="utf-8")
+    return draft_root, text
 
 
 def _latest_values(app: Any, config: RunnableConfig) -> FactoryState:
@@ -888,7 +932,7 @@ def _draft_on_stop(
         state = _latest_values(app, config)
         if not any(a.kind == "feature_diff" for a in state.get("artifacts") or ()):
             return
-        draft = _write_draft_on_halt(
+        draft, _ = _write_draft_on_halt(
             state,
             output_dir,
             gate_findings=_result(request, thread_id, state).gate_findings,
@@ -1027,6 +1071,9 @@ class RunResult:
     what's still failing — so a held build hands back a usable starting point, never
     empty hands. ``None`` on a PASS (use ``output_root``) or when no draft could be
     materialized."""
+    draft_status: str | None = None
+    """The ``DRAFT-STATUS.md`` text of a held run (gate verdicts + what's failing),
+    with or without ``output_dir``; ``None`` on a PASS."""
     resume_from: str | None = None
     """The boundary a HALTED run stopped at, where a rerun picks up (``None`` on a PASS)."""
     resumable: bool = False
@@ -1287,14 +1334,14 @@ def _invoke_with_autoresume(
                 ) from exc
             used += 1
             resume_at = time.strftime("%H:%M", time.localtime(time.time() + wait))
-            print(
+            note = (
                 f"[autoresume] transient provider failure ({type(exc).__name__}) "
                 f"— waiting {wait // 60} min (resuming ~{resume_at}) "
                 f"[{used}/{budget}]. The durable checkpoint is intact; nothing is "
-                f"lost.",
-                file=sys.stderr,
-                flush=True,
+                f"lost."
             )
+            print(note, file=sys.stderr, flush=True)
+            progress.log(note, stderr=False)
             if cancel is None:
                 time.sleep(wait)
             elif cancel.wait(wait):  # Stop / Pause during the back-off
@@ -1408,6 +1455,10 @@ def run(
     cancel: threading.Event | None = None,
     manifest_dir: str | None = None,
     fix_until_cap: bool | None = None,
+    log_cb: Callable[[str], None] | None = None,
+    local_thinking: str | None = None,
+    self_check: str | None = None,
+    native_tools: bool | None = None,
 ) -> RunResult:
     """Run ``request`` end-to-end through the compiled factory graph (smoke path).
 
@@ -1507,6 +1558,13 @@ def run(
         it, instead of ``max_fix_attempts`` passes (see
         :class:`~foundry.graph.gate_wiring.FixPolicy`). ``None``: see
         :func:`fix_until_cap_for` (on for local runs).
+    log_cb:
+        Receives every backend progress line (:mod:`foundry.progress`) for the run,
+        auto-resume waits included, whatever ``FOUNDRY_PROGRESS`` says.
+    local_thinking / self_check / native_tools:
+        The run's ``FOUNDRY_LOCAL_THINKING`` (off/on/agent), ``FOUNDRY_SELF_CHECK``
+        and ``FOUNDRY_NATIVE_TOOLS``; ``None`` reads the env. Run-scoped, so
+        concurrent runs in one process don't share them.
     """
     if mode not in MODES:
         raise ValueError(f"unknown mode {mode!r}; choose one of {', '.join(MODES)}")
@@ -1566,7 +1624,7 @@ def run(
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
     if level_table is None:
-        proxy = _build_proxy(backend)
+        proxy = _build_proxy(backend, local_thinking=local_thinking)
         # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real
         # brain writes real code (mock→stub, any real backend→raw-react). An explicit
         # adapter — a name OR an injected WorkerAdapter instance (tests) — wins.
@@ -1578,9 +1636,10 @@ def run(
             thread_id=thread_id,
             activity_cb=activity_cb,
             tier_models=_tier_models(backend),
+            native_tools=native_tools,
         )
     else:
-        proxy = _build_level_proxy(level_table)
+        proxy = _build_level_proxy(level_table, local_thinking=local_thinking)
         coding_adapter = _level_adapter(
             adapter,
             backend=backend,
@@ -1588,6 +1647,7 @@ def run(
             proxy=proxy,
             thread_id=thread_id,
             activity_cb=activity_cb,
+            native_tools=native_tools,
         )
         if local_tiers(level_table) == frozenset(level_table):
             max_slots = 1  # one local model: more ticket slots would only queue
@@ -1658,7 +1718,10 @@ def run(
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
     token = set_gate_write_verifier(_gate_verifier(records))
-    with tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir:
+    with (
+        progress.sink(log_cb) if log_cb is not None else contextlib.nullcontext(),
+        tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
+    ):
         try:
             if base_root is not None:
                 from foundry.base_tree import copy_base_tree
@@ -1695,6 +1758,7 @@ def run(
                 ticket_tiers=ticket_tiers,
                 on_task=task_cb,
                 fix_policy=fix_policy,
+                self_check_mode=self_check,
             )
             # The epoch counter is in-memory: a process continuing this thread's
             # checkpoint must mint Seqs above the run's records, or a re-run gate's
@@ -1904,15 +1968,21 @@ def run(
     elif output_dir is not None and not result.passed:
         # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
         # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
-        draft_root = _write_draft_on_halt(
+        draft_root, status = _write_draft_on_halt(
             final_state,
             output_dir,
             gate_findings=result.gate_findings,
             resolve=resolve,
             resolve_blob=resolve_blob,
         )
-        if draft_root is not None:
-            result = replace(result, draft_root=draft_root)
+        result = replace(result, draft_root=draft_root, draft_status=status)
+    elif not result.passed:
+        status = _draft_status(
+            final_state,
+            gate_findings=result.gate_findings,
+            best=_draft_best(final_state, resolve),
+        )
+        result = replace(result, draft_status=status)
     manifest_root = output_dir if (result.output_root or result.draft_root) else manifest_dir
     if manifest_root:
         # The manifest is a report on a finished build: failing to write it must

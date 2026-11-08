@@ -62,6 +62,7 @@ def build_implementation_subgraph(
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
     wave_check: WaveBuildCheck | None = None,
+    self_check_mode: str | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED implementation (Layer 3) role subgraph.
 
@@ -96,6 +97,9 @@ def build_implementation_subgraph(
         back to the check, bounded by the shared fix-attempt budget, and a spent
         budget exits with waves unbuilt (the supervisor halts). Needs the fixer
         (``rt.cas``); ``None`` builds every wave back to back.
+    self_check_mode:
+        The sessions' in-session check (``FOUNDRY_SELF_CHECK`` values); None reads
+        the env.
 
     START routes to the looping ``engineering`` node: each pass builds one wave of
     tickets and loops back while a wave remains, then exits to the supervisor's
@@ -115,7 +119,11 @@ def build_implementation_subgraph(
     gate_id = "wave_gate"
     check = wave_check if can_fix else None
     # The sessions run the wave check's gates themselves as a `check` tool.
-    self_check = SelfCheckSettings(profile=check.profile) if check is not None else None
+    self_check = (
+        SelfCheckSettings(profile=check.profile, mode=self_check_mode)
+        if check is not None
+        else None
+    )
     if can_fix:
         assert blobs is not None
         fixer = make_fixer_node(

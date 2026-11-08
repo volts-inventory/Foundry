@@ -1004,6 +1004,7 @@ class ModelProviderProxy:
         tier_transports: Mapping[str, ProviderTransport] | None = None,
         local_tiers: Iterable[str] = (),
         local_lock: threading.RLock | None = None,
+        local_thinking: str | None = None,
     ) -> None:
         self._transport = transport or AnthropicTransport()
         # Per-level routing (model modes): a tier named here sends through ITS
@@ -1019,7 +1020,10 @@ class ModelProviderProxy:
         # Local tiers' sampling override (FOUNDRY_LOCAL_SAMPLING), parsed now so a
         # typo fails at startup rather than on the first local call.
         self._local_sampling = parse_local_sampling(os.environ.get(LOCAL_SAMPLING_ENV, ""))
-        self._local_thinking = parse_local_thinking(os.environ.get(LOCAL_THINKING_ENV, ""))
+        # ``local_thinking`` (off/on/agent) is the run's; None reads FOUNDRY_LOCAL_THINKING.
+        self._local_thinking = parse_local_thinking(
+            os.environ.get(LOCAL_THINKING_ENV, "") if local_thinking is None else local_thinking
+        )
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a

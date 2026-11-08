@@ -107,7 +107,7 @@ def test_a_value_error_inside_the_run_is_a_crash_not_a_usage_error(monkeypatch) 
     def _bug(*_a, **_k):
         raise ValueError("max() iterable argument is empty")
 
-    monkeypatch.setattr(cli, "_invoke", _bug)
+    monkeypatch.setattr(cli.invoke, "_invoke", _bug)
     with pytest.raises(cli.RunCrashed) as info:
         main(["build a thing"])
     assert isinstance(info.value.__cause__, ValueError)

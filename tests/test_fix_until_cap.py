@@ -85,7 +85,7 @@ def test_the_flag_reaches_the_run(
         seen.update(kw)
         raise ValueError("stop here")
 
-    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli.command, "run", fake_run)
     assert cli.main([*([flag] if flag else []), "build a todo app"]) == 2
     assert seen["fix_until_cap"] is want
 

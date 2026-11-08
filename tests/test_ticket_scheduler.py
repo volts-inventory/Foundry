@@ -1240,7 +1240,7 @@ def test_main_passes_flags_and_env_through_to_run(monkeypatch: pytest.MonkeyPatc
         seen.update(kw)
         return type("R", (), {"summary": lambda self: "", "passed": True})()
 
-    monkeypatch.setattr(cli, "run", fake_run)
+    monkeypatch.setattr(cli.command, "run", fake_run)
     monkeypatch.setenv("FOUNDRY_WORKERS", "data=5")
     monkeypatch.setenv("FOUNDRY_TICKET_TIERS", "complex=T2")
     assert cli.main(["build x"]) == 0

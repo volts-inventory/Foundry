@@ -208,7 +208,9 @@ def test_the_cli_halt_message_says_how_to_resume(
     import foundry.cli as cli
 
     real_run = cli.run
-    monkeypatch.setattr(cli, "run", lambda *a, **k: real_run(*a, **k, diff_body=_ERROR_DIFF))
+    monkeypatch.setattr(
+        cli.command, "run", lambda *a, **k: real_run(*a, **k, diff_body=_ERROR_DIFF)
+    )
     assert main(["--state-dir", str(tmp_path), "--max-fix-attempts", "1", "build a thing"]) == 1
     assert "rerun the same command to resume from the final gates" in capsys.readouterr().out
 

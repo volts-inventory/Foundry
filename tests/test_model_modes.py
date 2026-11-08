@@ -355,7 +355,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
         server.urls.append(url)
         return server
 
-    monkeypatch.setattr(cli, "_local_transport", _local)
+    monkeypatch.setattr(cli.wiring, "_local_transport", _local)
     seen: dict[str, Any] = {}
     real_graph = cli.build_factory_graph
 
@@ -364,7 +364,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
         seen["adapter"] = rt.adapter
         return real_graph(rt, **kw)
 
-    monkeypatch.setattr(cli, "build_factory_graph", _graph)
+    monkeypatch.setattr(cli.runner, "build_factory_graph", _graph)
     result = cli.run(
         "build a thing",
         model_mode="hybrid",
@@ -407,7 +407,7 @@ def test_a_run_without_a_mode_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
     def _no_local(url: str) -> Any:
         raise AssertionError("no local server without a model mode")
 
-    monkeypatch.setattr(cli, "_local_transport", _no_local)
+    monkeypatch.setattr(cli.wiring, "_local_transport", _no_local)
     seen: dict[str, Any] = {}
     real_graph = cli.build_factory_graph
 
@@ -417,7 +417,7 @@ def test_a_run_without_a_mode_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
         seen["proxy"] = rt.proxy
         return real_graph(rt, **kw)
 
-    monkeypatch.setattr(cli, "build_factory_graph", _graph)
+    monkeypatch.setattr(cli.runner, "build_factory_graph", _graph)
     result = cli.run("build a thing")
     assert result.passed and result.levels is None and result.model_mode is None
     assert seen["max_fix_attempts"] == 3
@@ -430,7 +430,7 @@ def test_local_mode_defaults_to_three_fix_attempts_and_one_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = FakeLocalServer()
-    monkeypatch.setattr(cli, "_local_transport", lambda url: server)
+    monkeypatch.setattr(cli.wiring, "_local_transport", lambda url: server)
     seen: dict[str, Any] = {}
     real_graph = cli.build_factory_graph
 
@@ -438,7 +438,7 @@ def test_local_mode_defaults_to_three_fix_attempts_and_one_slot(
         seen.update(kw)
         return real_graph(rt, **kw)
 
-    monkeypatch.setattr(cli, "build_factory_graph", _graph)
+    monkeypatch.setattr(cli.runner, "build_factory_graph", _graph)
     # The fake local agent writes nothing, so the run reaches the gates and halts
     # there; what matters is that every call went to the local server.
     result = cli.run("build a thing", model_mode="local")
@@ -1253,7 +1253,7 @@ def test_cli_local_check_exit_codes(
     from foundry.proxy.local_transport import LocalServerStatus
 
     monkeypatch.setattr(
-        cli,
+        cli.command,
         "check_local_server",
         lambda url, model=None: LocalServerStatus(
             url=url, reachable=True, models=("m",), model=model, model_served=model == "m"

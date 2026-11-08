@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from foundry import progress
+from foundry import progress, telemetry
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import TICKET_KIND
 from foundry.cli import defaults, doubles, invoke, output, wiring
@@ -437,6 +437,7 @@ def run(
     token = set_gate_write_verifier(wiring._gate_verifier(records))
     with (
         progress.sink(log_cb) if log_cb is not None else contextlib.nullcontext(),
+        telemetry.counting() as fire_counts,
         tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
     ):
         try:
@@ -645,6 +646,12 @@ def run(
                     )
                 raise
         finally:
+            if run_dir is not None:
+                # This process's counts only, written even when the run stops or
+                # raises: a caller resuming a run (scripts/bench.py) sums segments.
+                with contextlib.suppress(OSError):
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    (run_dir / telemetry.COUNTS_FILE).write_text(json.dumps(fire_counts.snapshot()))
             reset_gate_write_verifier(token)
             rt.python_envs.close()  # the run's gate venvs end with the run
             rt.toolchain_cache.close()
@@ -663,6 +670,7 @@ def run(
         mode=mode,
         backend=backend,
     )
+    result = replace(result, hint_counts=fire_counts.snapshot())
     if level_table is not None:
         result = replace(
             result,

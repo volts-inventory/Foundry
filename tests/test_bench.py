@@ -110,3 +110,26 @@ def test_time_cap_is_judged_from_the_last_run_only(tmp_path: Path) -> None:
     s = bench.summarize_case(root)
     assert s["stopped_by_time_cap"] is False
     assert s["model_calls"] == 2
+
+
+def test_hint_counts_sum_across_resumed_segments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "local" / "dice"
+    segments = [{"test.shared_state": 2, "fix_stop.time": 1}, {"test.shared_state": 1}, None]
+
+    def fake_run(cmd: list[str], **kw: Any) -> Any:
+        counts = segments.pop(0)
+        if counts is not None:
+            calls = root / "state" / "calls" / "abc"
+            calls.mkdir(parents=True, exist_ok=True)
+            (calls / bench.HINT_COUNTS).write_text(json.dumps(counts))
+        return SimpleNamespace(returncode=3)
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+    for _ in range(3):  # the last segment dies before writing: nothing is summed twice
+        bench.main(["--mode", "local", "--cases", "dice", "--out-dir", str(tmp_path)])
+    want = {"fix_stop.time": 1, "test.shared_state": 3}
+    assert json.loads((root / "run.json").read_text())["hint_counts"] == want
+    assert bench.summarize_case(root)["hint_counts"] == want
+    assert "dice hints: fix_stop.time=1, test.shared_state=3" in capsys.readouterr().out

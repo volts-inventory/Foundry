@@ -77,6 +77,9 @@ class RunResult:
     table); None when the run used the single-backend routing."""
     levels: dict[str, dict[str, Any]] | None = None
     """The level table the run routed by (tier -> backend/model[/base_url])."""
+    hint_counts: dict[str, int] = field(default_factory=dict)
+    """How often each pattern hint, planner pinned constraint and fix-loop stop
+    rule fired in this process (:mod:`foundry.telemetry`)."""
 
     def summary(self) -> str:
         """A concise human-readable report of the run (printed by ``main``)."""

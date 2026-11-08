@@ -47,6 +47,7 @@ from pathlib import Path
 
 from foundry.canonical import content_digest
 from foundry.python_env import activation_env, build_python_env, site_packages
+from foundry.telemetry import counted
 
 from .runner import GroundingUnavailable
 from .sandbox import ground_untrusted
@@ -350,6 +351,7 @@ def undeclared_import_findings(
     return tuple(out)
 
 
+@counted("pydeps.undeclared_import")
 def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per third-party module the output reports missing
     (``ModuleNotFoundError``) that the project does not declare — no manifest, only
@@ -462,6 +464,7 @@ _UNAVAILABLE = re.compile(
 )
 
 
+@counted("pydeps.unavailable_requirement")
 def unavailable_requirement_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per requirement pip found no distribution for, naming the manifest
     line that declares it. Only explains a failure pip already reported: a stdlib

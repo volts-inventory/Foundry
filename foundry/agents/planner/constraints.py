@@ -18,6 +18,7 @@ from foundry.schemas.governance import ScopeDecision, ScopeTier
 from foundry.schemas.implementation import StackDecision, Ticket
 from foundry.schemas.product import CriteriaCritique
 from foundry.state.reducers import live_constraints
+from foundry.telemetry import count
 
 if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
@@ -107,7 +108,7 @@ def _stack_constraints(
     if stack is None or stack.language != "python":
         return []
     text = str(payload).lower()
-    return [
+    added = [
         c
         for c, words in (
             (_SQLITE_MEMORY_CONSTRAINT, ("sqlite",)),
@@ -117,6 +118,9 @@ def _stack_constraints(
         )
         if all(w in text for w in words)
     ]
+    for c in added:
+        count(f"planner.{c['id']}")
+    return added
 
 
 def ticket_owner(ticket: Ticket) -> str:

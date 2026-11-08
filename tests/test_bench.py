@@ -88,7 +88,9 @@ def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
 
     def fake_run(cmd: list[str], **kw: Any) -> Any:
         calls.append(cmd)
-        kw["stdout"].write(f"attempt {len(calls)}\n")
+        kw["stdout"].write(
+            f"attempt {len(calls)}\n" + ("time cap reached\n" if len(calls) == 1 else "")
+        )
         return SimpleNamespace(returncode=3 if len(calls) == 1 else 0)
 
     monkeypatch.setattr(bench.subprocess, "run", fake_run)
@@ -96,6 +98,6 @@ def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
     bench.main(["--mode", "local", "--cases", "dice", "--out-dir", str(tmp_path)])
     assert all(c[c.index("--time-cap") + 1] == "600" for c in calls)
     root = tmp_path / "local" / "dice"
-    assert (root / "run.log").read_text() == "attempt 1\nattempt 2\n"
+    assert (root / "run.log").read_text() == "attempt 1\ntime cap reached\nattempt 2\n"
     assert json.loads((root / "run.json").read_text())["exit_code"] == 0
     assert bench.summarize_case(root)["stopped_by_time_cap"] is False  # resumed to a pass

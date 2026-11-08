@@ -762,7 +762,8 @@ _RATE_LIMIT_MARKERS = (
     "timeout",
 )
 
-# A CLI subprocess killed at its wall-clock cap (cli_transports) already spent the
+# A CLI subprocess killed at its wall-clock cap (cli_transports), or a local
+# model call that hit its multi-hour HTTP timeout, already spent the
 # whole cap — up to FOUNDRY_CLI_TIMEOUT_S. Re-running the identical prompt on the
 # rate-limit budget (6 tries) silently burned 30+ minutes on one planner call, so
 # it gets its own budget of one retry and then fails closed.
@@ -772,6 +773,12 @@ _WALL_CLOCK_KILL_RETRIES = 1
 
 def _is_wall_clock_kill(exc: BaseException) -> bool:
     return _WALL_CLOCK_KILL_MARKER in str(exc).lower()
+
+
+def _is_local_timeout(exc: BaseException) -> bool:
+    """A local-server HTTP timeout: the openai client's 4h cap (APITimeoutError,
+    httpx ``*Timeout``) already elapsed, so it must not ride the rate-limit budget."""
+    return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -1545,7 +1552,7 @@ class ModelProviderProxy:
             except ToolsUnsupported:
                 raise
             except Exception as exc:
-                if _is_wall_clock_kill(exc):
+                if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):
                     if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:
                         raise ProxyUnavailable(
                             f"{exc} on {kill_attempt + 1} attempt(s); "

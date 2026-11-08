@@ -42,6 +42,7 @@ __all__ = [
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "pytest_bdd_binds",
     "stack_install",
     "stack_profile",
 ]
@@ -283,6 +284,11 @@ def bdd_runner_hint(language: str) -> str:
     """How ``language``'s standard Cucumber runner writes $FOUNDRY_BDD_REPORT ("" for
     a language with no Cucumber runner the gate reads: Python uses pytest-bdd)."""
     return BDD_RUNNERS.get(language, "")
+
+
+def pytest_bdd_binds(stack: StackDecision | None) -> bool:
+    """The trusted pytest-bdd harness runs the scenarios (Python with no ``bdd``)."""
+    return stack is None or (stack.language == "python" and not stack.bdd)
 
 
 PROFILES: dict[str, VerificationProfile] = {

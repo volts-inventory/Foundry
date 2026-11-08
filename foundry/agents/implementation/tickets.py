@@ -86,6 +86,7 @@ from foundry.execution.work_pool import (
     allocate_lineage_quotas,
 )
 from foundry.gates.bdd_scaffold import step_module, step_scaffold
+from foundry.gates.profiles import pytest_bdd_binds
 from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
@@ -1190,11 +1191,6 @@ _PYTEST_BDD_ARGS = (
 )
 
 
-def _pytest_bdd(stack: StackDecision | None) -> bool:
-    """The trusted pytest-bdd harness runs the scenarios (Python with no ``bdd``)."""
-    return stack is None or (stack.language == "python" and not stack.bdd)
-
-
 def scenario_rules(
     files: Sequence[str],
     scenarios: Mapping[str, Sequence[str]],
@@ -1234,7 +1230,7 @@ def scenario_rules(
                 else "Run the bdd command and confirm each of these scenarios passed."
             )
         )
-    elif _pytest_bdd(stack):
+    elif pytest_bdd_binds(stack):
         binder = step_module(files, ticket_id)
         if binder is not None:
             calls = " ".join(
@@ -1283,7 +1279,7 @@ def scenario_verify(
     """The ``verify`` entry that runs a pytest-bdd ticket's own scenarios: check its
     step module (:func:`step_module`) names its feature file(s), then run it."""
     binder = step_module(files, ticket_id)
-    if not scenarios or binder is None or not _pytest_bdd(stack):
+    if not scenarios or binder is None or not pytest_bdd_binds(stack):
         return {}
     test = stack.test if stack is not None and "pytest" in stack.test else "python -m pytest -q"
     targets = shlex.quote(binder)
@@ -1425,7 +1421,9 @@ def unwritten_ticket_files(
                 for p in failing[t.id]
             )
             for f in (
-                (binder,) if binder is not None and _pytest_bdd(stack) and binder in missing else ()
+                (binder,)
+                if binder is not None and pytest_bdd_binds(stack) and binder in missing
+                else ()
             )
         ]
         out.append(
@@ -1643,7 +1641,7 @@ def bdd_scaffold_spans(
     twice and passed values by ``return``."""
     binder = step_module(files, ticket_id)
     tests = (binder,) if binder is not None else ()
-    if not features or not tests or not _pytest_bdd(stack):
+    if not features or not tests or not pytest_bdd_binds(stack):
         return ()
     return tuple(
         f"PYTEST-BDD STEP SCAFFOLD for {t} — the exact skeleton of this step module: "

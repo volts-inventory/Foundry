@@ -68,11 +68,10 @@ from foundry.agents._common import (
     persist_prose,
     scope_directive,
 )
-from foundry.agents.implementation.tickets import _pytest_bdd
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
-from foundry.gates.profiles import bdd_runner_hint, stack_install
+from foundry.gates.profiles import bdd_runner_hint, pytest_bdd_binds, stack_install
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
@@ -2056,7 +2055,7 @@ def _own_scenario_bindings(
     Test gate fails every scenario as not executed. A test ticket carrying scenarios
     but no test module (e.g. the plan's own ``bdd-harness``, renamed) gets one too:
     the feature tickets count it as their binder, so without one nobody binds."""
-    if not _pytest_bdd(stack):
+    if not pytest_bdd_binds(stack):
         return list(tickets), []
     bound = {c for t in tickets if t.specialty is Specialty.TEST for c in t.scenario_ids}
     out: list[Ticket] = []
@@ -2108,7 +2107,7 @@ def _fold_test_bindings(
     criterion no code ticket owns) and a file-less acceptance-only ticket's. A test
     ticket left with no scenarios is dropped, its dependents rewired to its
     dependencies."""
-    if not _pytest_bdd(stack):
+    if not pytest_bdd_binds(stack):
         return list(tickets), []
     protected = set(stack_files(stack)) if stack is not None else set()
     deps = {t.id: t.depends_on for t in tickets}
@@ -2189,7 +2188,7 @@ def _one_step_module_per_ticket(
     (test_cart_routes.py, test_cart_service.py, ...) were each written as the same
     29k-char step module, every scenario run 4x. Helper modules a step module
     imports (test_helpers.py, ...) and stack-command files stay."""
-    if not _pytest_bdd(stack):
+    if not pytest_bdd_binds(stack):
         return list(tickets), []
     protected = set(stack_files(stack)) if stack is not None else set()
     out: list[Ticket] = []

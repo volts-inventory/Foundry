@@ -52,11 +52,14 @@ def run_case(
         "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
     ]  # fmt: skip
     env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
+    # Rerunning a case resumes its saved state, so its log and wall time carry on.
+    meta = root / "run.json"
+    before = json.loads(meta.read_text()).get("wall_s", 0.0) if meta.exists() else 0.0
     start = time.monotonic()
-    with (root / "run.log").open("w") as log:
+    with (root / "run.log").open("a") as log:
         code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
-    (root / "run.json").write_text(
-        json.dumps({"wall_s": round(time.monotonic() - start, 1), "exit_code": code})
+    meta.write_text(
+        json.dumps({"wall_s": round(before + time.monotonic() - start, 1), "exit_code": code})
     )
 
 
@@ -145,13 +148,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--cases", default="dice,todo,csv")
     ap.add_argument("--scope", choices=["auto", "demo", "standard"], default="demo")
-    ap.add_argument("--time-cap", type=int, default=120, help="minutes per case")
+    ap.add_argument(
+        "--time-cap",
+        type=int,
+        default=None,
+        help="minutes per case (default: 120 cloud, 600 with a local model)",
+    )
     ap.add_argument("--summarize-only", action="store_true")
     args = ap.parse_args(argv)
     cases = [c for c in args.cases.split(",") if c]
     unknown = [c for c in cases if c not in CASES]
     if unknown:
         ap.error(f"unknown cases: {', '.join(unknown)}")
+    if args.time_cap is None:
+        args.time_cap = 120 if args.mode == "cloud" else 600
     if not args.summarize_only:
         for case in cases:
             run_case(args.mode, args.backend, case, args.time_cap, args.out_dir, args.scope)

@@ -195,7 +195,7 @@ _CHECK_REFUSALS = 2
 _OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] = ContextVar(
     "foundry_opened_check", default=None)
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
-# The note of a session whose final tree no check judged (its budget was spent).
+# The note of a session whose final tree no check judged.
 CHECK_UNVERIFIED = "unverified"
 
 # The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
@@ -397,18 +397,22 @@ class ProxyAgentAdapter:
                 turns -= 1
         if not st.stopped:
             st.triage.append("turn budget exhausted before 'done' — partial work recorded")
-        if st.checker is not None and st.checker.left <= 0 and (
-                last := st.checker.cached(*_changes(st))) is not None and last.red:
-            # Red on the final tree itself: an edit after the last check is unjudged.
-            st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last check: "
-                             + " | ".join(last.yours[:6])[:1500])
-        elif st.checker is not None and st.checker.cached(*_changes(st)) is None:
-            # Not a stop: the wave check judges the tree as for any session.
-            st.triage.append(f"{CHECK_UNVERIFIED}: the session's last edits were never "
-                             "checked (no check left to run on them)")
-
         after = walk_worktree(worktree)
         authored, deleted, skipped_binary = changed_files(before, after)
+        if (c := st.checker) is not None:
+            last = c.cached(authored, deleted)
+            if last is not None and last.red and c.left <= 0:
+                # Red on the final tree itself: an edit after the last check is unjudged.
+                st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last "
+                                 "check: " + " | ".join(last.yours[:6])[:1500])
+            elif last is None:
+                # Not a stop: the wave check judges the tree as for any session.
+                why = ("the gates could not judge them (infra)"
+                       if c.unjudged(authored, deleted) else
+                       "no check was left to run on them" if c.left <= 0 else
+                       "the session ended without checking them")
+                st.triage.append(f"{CHECK_UNVERIFIED}: the session's last edits were never "
+                                 f"checked ({why})")
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:
             payload["deleted"] = deleted
@@ -416,7 +420,8 @@ class ProxyAgentAdapter:
             json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
         )
 
-        notes = st.triage or [st.summary.strip()[:500] or "run completed with no summary"]
+        summary = st.summary.strip()[:500]
+        notes = [*([summary] if summary else []), *st.triage] or ["run completed with no summary"]
         notes += [
             f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
         ]

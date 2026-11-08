@@ -187,6 +187,82 @@ def test_install_failure_is_build_error_with_findings(tmp_path: Path, monkeypatc
     assert not (tmp_path / "built").exists()  # build never ran
 
 
+def _js_tree(root: Path, lock: str = "v1", src: str = "a") -> Path:
+    (root / "src").mkdir(parents=True)
+    (root / "package.json").write_text('{"name": "app", "dependencies": {"dep": "1"}}')
+    (root / "package-lock.json").write_text(lock)
+    (root / "src" / "index.ts").write_text(src)
+    return root
+
+
+def _counting_install(counter: Path, tail: str = "") -> str:
+    return (
+        f"echo run >> {shlex.quote(str(counter))}; mkdir -p node_modules/dep/bin; "
+        "echo ok > node_modules/dep/index.js; ln -s ../dep/index.js node_modules/dep/bin/x" + tail
+    )
+
+
+def _installs(counter: Path) -> int:
+    return len(counter.read_text().splitlines()) if counter.exists() else 0
+
+
+def test_js_install_is_reused_for_the_same_install_inputs(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
+    monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
+    counter = tmp_path / "count"
+    gate = BuildGate(
+        cmd=("/bin/sh", "-c", "grep -qx ok node_modules/dep/index.js"),
+        install_cmd=_counting_install(counter),
+    )
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            first = gate.execute(_js_tree(tmp_path / "w1"))
+            # Only plain sources differ: the install's inputs are the same.
+            wd2 = _js_tree(tmp_path / "w2", src="b")
+            second = gate.execute(wd2)
+            (wd2 / "node_modules" / "dep" / "index.js").write_text("tampered")
+            third = gate.execute(_js_tree(tmp_path / "w3"))
+            relocked = gate.execute(_js_tree(tmp_path / "w4", lock="v2"))
+    finally:
+        cache.close()
+    assert _installs(counter) == 2  # w1 and the changed lockfile only
+    assert [o.structured["install_cache"] for o in (first, second, third, relocked)] == [
+        "miss",
+        "hit",
+        "hit",
+        "miss",
+    ]
+    assert all(gate.decide(o) is GateStatus.PASS for o in (first, second, third, relocked))
+    assert second.structured["install_cmd"] == gate.install_cmd
+    assert (wd2 / "node_modules" / "dep" / "bin" / "x").is_symlink()
+    assert not cache.installs.is_relative_to(cache.root)  # never bound into a step
+
+
+def test_js_install_not_reused_after_failure_or_writes_outside_node_modules(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", "inprocess")
+    monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
+    failing, codegen = tmp_path / "failing", tmp_path / "codegen"
+    gates = {
+        failing: BuildGate(cmd=("true",), install_cmd=_counting_install(failing, "; exit 3")),
+        codegen: BuildGate(
+            cmd=("true",), install_cmd=_counting_install(codegen, "; echo g > src/gen.ts")
+        ),
+    }
+    cache = sandbox.ToolchainCache()
+    try:
+        with sandbox.toolchain_scope(cache):
+            for counter, gate in gates.items():
+                for i in range(2):
+                    obs = gate.execute(_js_tree(tmp_path / f"{counter.name}{i}"))
+                    assert obs.structured["install_cache"] == "miss"
+    finally:
+        cache.close()
+    assert _installs(failing) == 2 and _installs(codegen) == 2
+
+
 def test_build_decide_shapes() -> None:
     from foundry.gates.runner import observe
 

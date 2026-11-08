@@ -13,6 +13,12 @@ optional ``install_cmd`` (the stack's dependency install, e.g. ``npm ci``) runs
 FIRST in its own confined invocation, the only one that keeps network access; the
 build then runs offline over what the install wrote into the workdir.
 
+A JS install (a tree with a ``package.json``) is reused within the run: its result
+(every ``node_modules`` and any lockfile it wrote) is stored, from a successful run
+only, under a digest of the install line and the tree's install inputs, in the run's
+``ToolchainCache.installs`` — a host-side directory no step is bound to. A later build
+with the same digest gets a copy instead of re-running the install.
+
 A Python build that declares dependencies installs them with pip into a per-build
 venv instead (``pydeps``): same single networked step, and a failed pip install is a
 FAIL when pip blames the project's declaration, else ERROR.
@@ -29,14 +35,23 @@ Fail-closed: a missing build tool — or an unavailable sandbox — raises
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import io
+import json
+import os
 import re
+import shutil
+import stat
 import sys
+import tempfile
 import tokenize
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from foundry.canonical import content_digest
+from foundry.fs import force_rmtree
 from foundry.schemas.gates import GateStatus, VerdictClass
 
 from .runner import ZoneAObservation, observe
@@ -44,6 +59,7 @@ from .sandbox import ground_untrusted, toolchain_scope
 
 if TYPE_CHECKING:
     from .pydeps import PythonBuildEnv
+    from .sandbox import ToolchainCache
 
 __all__ = [
     "MISSING_BINARY_EXIT_CODES",
@@ -193,6 +209,153 @@ def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
     return tuple(reversed(tail))
 
 
+# ---- the run's JS installs, reused by builds with the same install inputs ---------
+
+_LOCKFILES = frozenset({"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock"})
+_INSTALL_SCRIPTS = ("preinstall", "install", "postinstall", "prepare")
+# Plain sources an install reads only through the project's own lifecycle scripts
+# (when one is declared, the whole tree is keyed). Every other file is keyed: the
+# manifests, lockfiles and configs, and inputs a dependency's postinstall may read
+# (Prisma's generate reads schema.prisma).
+_SOURCE_SUFFIXES = frozenset(
+    {
+        ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts", ".vue", ".svelte",
+        ".css", ".scss", ".sass", ".less", ".html", ".md",
+    }
+)  # fmt: skip
+
+
+def _scan(root: Path) -> tuple[dict[str, os.stat_result], list[str]]:
+    """Every file and symlink outside ``node_modules`` and ``.git`` (lstat), and the
+    tree's outermost ``node_modules`` entries."""
+    files: dict[str, os.stat_result] = {}
+    modules: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel = os.path.relpath(dirpath, root)
+        descend = []
+        for name in (*dirnames, *filenames):
+            path = os.path.join(dirpath, name)
+            relpath = os.path.normpath(os.path.join(rel, name))
+            if name == "node_modules":
+                modules.append(relpath)
+            elif name in dirnames and not os.path.islink(path):
+                if name != ".git":
+                    descend.append(name)
+            else:
+                files[relpath] = os.lstat(path)
+        dirnames[:] = descend
+    return files, modules
+
+
+def _read_regular(path: Path) -> bytes | None:
+    """``path``'s bytes when it is a regular file (never through a symlink, never
+    blocking on a FIFO the tree planted), else None."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        return f.read() if stat.S_ISREG(os.fstat(fd).st_mode) else None
+
+
+def _runs_install_script(manifest: Path) -> bool:
+    try:
+        scripts = json.loads(_read_regular(manifest) or b"").get("scripts") or {}
+        return any(k in scripts for k in _INSTALL_SCRIPTS)
+    except (ValueError, AttributeError, TypeError):
+        return True  # unparseable: assume the install runs the project's own code
+
+
+def install_key(install_cmd: str, workdir: Path, files: Mapping[str, os.stat_result]) -> str:
+    """What a JS install's result is a function of: the install line and every file
+    it may read (see ``_SOURCE_SUFFIXES``)."""
+    full = any(
+        _runs_install_script(workdir / rel)
+        for rel in files
+        if os.path.basename(rel) == "package.json"
+    )
+    keyed: dict[str, str] = {}
+    for rel, st in sorted(files.items()):
+        if not full and os.path.splitext(rel)[1] in _SOURCE_SUFFIXES:
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            keyed[rel] = "link:" + os.readlink(workdir / rel)
+        else:
+            data = _read_regular(workdir / rel)
+            keyed[rel] = "special" if data is None else hashlib.sha256(data).hexdigest()
+    return content_digest({"install_cmd": install_cmd, "files": keyed})
+
+
+def _sig(st: os.stat_result | None) -> tuple[int, int, int] | None:
+    return None if st is None else (st.st_mode, st.st_size, st.st_mtime_ns)
+
+
+def _links_into(tree: Path, workdir: Path) -> bool:
+    roots = {str(workdir), os.path.realpath(workdir)}
+    for dirpath, dirnames, filenames in os.walk(tree):
+        for name in (*dirnames, *filenames):
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):
+                target = os.readlink(path)
+                if any(target == r or target.startswith(r + os.sep) for r in roots):
+                    return True
+    return False
+
+
+def _store_install(
+    installs: Path, key: str, workdir: Path, before: Mapping[str, os.stat_result]
+) -> None:
+    """Store what a successful install wrote — unless it wrote anything a copy of its
+    ``node_modules`` and lockfiles would not restore (generated sources, a symlinked
+    ``node_modules``, a link to this workdir's own path)."""
+    after, modules = _scan(workdir)
+    changed = sorted(
+        r for r in before.keys() | after.keys() if _sig(before.get(r)) != _sig(after.get(r))
+    )
+    if any(
+        os.path.basename(r) not in _LOCKFILES
+        or r not in after
+        or not stat.S_ISREG(after[r].st_mode)
+        for r in changed
+    ) or any(not stat.S_ISDIR(os.lstat(workdir / m).st_mode) for m in modules):
+        return
+    tmp = Path(tempfile.mkdtemp(dir=installs, prefix=".store-"))
+    # The install itself passed: a store that cannot be written (disk full, or a
+    # concurrent build's identical store renamed in first) only costs later reuse.
+    with contextlib.suppress(OSError):
+        try:
+            for rel in modules:
+                shutil.copytree(workdir / rel, tmp / "tree" / rel, symlinks=True)
+            for rel in changed:
+                (tmp / "tree" / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(workdir / rel, tmp / "tree" / rel, follow_symlinks=False)
+            if not _links_into(tmp, workdir):
+                (tmp / "manifest.json").write_text(json.dumps([*modules, *changed]))
+                os.rename(tmp, installs / key)
+        finally:
+            if tmp.exists():
+                force_rmtree(tmp)
+
+
+def _restore_install(stored: Path, workdir: Path) -> bool:
+    """Copy a stored install into ``workdir``; False, writing nothing, when an entry
+    would land through a symlink (the copy runs host-side, outside the sandbox)."""
+    entries: list[str] = json.loads((stored / "manifest.json").read_text(encoding="utf-8"))
+    root = workdir.resolve()
+    for rel in entries:
+        dst = workdir / rel
+        if dst.is_symlink() or not dst.parent.resolve().is_relative_to(root):
+            return False
+    for rel in entries:
+        src, dst = stored / "tree" / rel, workdir / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            shutil.copytree(src, dst, symlinks=True)
+        else:
+            shutil.copy2(src, dst, follow_symlinks=False)
+    return True
+
+
 class BuildGate:
     """PASS iff the install step (when configured) and the pinned build command exit 0."""
 
@@ -242,10 +405,33 @@ class BuildGate:
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
 
     def execute(self, workdir: Path) -> ZoneAObservation:
-        with toolchain_scope():  # the install's downloads reach the build step
-            return self._execute(workdir)
+        with toolchain_scope() as cache:  # the install's downloads reach the build step
+            return self._execute(workdir, cache)
 
-    def _execute(self, workdir: Path) -> ZoneAObservation:
+    def _install(
+        self, install_cmd: str, workdir: Path, cache: ToolchainCache, structured: dict[str, object]
+    ) -> tuple[int, str, str]:
+        before, modules = _scan(workdir)
+        manifest = before.get("package.json")
+        key = None
+        if manifest is not None and stat.S_ISREG(manifest.st_mode) and not modules:
+            key = install_key(install_cmd, workdir, before)
+            stored = cache.installs / key
+            if stored.is_dir() and _restore_install(stored, workdir):
+                structured["install_cache"] = "hit"
+                return 0, f"reused this run's install {key[:16]} (skipped `{install_cmd}`)\n", ""
+        structured["install_cache"] = "miss"
+        rc, out, err = ground_untrusted(
+            ("/bin/sh", "-c", install_cmd),
+            workdir,
+            network=True,
+            timeout_s=self._install_timeout_s,
+        )
+        if rc == 0 and key is not None:
+            _store_install(cache.installs, key, workdir, before)
+        return rc, out, err
+
+    def _execute(self, workdir: Path, cache: ToolchainCache) -> ZoneAObservation:
         structured: dict[str, object] = {"cmd": list(self.cmd)}
         codes: tuple[int, ...] = ()
         out = err = ""
@@ -265,12 +451,7 @@ class BuildGate:
                 )
         elif self.install_cmd is not None:
             structured["install_cmd"] = self.install_cmd
-            rc, out, err = ground_untrusted(
-                ("/bin/sh", "-c", self.install_cmd),
-                workdir,
-                network=True,
-                timeout_s=self._install_timeout_s,
-            )
+            rc, out, err = self._install(self.install_cmd, workdir, cache, structured)
             codes = (rc,)
             if rc != 0:
                 return observe(

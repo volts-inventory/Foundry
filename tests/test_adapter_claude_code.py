@@ -4,7 +4,7 @@ Covers, without a real ``claude`` binary (injectable exec seam, same discipline
 as the proxy's CliRunner):
 
 * the authored tree slice is observed as a ``full-file-snapshot`` blob that
-  ``gate_wiring._diff_files`` materializes (additions AND modifications);
+  ``gate_wiring.diffs._diff_ops`` materializes (additions AND modifications);
 * deletions / binary files are surfaced as triage, never silently dropped;
 * turns/model/cost are observed from the JSON envelope; a hard-kill records a
   budget-breach triage instead of raising;

@@ -18,7 +18,7 @@ Contract mapping:
 * **diff** — the worktree is walked BEFORE and AFTER the run; the changed file
   set is recorded as a ``full-file-snapshot`` blob
   (``{"kind": "full-file-snapshot", "files": {path: content}}``) — the exact
-  body shape ``gate_wiring._diff_files`` materializes directly, which is what
+  body shape ``gate_wiring.diffs._diff_ops`` materializes directly, which is what
   lets MODIFIED files integrate (the additions-only unified-diff parser is not
   in this path). Deletions ride the snapshot's ``deleted`` list (integration
   unlinks them); non-UTF-8 (binary) files are surfaced as triage notes, not

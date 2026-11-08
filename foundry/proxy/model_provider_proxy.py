@@ -402,7 +402,7 @@ def _seeded(request: dict[str, Any], profile: Mapping[str, Any]) -> dict[str, An
 # ---- Local thinking (local tiers only) -------------------------------------------
 #
 # FOUNDRY_LOCAL_THINKING: off | on | agent. `agent` thinks only in coding-agent
-# sessions (the proxy-agent / raw-react closures in cli.py, node "junior_engineer")
+# sessions (the proxy-agent / raw-react closures in cli/wiring.py, node "junior_engineer")
 # and answers planner/judgment calls directly. Unset: on for Qwen3.x thinking
 # models (their cards say thinking on for agentic work; Qwen3.8 warns that low
 # effort in agentic loops causes retries), off for every other model.

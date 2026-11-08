@@ -134,7 +134,7 @@ def test_a_manifest_write_failure_never_changes_the_build_result(
     def boom(*_: object, **__: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("foundry.cli.write_manifest", boom)
+    monkeypatch.setattr("foundry.cli.runner.write_manifest", boom)
     out = tmp_path / "generated"
     result = run(
         "build a tiny URL-shortener service", thread_id="cli-out-manifest-fail", output_dir=str(out)
@@ -159,7 +159,7 @@ def test_a_run_halted_in_planning_has_no_draft_status(monkeypatch: pytest.Monkey
     import foundry.cli as cli
 
     # An empty plan fails the Spec gate before any ticket is built.
-    monkeypatch.setattr(cli, "_SCRIPTS", {"You are the Planner": "{}"})
+    monkeypatch.setattr(cli.doubles, "_SCRIPTS", {"You are the Planner": "{}"})
     result = run("build a tiny service", thread_id="cli-status-plan-halt", max_fix_attempts=1)
 
     assert result.passed is False and result.gate_statuses.get("spec") is GateStatus.FAIL
@@ -177,8 +177,8 @@ def test_a_draft_tree_that_cannot_be_written_is_tried_once_without_a_best(
         calls.append(kw.get("best"))
         raise ValueError("unparseable diff")
 
-    monkeypatch.setattr(cli, "_draft_best", lambda *_: None)
-    monkeypatch.setattr(cli, "_write_output_tree", boom)
+    monkeypatch.setattr(cli.output, "_draft_best", lambda *_: None)
+    monkeypatch.setattr(cli.output, "_write_output_tree", boom)
     root, text = cli._write_draft_on_halt(
         {"gates": []},
         str(tmp_path),

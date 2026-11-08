@@ -201,13 +201,23 @@ card's values; other servers take them from the request).
 `FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
 local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
 
-Local Qwen3.x models think (`reasoning_effort: xhigh`) on every call by default —
-the cards say thinking on for agentic work, and Qwen3.8 warns low effort causes
-retries. Each turn's reasoning is sent back with that turn on the next call
-(Qwen's "preserve thinking"), never parsed as the answer, and a thinking call gets
-up to 40960 output tokens. `FOUNDRY_LOCAL_THINKING=off` turns it off, `agent`
-keeps it only for the coding sessions (planner and judgment calls answer directly),
-`on` forces it for any local model.
+Local Qwen3.x models think on every call by default: one-shot calls (the plan, a
+verdict) at `reasoning_effort: xhigh` with up to 98304 output tokens, and agent
+turns (one of many in a coding session) at `medium` with up to 40960. A reply cut
+off at the cap is retried one level lower (xhigh → medium → off). Each turn's
+reasoning is sent back with that turn on the next call (Qwen's "preserve
+thinking") and never parsed as the answer. `FOUNDRY_LOCAL_THINKING=off` turns it
+off, `agent` keeps it only for the coding sessions, `on` forces it for any local
+model. Serve the model at a 128K context (`OLLAMA_CONTEXT_LENGTH=131072`).
+
+**Self-check.** A coding session on the proxy-agent loop (local and hybrid tiers,
+and the API backends) has a `check` tool that runs the real Build and Test gates
+on a gate-shaped copy of its tree, scoped to its ticket's scenarios plus those
+already built, and reports its own failures apart from ones that were red before
+it started. It runs once when the session opens; `done` is refused while the
+newest check on the current tree is red (at most twice), and a session that runs
+out of checks still red is escalated in hybrid. `FOUNDRY_SELF_CHECK=0` turns it
+off; `local` keeps it for local tiers only.
 
 A local pass costs only wall-clock time, so in local mode (and custom levels that
 are all local) the build-side fix loops **fix until the time cap**: each wave
@@ -243,7 +253,15 @@ Gate, Vault) with the live log and Tickets tab, then download the repo as a
 **.zip**. Each build is a floor; the elevator reopens earlier builds and their
 logs, and REPO browses a build's files. The backend comes from
 `FOUNDRY_MODEL_BACKEND` (as in the CLI); the New-build dialog's collapsed
-Settings hold the per-specialty worker limits and a token cap.
+Settings hold the per-specialty worker limits and a token cap. The Settings panel
+sets the model mode, levels and local server (defaulting to `FOUNDRY_LOCAL_URL` /
+`FOUNDRY_LOCAL_MODEL`), caps, and an Advanced fold for local thinking, self-check,
+native tools, fix-until-cap and max slots ("auto" leaves each to its env default).
+The live log shows the run's progress lines (model calls, self-check red/green,
+retries, context-truncation warnings, escalations, waits) and, for local and
+hybrid builds, each agent action. A floor that doesn't ship shows its
+DRAFT-STATUS in the halt report and as `DRAFT-STATUS.md` in REPO; **Retry with…**
+can resume it with more time, tokens or fix attempts, or on another model mode.
 
 ```bash
 python -m webapp.server                                  # http://localhost:8765
@@ -304,6 +322,8 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `FOUNDRY_HYBRID_DIAGNOSE` | `0` skips the cloud diagnosis before a local repair attempt (hybrid) | on |
 | `FOUNDRY_LOCAL_SAMPLING` | Local sampling: `key=value,...` override or `off` (greedy) | per-model profile |
 | `FOUNDRY_LOCAL_THINKING` | Local thinking: `on`, `off`, or `agent` (coding sessions only) | on for Qwen3.x |
+| `FOUNDRY_SELF_CHECK` | In-session `check` tool: `0`/`off`, or `local` (local tiers only) | on |
+| `FOUNDRY_NATIVE_TOOLS` | Proxy-agent actions as native tool calls (falls back to JSON) | off |
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |

@@ -9,7 +9,7 @@ You diagnose a failed Foundry bench case and fix the cause in Foundry itself, ne
 the generated app.
 
 Rules:
-- First, in your worktree: `git reset --hard planner-delta` (worktrees branch from main).
+- First, in your worktree: `git reset --hard <branch>` with the branch your prompt names (worktrees branch from main).
 - Use git only inside your worktree. Never checkout/switch/reset in the main checkout
   /Users/kingjosh/Projects/Foundry.
 - Never run scripts/bench.py or the slow suite.
@@ -26,9 +26,10 @@ Work from evidence and answer:
 - What did each fix pass, restart and reviewer get told, and could a weak model act on
   it? Check the fix_passes ledger and junior_engineer._fix_summary inputs.
 - Did the fix-loop machinery misbehave? That is keep_best/restore_diff,
-  failure_clusters, restart_set, FixPolicy and fix_stop in foundry/graph/gate_wiring.py.
+  failure_clusters, restart_set, FixPolicy and fix_stop in foundry/graph/gate_wiring/ (ledger.py, restarts.py,
+  best.py, fix_policy.py).
 - Is it a Foundry bug, a missing deterministic hint or constraint (foundry/gates/test.py
-  notes, foundry/agents/planner.py stack constraints), or model variance Foundry can't
+  notes, foundry/agents/planner/constraints.py stack constraints), or model variance Foundry can't
   reasonably fix?
 
 Fix the most significant Foundry-side cause generally, not for this one app, and add a

@@ -535,3 +535,19 @@ def test_request_title_names_a_floor_from_its_request():
     assert t("  ") == "Untitled build"
     long = t("a " + "very " * 30 + "long request")
     assert long.endswith("…") and len(long) <= 49 and "  " not in long
+
+
+def test_static_refuses_sibling_prefix_dir(env, monkeypatch) -> None:
+    # A sibling ``static2`` shares the string prefix of ``static``: it must not be served.
+    static = env.tmp / "static"
+    static.mkdir()
+    (env.tmp / "static2").mkdir()
+    (env.tmp / "static2" / "secret.txt").write_text("secret")
+    monkeypatch.setattr(server, "_STATIC", static)
+    conn = http.client.HTTPConnection("127.0.0.1", env.port, timeout=30)
+    conn.request("GET", "/static/../static2/secret.txt")
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    assert resp.status == 404
+    assert b"secret" not in body

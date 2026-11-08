@@ -212,9 +212,9 @@ def _is_delta(request: dict[str, Any]) -> bool:
 def test_a_failed_plan_check_is_fixed_by_one_delta_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from foundry.agents import planner
+    from foundry.agents.planner import delta
 
-    monkeypatch.setattr(planner, "_SHOW_ALL_TICKETS", 0)  # slice as a big plan would
+    monkeypatch.setattr(delta, "_SHOW_ALL_TICKETS", 0)  # slice as a big plan would
     cas = ArtifactStore()
     rt, tx = runtime_for(_two_implementers(), _DROP_CONTRACTS_1, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
@@ -271,11 +271,11 @@ def test_an_upsert_merges_into_a_shown_ticket_by_id() -> None:
 
 
 def test_an_upsert_of_a_summarized_ticket_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    from foundry.agents import planner
+    from foundry.agents.planner import delta
 
     # In a big plan MH-1's finding names no ticket, so T-002 goes only as a summary:
     # replacing it would overwrite fields and scenarios the model never saw.
-    monkeypatch.setattr(planner, "_SHOW_ALL_TICKETS", 0)
+    monkeypatch.setattr(delta, "_SHOW_ALL_TICKETS", 0)
     fix = _delta(
         tickets=[
             {

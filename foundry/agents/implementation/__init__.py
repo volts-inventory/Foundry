@@ -1,7 +1,7 @@
 """Implementation layer (agents.md Layer 3) — node factories.
 
 * :func:`make_engineering_node` — the planner's tickets -> tasks, built wave by
-  wave through a per-specialty-limited pool (``tickets.py``).
+  wave through a per-specialty-limited pool (``tickets/``).
 * :func:`make_fixer_node` — one coding session that repairs the integrated tree
   after a failed build/test gate.
 

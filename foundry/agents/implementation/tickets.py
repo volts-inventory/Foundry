@@ -48,7 +48,6 @@ from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import (
     FIXER_NODE_ID,
     _adapter_name,
-    _apply_overlay,
     _failed_gates,
     _finalize_diff,
     _fix_summary,
@@ -87,6 +86,7 @@ from foundry.execution.work_pool import (
 )
 from foundry.gates.bdd_scaffold import step_module, step_scaffold
 from foundry.gates.profiles import pytest_bdd_binds
+from foundry.graph.gate_wiring import apply_overlay
 from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
@@ -2023,7 +2023,7 @@ def make_engineering_node(
             tier = etask.packet.task.get("tier")
             sandbox = _sandbox_for(rt, source_dir, snapshot_store, str(tier) if tier else None)
             if overlay:
-                _apply_overlay(sandbox.worktree, overlay)
+                apply_overlay(sandbox.worktree, overlay)
             bases[str(etask.packet.task["id"])] = sandbox.snapshot()
             return sandbox
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -77,3 +79,36 @@ def test_summarize_only_writes_summary(tmp_path: Path, capsys: pytest.CaptureFix
     data = json.loads((tmp_path / "local" / "summary.json").read_text())
     assert list(data) == ["dice"]
     assert "dice" in capsys.readouterr().out
+
+
+def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **kw: Any) -> Any:
+        calls.append(cmd)
+        kw["stdout"].write(
+            f"attempt {len(calls)}\n" + ("time cap reached\n" if len(calls) == 1 else "")
+        )
+        return SimpleNamespace(returncode=3 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(bench.subprocess, "run", fake_run)
+    bench.main(["--mode", "local", "--cases", "dice", "--out-dir", str(tmp_path)])
+    bench.main(["--mode", "local", "--cases", "dice", "--out-dir", str(tmp_path)])
+    assert all(c[c.index("--time-cap") + 1] == "600" for c in calls)
+    root = tmp_path / "local" / "dice"
+    segments = (root / "run.log").read_text().split(bench.RUN_MARK)
+    assert [seg.strip() for seg in segments] == ["", "attempt 1\ntime cap reached", "attempt 2"]
+    assert json.loads((root / "run.json").read_text())["exit_code"] == 0
+    assert bench.summarize_case(root)["stopped_by_time_cap"] is False  # resumed to a pass
+
+
+def test_time_cap_is_judged_from_the_last_run_only(tmp_path: Path) -> None:
+    root = _case(tmp_path, 3, True)
+    (root / "run.log").write_text(
+        LOG + f"\n{bench.RUN_MARK}\nstopped: something else failed\n"
+    )
+    s = bench.summarize_case(root)
+    assert s["stopped_by_time_cap"] is False
+    assert s["model_calls"] == 2

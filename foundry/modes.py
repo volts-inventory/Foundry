@@ -41,11 +41,13 @@ from foundry.proxy.model_provider_proxy import ModelProviderProxy, ProviderTrans
 
 __all__ = [
     "DEFAULT_FIX_ATTEMPTS",
+    "DEFAULT_FIX_UNTIL_CAP",
     "LEVEL_TIERS",
     "LOCAL_BACKEND",
     "MODEL_MODES",
     "Level",
     "build_level_proxy",
+    "escalation_tier",
     "level_lineage",
     "local_tiers",
     "parse_levels",
@@ -59,6 +61,10 @@ LEVEL_TIERS = ("T1", "T2", "T3")
 # Repair rounds per mode. Extra rounds plateau fast (fix loops stall after ~2-3 passes),
 # so local gets no more than cloud despite the weaker model.
 DEFAULT_FIX_ATTEMPTS: dict[str, int] = {"cloud": 3, "hybrid": 3, "local": 3}
+# Whether the build-side fix loops run until the time cap (a dead-end rule or too
+# little time left stops them) instead of max_fix_attempts. On by default where the
+# model time is free: a local pass costs only wall-clock time.
+DEFAULT_FIX_UNTIL_CAP: dict[str, bool] = {"cloud": False, "hybrid": False, "local": True}
 
 _MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$")
 
@@ -165,6 +171,16 @@ def resolve_levels(
 
 def local_tiers(levels: Mapping[str, Level]) -> frozenset[str]:
     return frozenset(t for t, lvl in levels.items() if lvl.local)
+
+
+def escalation_tier(levels: Mapping[str, Level]) -> str | None:
+    """The cloud level a local ticket escalates to once (the strongest cloud tier),
+    or None when the table is all cloud or all local: either way there is no
+    stronger level to escalate to."""
+    cloud = [t for t in LEVEL_TIERS if t in levels and not levels[t].local]
+    if not cloud or len(cloud) == len(levels):
+        return None
+    return cloud[0]
 
 
 def level_lineage(levels: Mapping[str, Level]) -> LineageMap:

@@ -45,3 +45,13 @@ def test_persona_renders_after_constraints_before_task() -> None:
     assert i_con < i_role < i_task
     assert "MUST validate input" in prompt
     assert "SENIOR BACKEND ENGINEER" in prompt
+
+
+def test_harness_persona_writes_no_step_definitions() -> None:
+    from foundry.schemas.implementation import StackDecision
+
+    stack = StackDecision(language="go", bdd="go test ./bdd")
+    harness = persona_for("test", stack, harness=True)
+    assert "Write no step definitions" in harness and "`go test ./bdd`" in harness
+    assert "Write the step definitions" not in harness
+    assert "Write the step" in persona_for("test", stack)

@@ -139,6 +139,27 @@ def test_zone_a_exception_is_signed_error(tmp_path, runner, verifier):
     _assert_admitted(r, verifier)  # ERROR is still a trusted, foldable record
 
 
+class _HungGate(_ExplodingGate):
+    def execute(self, workdir: Path):
+        import subprocess
+
+        argv = ["/usr/bin/sandbox-exec", "-p", "(version 1)", "--",
+                "/bin/sh", "-c", 'npx cucumber-js --format "message:$R"']
+        raise subprocess.TimeoutExpired(
+            argv, 600.0, f"{workdir}/features ok\n7 scenarios (7 passed)\n".encode(), b"")
+
+
+def test_a_hung_step_names_its_command_and_last_output(tmp_path, runner, verifier):
+    # The fixer was handed the whole sandbox-exec argv and no output.
+    r = runner.run(_HungGate(), "task/1", _seq("build", "task/1"), tmp_path)
+    assert r.status is GateStatus.ERROR
+    head, *tail = r.findings
+    assert head.startswith('`npx cucumber-js --format "message:$R"` did not exit within 600s')
+    assert "a server" in head and "sandbox-exec" not in head
+    assert tail == ["./features ok", "7 scenarios (7 passed)"]
+    _assert_admitted(r, verifier)
+
+
 def test_per_branch_fail_does_not_latch(tmp_path, runner, records, verifier):
     _write(tmp_path, "test_bad.py", "def test_bad():\n    assert False\n")
     r = runner.run(TestGate(), "task/7", _seq("test", "task/7"), tmp_path)
@@ -159,7 +180,7 @@ def test_build_without_sandbox_is_error_not_unsandboxed(tmp_path, runner, verifi
     from foundry.gates import sandbox
 
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    monkeypatch.setattr(sandbox, "unshare_available", lambda: False)
+    monkeypatch.setattr(sandbox, "sandbox_backend", lambda: None)
     r = runner.run(BuildGate(), "task/1", _seq("build", "task/1"), tmp_path)
     assert r.status is GateStatus.ERROR
 

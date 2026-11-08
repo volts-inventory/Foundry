@@ -47,6 +47,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from foundry.gates.pydeps import PythonEnvCache
+from foundry.gates.sandbox import ToolchainCache
 from foundry.state.seq import EpochCounter, Seq
 
 if TYPE_CHECKING:
@@ -97,6 +99,12 @@ class AgentRuntime:
     # compatible with the synthetic-resolver tests). The cli / factory_graph wire
     # rt.cas.resolve / rt.cas.resolve_blob as the real materialization seams.
     cas: ArtifactStore | None = None
+    # The run's gate venvs, one per manifest digest (foundry.gates.pydeps): the wave
+    # checks and the final gate install identical Python dependencies once.
+    python_envs: PythonEnvCache = field(default_factory=PythonEnvCache)
+    # The run's downloaded non-Python dependencies (Go modules, cargo registry, ...),
+    # shared by every build's gate steps (foundry.gates.sandbox.toolchain_scope).
+    toolchain_cache: ToolchainCache = field(default_factory=ToolchainCache)
 
     def seq(
         self,

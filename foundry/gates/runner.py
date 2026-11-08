@@ -56,6 +56,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Protocol
@@ -234,6 +235,42 @@ def run_grounding_command(
     )
 
 
+_SHELLS = frozenset({"/bin/sh", "sh", "/bin/bash", "bash"})
+
+
+def _user_command(argv: str | bytes | list[str] | tuple[str, ...]) -> str:
+    """The command a gate step ran, without the sandbox wrapper around it: the
+    ``sh -c`` script, else what follows the last ``--``, else the whole argv."""
+    if isinstance(argv, (str, bytes)):
+        return argv if isinstance(argv, str) else argv.decode("utf-8", "replace")
+    args = [str(a) for a in argv]
+    for i in range(len(args) - 2, 0, -1):
+        if args[i] == "-c" and args[i - 1] in _SHELLS:
+            return args[i + 1]
+    if "--" in args:
+        args = args[len(args) - args[::-1].index("--"):]
+    return shlex.join(args)
+
+
+def timeout_findings(exc: subprocess.TimeoutExpired, workdir: Path) -> tuple[str, ...]:
+    """A killed, hung gate step for the fixer: which command, why it likely hung, and
+    the last output lines it printed before the kill."""
+    from .build import output_tail
+
+    def text(b: bytes | str | None) -> str:
+        return b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")
+
+    tail = output_tail(text(exc.output), text(exc.stderr), workdir)
+    return (
+        f"`{_user_command(exc.cmd)}` did not exit within {exc.timeout:.0f}s and was "
+        "killed (an ERROR, never latched). If the output shows the run finished, "
+        "something the code started keeps the process alive — a server, an open "
+        "socket or handle, a timer, a watch mode: stop it when the run ends; "
+        + (f"last {len(tail)} output line(s):" if tail else "it printed no output."),
+        *tail,
+    )
+
+
 class GateImpl(Protocol):
     """A deterministic gate implementation, split along the two-zone seam.
 
@@ -332,6 +369,14 @@ class TwoZoneGateRunner:
         findings: tuple[str, ...]
         try:  # ---- zone A: untrusted execution, no signing key in scope ----
             obs = gate.execute(Path(workdir))
+        except subprocess.TimeoutExpired as exc:
+            cmd = _user_command(exc.cmd)
+            obs = observe(
+                gate.name,
+                structured={"zone_a_exception": f"TimeoutExpired: {cmd}"},
+            )
+            status = GateStatus.ERROR
+            findings = timeout_findings(exc, Path(workdir))
         except Exception as exc:
             obs = observe(
                 gate.name,

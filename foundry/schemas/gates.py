@@ -10,6 +10,7 @@ or buggy agent write can never supersede a trusted verdict.
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import field_validator
 
@@ -97,3 +98,54 @@ class GateTriage(FrozenModel):
 
     def union_key(self) -> tuple[str, str, str]:
         return (self.name, self.run_against, self.produced_by)
+
+
+FixOutcome = Literal["initial", "improved", "lateral", "worse", "no-change", "error", "restored"]
+
+
+class FixPass(FrozenModel):
+    """One check of a fix loop, as the gate node that ran it saw it: the ledger the
+    loop keeps its best tree by. Written only by the gate nodes (never by an agent
+    or the triage channel an adapter's output lands on).
+
+    A ``window`` is one fix loop: a boundary over one set of ticket diffs, so a new
+    wave, an escalation rebuild or the final gate starts a new one. ``score`` is
+    ``(-stages passed in order, failing gates, failure signature size)``, lower is
+    better, ``None`` when a verdict ERRORed (never best, never reverted from).
+    ``snapshot_uri`` is the blob of the tree's files, recorded when it became the
+    window's best; ``restored`` marks the re-check of a best tree put back.
+    ``clock_s`` is the run clock (the token meter's elapsed seconds, which survive a
+    restart) once the check was done, ``elapsed_s`` the pass's cost since the
+    window's previous check; both ``None`` without a meter. ``stop`` names the rule
+    that ended a fix-until-cap loop on this check (see ``gate_wiring.FixPolicy``).
+    ``cluster`` is the failure cluster the pass that made this tree was aimed at,
+    ``target`` the one the next pass is aimed at (``gate_wiring.FailureCluster``),
+    and ``restart_tickets`` the tickets the next pass rebuilds from scratch instead
+    of a fixer session (``gate_wiring.plan_next_pass``)."""
+
+    window: str
+    boundary: str
+    pass_no: int
+    tree: str
+    fix_task: str | None = None
+    score: tuple[int, int, int] | None = None
+    failing: tuple[str, ...] = ()
+    outcome: FixOutcome
+    touched: tuple[str, ...] = ()
+    snapshot_uri: str | None = None
+    elapsed_s: float | None = None
+    clock_s: float | None = None
+    stop: str | None = None
+    restart: bool = False
+    cluster: str | None = None
+    target: str | None = None
+    restart_tickets: tuple[str, ...] = ()
+    seq: Seq
+
+    @field_validator("score", "failing", "touched", "restart_tickets", mode="before")
+    @classmethod
+    def _coerce_tuples(cls, v: object) -> object:
+        return tuple(v) if isinstance(v, list) else v
+
+    def union_key(self) -> tuple[str, int]:
+        return (self.window, self.pass_no)

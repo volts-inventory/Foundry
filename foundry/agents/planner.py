@@ -32,6 +32,13 @@ Re-entry: ``spec_fix`` routes back here. The newest FAILing Spec-gate verdict's
 findings, and the criteria already declared, go into the prompt so the revision
 closes the gap instead of re-deriving the same plan.
 
+Patch, don't re-plan: where a revision would otherwise re-run call 1 (the
+in-node plan check, or a Spec-gate failure no epic re-run can target), a finding
+the tickets alone can close first gets ONE small delta call: the findings, the
+tickets they name and a summary of the rest in; ticket upserts / removals out,
+merged by id and put through the same assembly. A delta that does not merge, or
+leaves the merged plan failing a check, falls back to the full re-plan.
+
 Trust posture is unchanged: the node emits no ``GateResult`` (L5), reaches the
 model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 ``JudgmentProvenance.SELF`` — the signed Spec gate still decides.
@@ -50,6 +57,7 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from foundry import progress
 from foundry.agents._common import (
     as_text,
     cas_uri,
@@ -59,8 +67,14 @@ from foundry.agents._common import (
     persist_prose,
     scope_directive,
 )
+from foundry.agents.implementation.tickets import _pytest_bdd
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
+from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
+from foundry.gates.profiles import bdd_runner_hint, stack_install
+from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
+from foundry.gates.spec import _incomplete_steps
+from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
 from foundry.schemas.architecture import (
     ADR,
     ConstraintScope,
@@ -76,6 +90,7 @@ from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     FEATURE_DIR,
     HARNESS_TICKET_ID,
+    SKELETON_TASK_ID,
     Difficulty,
     Epic,
     Specialty,
@@ -106,6 +121,8 @@ if TYPE_CHECKING:
     from foundry.state.seq import Seq
 
 __all__ = [
+    "DELTA_SCHEMA",
+    "DELTA_SOP",
     "EPIC_KIND",
     "EPIC_SCHEMA",
     "EPIC_SOP",
@@ -179,12 +196,22 @@ _TICKET_RULES = (
     "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
     "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
     "(directly or through other tickets). Every implemented contract should have a "
-    "consumer or a scenario on its implementing ticket. Unless a DEMO scope cap says "
-    "otherwise, every feature ticket gets a paired specialty='test' ticket that "
-    "depends_on it and writes the step definitions for "
-    "that feature's scenarios, binding the gate-written features/<feature ticket "
-    "id>.feature (the gate renders one per ticket from its scenarios); the test "
-    "ticket carries no scenarios of its own. Never list a .feature file in files[]: "
+    "consumer or a scenario on its implementing ticket. STEP DEFINITIONS bind the "
+    "gate-written features/<feature ticket id>.feature (the gate renders one per "
+    "ticket from its scenarios). On a Python stack with no bdd command (pytest-bdd), "
+    "the feature ticket that builds the behaviour lists ONE step module "
+    "tests/test_<ticket id>.py in its own files[] and binds its own scenarios there, "
+    "so each wave's check runs them as soon as it lands: never a trailing test-only "
+    "ticket that binds several feature tickets' scenarios (checked and repaired). "
+    "So give each ticket only scenarios its own code and its dependencies can pass "
+    "the moment it lands: a user-level scenario (an HTTP request, a CLI run) belongs "
+    "on the ticket that exposes that surface, never on a models-only ticket. "
+    "Otherwise, unless a DEMO scope cap says so, every feature ticket gets a paired "
+    "specialty='test' ticket that depends_on it and writes the step definitions for "
+    "that feature's scenarios; the test ticket carries no scenarios of its own. ONE "
+    "step module per ticket: never split its steps across modules by layer "
+    "(test_x_routes.py + test_x_service.py): only one binds the scenarios and the "
+    "rest are dropped (checked). Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
     "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
     "Where a scope cap speaks of ownership units, it means the files across your "
@@ -208,7 +235,9 @@ _TICKET_RULES = (
     "security_abuse=true. ALWAYS author one scenario requiring a pinned dependency "
     "manifest for the stack at the repo root (requirements.txt / uv.lock / "
     "package-lock.json / go.sum / Cargo.lock; pin dev/test deps if there are no "
-    "runtime deps), on the ticket that writes that manifest.\n"
+    "runtime deps), on the ticket that writes that manifest; it checks the manifest "
+    "itself (present, every entry pinned), never that installing succeeds: the gates "
+    "run offline (checked).\n"
     "CRITERIA REVIEW: then review your own scenarios against the request. Under "
     "criteria_review list only REAL, in-scope gaps you could not close: missing / "
     "under-specified scenarios, and applicable security/abuse cases no scenario "
@@ -275,15 +304,24 @@ SOP = (
     "test, bdd and run, all OFFLINE; run is REQUIRED unless the deliverable is a "
     "library (checked). bdd runs every features/*.feature scenario "
     "with the language's OFFICIAL "
-    "Cucumber runner and writes Cucumber Messages NDJSON to the file named by $"
+    "Cucumber runner and writes its report (Cucumber Messages NDJSON; godog and "
+    "cucumber-rs: their Cucumber JSON) to the file named by $"
     + BDD_REPORT_ENV + " (Python may leave bdd empty to use the built-in pytest-bdd "
-    "harness); run (optional: boots the real app headless, exits 0 on success). "
+    "harness); run (optional: boots the real app headless, exits 0 on success; for "
+    "a web server it is a smoke script, e.g. `node smoke.js` / `python3 smoke.py`, "
+    "that starts the app on port 0, makes one request, stops it and exits 0 — never "
+    "the bare server entry such as `node app.js`, `npm start`, `flask run` or "
+    "`uvicorn ...`, which never exits; checked). "
     "contracts_file is the source file the code-kind contracts are written to (e.g. "
     "src/contracts.ts, contracts.py); harness_files are the package manifest and "
-    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json). Two "
-    f"tickets are added for you: '{CONTRACTS_TICKET_ID}' writes contracts_file first "
-    f"and '{HARNESS_TICKET_ID}' wires the Cucumber runner into harness_files; every "
-    "ticket you write depends on them, and none may list contracts_file in files. "
+    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
+    "cucumber-js step files go under features/step_definitions/. The ids "
+    f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are reserved: never plan a "
+    f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes "
+    "contracts_file first; only when stack.bdd is set, "
+    f"'{HARNESS_TICKET_ID}' is added too and wires the Cucumber runner into "
+    "harness_files. Every ticket you write depends on them, and none may list "
+    "contracts_file in files. "
     "Default contracts_file per language: "
     + ", ".join(f"{lang} {path}" for lang, path in _DEFAULT_CONTRACTS_FILE.items())
     + ". The code-kind contract signatures are compiled together as that file at plan "
@@ -319,16 +357,19 @@ _STR_ARRAY: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
 # Contract kinds; the code kinds are written as real code by the contracts ticket.
 CODE_CONTRACT_KINDS = ("function", "class", "type")
 CONTRACT_KINDS = (*CODE_CONTRACT_KINDS, "http", "cli", "event")
-_GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID})
+_GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID, SKELETON_TASK_ID})
 
-# What the harness ticket writes when the plan leaves it out.
+# What the harness ticket always writes, on top of the plan's harness_files: the
+# manifest and lockfile it adds the runner to, and the runner's entry file, so its
+# description never asks for a file outside its scope. A feature ticket may list
+# them too (to add its own deps): overlapping scopes run in separate waves.
 _DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml",),
-    "typescript": ("package.json", "tsconfig.json", "cucumber.json"),
-    "javascript": ("package.json", "cucumber.json"),
-    "go": ("go.mod",),
-    "rust": ("Cargo.toml",),
-    "java": ("pom.xml",),
+    "typescript": ("package.json", "package-lock.json", "tsconfig.json", "cucumber.json"),
+    "javascript": ("package.json", "package-lock.json", "cucumber.json"),
+    "go": ("go.mod", "go.sum", "bdd/godog_test.go"),
+    "rust": ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs"),
+    "java": ("pom.xml", "src/test/java/RunCucumberTest.java"),
 }
 
 _SCENARIO_SCHEMA: dict[str, Any] = {
@@ -567,6 +608,37 @@ EPIC_SCHEMA: dict[str, Any] = {
         "criteria_review": _REVIEW_SCHEMA,
     },
     "required": ["tickets", "criteria_review"],
+    "additionalProperties": False,
+}
+
+# Not "You are the Planner": scripted test backends key the plan call on that.
+DELTA_SOP = (
+    "You are the Plan Patcher. The plan check FAILED a plan with the findings below. "
+    "Do NOT return the whole plan: in ONE reply return a DELTA that closes every "
+    "finding and changes nothing else; add a ticket only when no existing one can "
+    "carry the fix.\n"
+    "- tickets: each ticket you add or change, with every required field, under its "
+    "id. A changed ticket keeps every scenario you do not list: list a scenario (same "
+    "id) to change it or a new id to add one; a scenario listed on another ticket "
+    "moves there.\n"
+    "- remove_tickets: ids of tickets to delete (move any work they carry first).\n"
+    "- remove_scenarios: ids of scenarios to delete.\n"
+    "- criteria_review: gaps that remain after your delta (empty arrays when none).\n"
+    "The interface contracts are fixed: close a contract-fit finding through the "
+    "tickets' implements[], consumes[] and depends_on. The planner's own tickets "
+    f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are added for you: never name "
+    "them.\nThe plan's rules: " + _TICKET_RULES
+)
+
+DELTA_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "tickets": {"type": "array", "items": _TICKET_SCHEMA},
+        "remove_tickets": _STR_ARRAY,
+        "remove_scenarios": _STR_ARRAY,
+        "criteria_review": _REVIEW_SCHEMA,
+    },
+    "required": ["tickets", "remove_tickets", "remove_scenarios", "criteria_review"],
     "additionalProperties": False,
 }
 
@@ -908,6 +980,9 @@ def _break_cycles(deps: dict[str, list[str]]) -> list[str]:
     return concerns
 
 
+_FIX_DIFF_PREFIXES = ("fix-", "revert-")
+
+
 def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> dict[str, str]:
     """Raw id -> an id safe as a file name (``features/<id>.feature``, ``task/<id>``):
     other characters become ``-``; a collision gets the first free ``-<n>`` suffix,
@@ -917,8 +992,9 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
     safe = {
         tid for tid in ids
         if _SAFE_TICKET_ID.fullmatch(tid) and tid not in (".", "..", *_GENERATED_TICKETS)
-        # `fix-<n>` is the fixer's diff namespace: a ticket there would read as built.
-        and not tid.startswith("fix-") and tid not in reserved
+        # `fix-<n>` / `revert-<n>` are the fix loop's diff namespaces: a ticket there
+        # would read as built.
+        and not tid.startswith(_FIX_DIFF_PREFIXES) and tid not in reserved
     }
     taken = safe | _GENERATED_TICKETS | reserved
     for tid in ids:
@@ -926,7 +1002,7 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
             out[tid] = tid
             continue
         base = re.sub(r"[^A-Za-z0-9._-]", "-", tid).strip(".") or "T"
-        if base.startswith("fix-"):
+        if base.startswith(_FIX_DIFF_PREFIXES):
             base = f"T-{base}"
         new, n = base, 2
         while new in taken:
@@ -1510,6 +1586,15 @@ def _stack_decision(
             "dropped and the gates infer a profile from the request."
         ]
     concerns: list[str] = []
+    if (install := stack_install(stack)) != stack.install:
+        concerns.append(f"The {language} stack's install `{stack.install or '(none)'}` "
+                        f"downloads no dependencies; it runs `{install}` so the offline "
+                        "steps have them.")
+        stack = stack.model_copy(update={"install": install})
+    if (bdd := _bdd_quoting(stack.bdd)) != stack.bdd:
+        concerns.append(f"The bdd command `{stack.bdd}` single-quotes ${BDD_REPORT_ENV}, "
+                        f"which stops its expansion; it runs `{bdd}`.")
+        stack = stack.model_copy(update={"bdd": bdd})
     if language != "python" and not stack.bdd:
         concerns.append(
             f"The {language} stack has no bdd command: its scenarios are not executed."
@@ -1550,6 +1635,19 @@ _CONTRACT_STUB_RULES: dict[str, str] = {
     "": "declarations only — interfaces, types and signatures with no bodies the "
         "compiler would reject.",
 }
+
+
+def _python_deps_rule(stack: StackDecision, where: str) -> str:
+    framework = f" ({stack.framework})" if stack.framework else ""
+    return (
+        f"Declare in {where}, one per line and pinned with ==, every third-party "
+        f"package the project's code and tests import: the stack's runtime "
+        f"framework{framework} and libraries, and the test packages. The per-wave "
+        "checks install exactly what is declared there before running anything, so "
+        "an undeclared import fails every later check with ModuleNotFoundError. "
+        "Never list a standard-library module (sqlite3, json, os, ...): pip cannot "
+        "install it."
+    )
 
 
 def _generated_tickets(
@@ -1610,13 +1708,12 @@ def _generated_tickets(
     if stack is not None and stack.bdd and base is not None:
         concerns.append("Change build: the base tree's BDD runner is kept as wired.")
     elif stack is not None and stack.bdd:
-        files = _plan_paths(raw_stack.get("harness_files"), "harness", concerns) or (
-            _DEFAULT_HARNESS_FILES.get(language, ())
-        )
+        files = _uniq((*_plan_paths(raw_stack.get("harness_files"), "harness", concerns),
+                       *_DEFAULT_HARNESS_FILES.get(language, ())))
         commands = "; ".join(
             f"{k} `{v}`" for k, v in (
                 ("install", stack.install), ("build", stack.build),
-                ("typecheck", stack.typecheck), ("test", stack.test),
+                ("typecheck", stack.typecheck), ("test", stack.test), ("run", stack.run),
             ) if v
         )
         out.append(Ticket(
@@ -1626,10 +1723,18 @@ def _generated_tickets(
                 f"Add the official Cucumber runner for {language} as a dev dependency "
                 "in the package manifest and write its config so the BDD command "
                 f"`{stack.bdd}` runs every {FEATURE_DIR}/*.feature file and writes "
-                f"Cucumber Messages (NDJSON) to the file named by ${BDD_REPORT_ENV}. "
-                "Set up the project skeleton so these commands work"
-                + (f": {commands}." if commands else ".")
+                f"its report to the file named by ${BDD_REPORT_ENV}. "
+                + (f"The stack's commands, which must pass once every ticket is "
+                   f"built: {commands}. " if commands else "")
+                + "Write ONLY your files: the feature tickets write the source after "
+                "you, and this wave's build check runs on your files alone, so "
+                "declare no build target at a source file you do not write; any "
+                "file you create outside your files is discarded."
                 + " Write no step definitions: the test tickets do."
+                + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
+                + (" " + _python_deps_rule(
+                    stack, "requirements.txt or pyproject.toml [project].dependencies")
+                   if language == "python" else "")
             ),
             specialty=Specialty.TEST,
             difficulty=Difficulty.STANDARD,
@@ -1637,6 +1742,50 @@ def _generated_tickets(
             seq=seq,
         ))
     return out, concerns
+
+
+_PY_MANIFESTS = ("requirements.txt", "pyproject.toml")
+
+
+def _python_deps_ticket(
+    tickets: Sequence[Ticket], generated: Sequence[Ticket], stack: StackDecision | None,
+    base: BaseView | None, seq: Seq,
+) -> list[Ticket]:
+    """A wave-0 ticket declaring a new Python build's dependencies in the manifest a
+    planned ticket owns (requirements.txt when none does and the stack names a
+    framework), when no generated ticket writes one. The wave checks install
+    only what a manifest declares: left to a late ticket (often the entrypoint), every
+    earlier check runs without the framework and fails on ModuleNotFoundError, which
+    the fixer may not repair in a later wave's file. The planned owner keeps the file
+    too, so it can still extend it (overlapping scopes run in separate waves)."""
+    if (stack is None or stack.language != "python" or stack.bdd or base is not None
+            or any(t.id == HARNESS_TICKET_ID for t in generated)):
+        return []
+    manifests = tuple(m for m in _PY_MANIFESTS if any(m in t.files for t in tickets))
+    if not manifests and stack.framework.strip():
+        # No ticket owns a manifest, yet the framework is third-party: unowned, the
+        # only manifest is the import-derived scaffold, which is never installed.
+        manifests = ("requirements.txt",)
+    planned = {t.id for t in tickets}
+    if not manifests or any(
+        not planned.intersection(t.depends_on) for t in tickets
+        if any(m in t.files for m in manifests)
+    ):
+        return []  # none, or a first-wave ticket already writes it
+    return [Ticket(
+        id=HARNESS_TICKET_ID,
+        title="Declare the Python dependencies",
+        description=(
+            _python_deps_rule(stack, " / ".join(manifests))
+            + " Write ONLY your files: the feature tickets write the source after you; "
+            "any file you create outside your files is discarded. Write no application "
+            "code and no step definitions."
+        ),
+        specialty=Specialty.BACKEND,
+        difficulty=Difficulty.TRIVIAL,
+        files=manifests,
+        seq=seq,
+    )]
 
 
 def _attach_generated(
@@ -1736,21 +1885,135 @@ def _own_scenario_bindings(
     """On a pytest-bdd stack, give a feature ticket that carries scenarios but has no
     test ticket after it (the demo shape) a step module of its own to bind them from.
     Without one its packet says a paired test ticket binds them, nobody does, and the
-    Test gate fails every scenario as not executed."""
-    if stack is not None and (stack.language != "python" or stack.bdd):
+    Test gate fails every scenario as not executed. A test ticket carrying scenarios
+    but no test module (e.g. the plan's own ``bdd-harness``, renamed) gets one too:
+    the feature tickets count it as their binder, so without one nobody binds."""
+    if not _pytest_bdd(stack):
         return list(tickets), []
     bound = {c for t in tickets if t.specialty is Specialty.TEST for c in t.scenario_ids}
     out: list[Ticket] = []
     concerns: list[str] = []
     for t in tickets:
-        if (t.specialty is Specialty.TEST or set(t.scenario_ids) <= bound
-                or any(_is_python_test(f) for f in t.files)):
+        test = t.specialty is Specialty.TEST
+        # A file-less feature ticket is an acceptance-only one: a file would make it
+        # build work.
+        if (not t.scenario_ids or step_module(t.files, t.id) is not None
+                or (not test and (not t.files or set(t.scenario_ids) <= bound))):
             out.append(t)
             continue
-        path = f"tests/test_{re.sub(r'[^a-z0-9]+', '_', t.id.lower()).strip('_')}.py"
+        path = ticket_step_module(t.id)
         out.append(t.model_copy(update={"files": (*t.files, path)}))
         concerns.append(f"Ticket {t.id}: added {path} to bind its own scenarios "
-                        "(no test ticket depends on it).")
+                        + ("(a test ticket with no test module)." if test
+                           else "(no test ticket depends on it)."))
+    return out, concerns
+
+
+def _fold_test_bindings(
+    tickets: Sequence[Ticket], stack: StackDecision | None,
+) -> tuple[list[Ticket], list[str]]:
+    """On a pytest-bdd stack, move a scenario's binding off a test ticket that writes
+    only step modules onto the feature ticket that builds it, when that changes
+    nothing about when it is judged. ``wave_scenarios`` judges a scenario once its
+    every carrier is built, and a trailing test ticket binding all of an epic's
+    tickets made it the last carrier of every scenario: no wave check ran their code
+    until the last wave, and bugs piled up.
+
+    A scenario of feature ticket F moves only when every other feature ticket the
+    test ticket follows is already upstream of F: a models ticket's "When I GET
+    /products" stays late, on the test ticket after the routes ticket (run after
+    :func:`_wire_entrypoint`, so the entrypoint's order counts). A scenario F
+    already binds from a step module of its own moves anyway: binding it twice
+    runs it twice. Left alone: a test ticket that writes fixtures or helpers
+    (conftest.py, tests/steps/*.py, a stack-command file) — the step modules lean
+    on those, and moving them before their users would import app code not yet
+    built — one that implements a contract (flagged), its own scenarios (a
+    criterion no code ticket owns) and a file-less acceptance-only ticket's. A test
+    ticket left with no scenarios is dropped, its dependents rewired to its
+    dependencies."""
+    if not _pytest_bdd(stack):
+        return list(tickets), []
+    protected = set(stack_files(stack)) if stack is not None else set()
+    deps = {t.id: t.depends_on for t in tickets}
+    by_id = {t.id: t for t in tickets}
+    owner = {c: t.id for t in tickets
+             if t.specialty is not Specialty.TEST and t.files for c in t.scenario_ids}
+    # A file-less acceptance-only ticket builds nothing a scenario could wait for.
+    features = {t.id for t in _features(tickets) if t.files}
+    out: list[Ticket] = []
+    dropped: dict[str, tuple[str, ...]] = {}
+    concerns: list[str] = []
+    for t in tickets:
+        borrowed = [c for c in t.scenario_ids if c in owner]
+        if t.specialty is not Specialty.TEST or t.id in _GENERATED_TICKETS or not borrowed:
+            out.append(t)
+            continue
+        steps_only = all(_is_python_test(f) and not is_helper_module(f)
+                         and f not in protected for f in t.files)
+        if t.implements:
+            concerns.append(f"Test ticket {t.id} implements contract(s) "
+                            f"{', '.join(t.implements)}: left it binding its scenarios.")
+        if t.implements or not t.files:
+            out.append(t)
+            continue
+        upstream = _ancestors(deps, t.id) & features
+        moved = [
+            c for c in borrowed
+            if step_module(by_id[owner[c]].files, owner[c]) is not None
+            or (steps_only and upstream - {owner[c]} <= _ancestors(deps, owner[c]))
+        ]
+        if not moved:
+            out.append(t)
+            continue
+        kept = tuple(c for c in t.scenario_ids if c not in moved)
+        note = (f"Test ticket {t.id}: moved the binding of scenario(s) {', '.join(moved)} "
+                f"to the ticket(s) that build them "
+                f"({', '.join(_uniq(owner[c] for c in moved))})")
+        if not kept and steps_only:
+            dropped[t.id] = t.depends_on
+            concerns.append(note + "; dropped the ticket, which had nothing else to write.")
+            continue
+        out.append(t.model_copy(update={"scenario_ids": kept}))
+        concerns.append(note + ".")
+    if not dropped:
+        return out, concerns
+
+    def resolve(dep: str) -> tuple[str, ...]:
+        return tuple(d for up in dropped[dep] for d in resolve(up)) if dep in dropped else (dep,)
+
+    return [
+        t.model_copy(update={"depends_on": _uniq(
+            d for dep in t.depends_on for d in resolve(dep) if d != t.id)})
+        if set(t.depends_on) & set(dropped) else t
+        for t in out
+    ], concerns
+
+
+def _one_step_module_per_ticket(
+    tickets: Sequence[Ticket], stack: StackDecision | None,
+) -> tuple[list[Ticket], list[str]]:
+    """On a pytest-bdd stack, a ticket carrying scenarios writes ONE step module, the
+    one its packet binds them from (:func:`step_module`): four modules split by layer
+    (test_cart_routes.py, test_cart_service.py, ...) were each written as the same
+    29k-char step module, every scenario run 4x. Helper modules a step module
+    imports (test_helpers.py, ...) and stack-command files stay."""
+    if not _pytest_bdd(stack):
+        return list(tickets), []
+    protected = set(stack_files(stack)) if stack is not None else set()
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        binder = step_module(t.files, t.id)
+        extra = [f for f in t.files if _is_python_test(f) and f != binder
+                 and not is_helper_module(f) and f not in protected]
+        if not t.scenario_ids or not extra:
+            out.append(t)
+            continue
+        out.append(t.model_copy(update={"files": tuple(f for f in t.files if f not in extra)}))
+        concerns.append(
+            f"Ticket {t.id}: dropped test module(s) {', '.join(extra)}: {binder} binds its "
+            "scenarios, and every further module would bind and run them again."
+        )
     return out, concerns
 
 
@@ -1764,6 +2027,7 @@ def _own_package_inits(
     directories are left to pytest's own rootdir handling."""
     if stack.language != "python":
         return list(tickets), []
+    tickets, concerns = _merge_shadowed_modules(tickets, existing)
     owned = {f for t in tickets for f in t.files} | existing
     dirs: dict[str, str] = {}  # missing __init__.py -> first ticket writing below it
     for t in tickets:
@@ -1778,7 +2042,7 @@ def _own_package_inits(
                 if init not in owned:
                     dirs.setdefault(init, t.id)
     if not dirs:
-        return list(tickets), []
+        return list(tickets), concerns
     holder = CONTRACTS_TICKET_ID if any(t.id == CONTRACTS_TICKET_ID for t in tickets) else None
     added: dict[str, list[str]] = {}
     for init, first in dirs.items():
@@ -1791,8 +2055,50 @@ def _own_package_inits(
         }) if t.id in added else t
         for t in tickets
     ]
-    return out, [f"Ticket {tid}: added package marker(s) {', '.join(inits)} that no "
-                 "ticket wrote." for tid, inits in added.items()]
+    return out, [*concerns, *(f"Ticket {tid}: added package marker(s) {', '.join(inits)} "
+                              "that no ticket wrote." for tid, inits in added.items())]
+
+
+def _merge_shadowed_modules(
+    tickets: Sequence[Ticket], existing: frozenset[str] = frozenset(),
+) -> tuple[list[Ticket], list[str]]:
+    """Plan a module ``x.py`` as ``x/__init__.py`` when the plan (or the base tree)
+    also writes files under ``x/``: a package directory shadows the sibling module,
+    so ``import x`` loads the package — an empty marker — and every ``from x import``
+    of the module's names fails. Epic planners split the layout this way (one writes
+    models.py, another models/cart.py). ``import x`` and ``x.y`` stay as planned.
+    A base-tree module or a generated ticket's file is left as it is."""
+    planned = {f for t in tickets for f in t.files}
+    dirs = {f.rsplit("/", 1)[0] for f in planned | existing if "/" in f}
+    dirs |= {"/".join(d.split("/")[:i]) for d in tuple(dirs)
+             for i in range(1, d.count("/") + 1)}
+    frozen = {f for t in tickets if t.id in _GENERATED_TICKETS for f in t.files}
+    moves = {f: f.removesuffix(".py") + "/__init__.py" for f in planned
+             if f.endswith(".py") and f.removesuffix(".py") in dirs
+             and f not in existing and f not in frozen
+             and not any(p.startswith("test") for p in f.split("/"))}
+    if not moves:
+        return list(tickets), []
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = [f for f in t.files if f in moves]
+        files = _uniq(tuple(moves.get(f, f) for f in t.files))
+        reads = _uniq(tuple(moves.get(f, f) for f in t.reads))
+        if files == t.files and reads == t.reads:
+            out.append(t)
+            continue
+        note = "".join(
+            f" Write {f}'s code as {moves[f]}: the plan also has a {f.removesuffix('.py')}/ "
+            f"package, which would shadow a {f} module (`import "
+            f"{f.removesuffix('.py').replace('/', '.')}` is unchanged)." for f in mine)
+        out.append(t.model_copy(update={"files": files, "reads": reads,
+                                        "description": t.description + note}))
+        if mine:
+            concerns.append(f"Ticket {t.id}: planned {', '.join(mine)} as "
+                            f"{', '.join(moves[f] for f in mine)}: a package of that "
+                            "name shadows the module.")
+    return out, concerns
 
 
 def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
@@ -1831,6 +2137,34 @@ def _add_contract_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[st
             concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which "
                             f"implements the contract {name} it consumes.")
     return [out[t.id] for t in tickets], concerns
+
+
+def _add_read_deps(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Order each ticket after the one ticket that writes a file it reads[] when the
+    plan forgot the edge: built in the same wave, the reader never sees the file and
+    codes against names it guesses (a repository importing a model class the models
+    ticket, running beside it, named differently). Skips files with several writers
+    or a generated writer (every ticket already follows the contracts ticket), and
+    an edge that would close a cycle."""
+    deps = {t.id: t.depends_on for t in tickets}
+    writers: dict[str, list[str]] = {}
+    for t in tickets:
+        for path in t.files:
+            writers.setdefault(path, []).append(t.id)
+    concerns: list[str] = []
+    for t in tickets:
+        for path in t.reads:
+            ids = writers.get(path, [])
+            if len(ids) != 1 or ids[0] == t.id or ids[0] in _GENERATED_TICKETS:
+                continue
+            dep = ids[0]
+            if dep in _ancestors(deps, t.id) or t.id in _ancestors(deps, dep):
+                continue
+            deps[t.id] = (*deps[t.id], dep)
+            concerns.append(f"Ticket {t.id}: added a dependency on {dep}, which writes "
+                            f"{path} it reads.")
+    return [t.model_copy(update={"depends_on": deps[t.id]}) if deps[t.id] != t.depends_on
+            else t for t in tickets], concerns
 
 
 def _ancestors(deps: dict[str, tuple[str, ...]], tid: str) -> set[str]:
@@ -2218,6 +2552,100 @@ def _coverage_findings(
     return tuple(out)
 
 
+_INSTALL_ASSERTION = re.compile(
+    r"\b(pip3?\s+install|npm\s+(install|ci)|yarn\s+install|pnpm\s+install|"
+    r"uv\s+(pip\s+install|sync)|poetry\s+install|cargo\s+fetch|go\s+mod\s+download)\b"
+    r"|\binstall(s|ed|ing|ation)?\s+(of\s+)?(\w+\s+){0,2}"
+    r"(succeed|succeeds|work|works|complete|completes|without\s+error)\b",
+    re.I,
+)
+
+
+def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
+    """A scenario whose When/Then asserts that installing dependencies works can
+    never pass: every gate after install runs offline."""
+    return tuple(
+        f"Scenario {c.id} asserts that installing dependencies succeeds, but the gates "
+        "run offline: check the manifest itself (it exists, every entry is pinned) "
+        "instead."
+        for c in criteria
+        if any(_INSTALL_ASSERTION.search(s) for s in (*c.when, *c.then))
+    )
+
+
+# Web frameworks whose app entry serves until killed.
+_WEB_FRAMEWORK = re.compile(
+    r"\b(express|fastify|koa|hapi|nest(js)?|next(\.js)?|hono|flask|fastapi|django|"
+    r"starlette|aiohttp|sanic|bottle|tornado|quart|litestar)\b", re.I,
+)
+# Commands that always start a server.
+_SERVER_COMMAND = re.compile(
+    r"^((python3?\s+-m\s+)?(flask\s+run|uvicorn|gunicorn|hypercorn|fastapi\s+(run|dev))\b"
+    r"|python3?\s+manage\.py\s+runserver\b)"
+)
+# A bare app entry: an interpreter on a server-named file, or the package's start.
+_APP_ENTRY = re.compile(
+    r"^((node|nodejs|bun|deno\s+run|npx\s+(tsx|ts-node)|tsx|ts-node|python3?)\s+"
+    r"(\S+/)?(app|server|index|main|wsgi|asgi)\.(js|mjs|cjs|ts|py)"
+    r"|npm\s+(start|run\s+(start|dev|serve))|yarn\s+(start|dev)|pnpm\s+(start|dev))$"
+)
+
+
+def _run_findings(stack: StackDecision) -> tuple[str, ...]:
+    """A web stack whose run command is the bare server entry: the smoke gate waits
+    for it to exit, and a server never does."""
+    run = " ".join(stack.run.split())
+    if not (_SERVER_COMMAND.match(run)
+            or (_APP_ENTRY.match(run) and _WEB_FRAMEWORK.search(stack.framework))):
+        return ()
+    return (
+        f"stack.run `{stack.run}` starts the server, which never exits, so the smoke "
+        "check hangs: make run a smoke script (e.g. `node smoke.js`, `python3 smoke.py`, "
+        "in the entrypoint ticket's files) that starts the app on port 0, makes one "
+        "request, stops it and exits 0.",
+    )
+
+
+_BDD_REPORT_SINGLE_QUOTED = re.compile(
+    r"(?<![^\s=:])'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'"
+)
+_CUCUMBER_JS = re.compile(r"\bcucumber-js\b")
+_TS_LOADER = re.compile(r"--(import|require|require-module|loader)[\s=]+(tsx|ts-node)\b")
+
+
+def _bdd_quoting(bdd: str) -> str:
+    """Single quotes keep the shell from expanding $FOUNDRY_BDD_REPORT: the runner
+    then writes to a file literally named so and the gate finds no report."""
+    return _BDD_REPORT_SINGLE_QUOTED.sub(r'"\1"', bdd)
+
+
+def _bdd_findings(stack: StackDecision) -> tuple[str, ...]:
+    """cucumber-js bdd commands the gate cannot read a report from."""
+    if not _CUCUMBER_JS.search(stack.bdd):
+        return ()
+    out: list[str] = []
+    if re.search(r"(--format|-f)[\s=]+[\"']?json:", stack.bdd):
+        out.append(
+            f"stack.bdd `{stack.bdd}` writes the legacy `json:` report; the gate reads "
+            f'Cucumber Messages: use `--format "message:${BDD_REPORT_ENV}"`.'
+        )
+    if re.search(r"\.ts\b", stack.bdd) and not _TS_LOADER.search(stack.bdd):
+        out.append(
+            f"stack.bdd `{stack.bdd}` loads TypeScript step files without a loader: add "
+            "`--import tsx` (tsx as a devDependency) or `--require-module "
+            "ts-node/register`."
+        )
+    return tuple(out)
+
+
+def _stack_command_findings(stack: StackDecision | None) -> tuple[str, ...]:
+    """Plan-time checks of a stack the planner chose this pass (a pinned one cannot
+    be re-chosen, so flagging it would never close)."""
+    if stack is None or stack.profile:
+        return ()
+    return (*_run_findings(stack), *_bdd_findings(stack))
+
+
 # ---- repair, then check: what the Spec gate would reject, fixed in the node ------
 
 
@@ -2240,6 +2668,7 @@ class _Frame:
     tickets_seq: Seq
     criteria_seq: Seq
     base: BaseView | None = None  # a change build's base tree
+    stack_findings: tuple[str, ...] = ()  # of a stack chosen this pass
 
 
 @dataclass(frozen=True)
@@ -2269,7 +2698,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         epics=frame.epics, overflow=over,
         reserved=base.feature_names if base is not None else frozenset(),
     )
-    tickets, more = _attach_generated(tickets, frame.generated, frame.tickets_seq)
+    generated = (*frame.generated, *_python_deps_ticket(
+        tickets, frame.generated, frame.stack, base, frame.tickets_seq))
+    tickets, more = _attach_generated(tickets, generated, frame.tickets_seq)
     concerns += more
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)
@@ -2278,10 +2709,14 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
     concerns += more
-    tickets, more = _own_scenario_bindings(tickets, frame.stack)
-    concerns += more
-    tickets, more = _wire_entrypoint(tickets)
-    concerns += more
+    for repair in (_add_read_deps, _wire_entrypoint):
+        tickets, more = repair(tickets)
+        concerns += more
+    # After the order repairs: the fold reads the final order to judge a scenario
+    # no earlier than before.
+    for bind in (_fold_test_bindings, _own_scenario_bindings, _one_step_module_per_ticket):
+        tickets, more = bind(tickets, frame.stack)
+        concerns += more
     criteria, more = _drop_orphan_scenarios(tickets, criteria)
     concerns += more
     criteria, more = _fix_covers(criteria, frame.brief)
@@ -2296,7 +2731,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += [*_unused_contracts(tickets, criteria), *frame.compiled.concerns, *over]
     coverage = (*stack_findings, *_coverage_findings(
         tickets, criteria, frame.brief, run=frame.run, change=base is not None
-    ))
+    ), *_offline_scenario_findings(criteria), *frame.stack_findings)
     return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
 
 
@@ -2347,6 +2782,82 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
         )
         for i, item in enumerate(_objs(raw))
     ]
+
+
+_SQLITE_MEMORY_CONSTRAINT = {
+    "id": "PC-python-sqlite-memory",
+    "text": (
+        "Python SQLite: every sqlite3.connect(':memory:') opens a NEW, empty database, "
+        "so an in-memory store must open ONE connection and reuse it for its whole "
+        "life (schema, writes and reads), never connect per call. That database then "
+        "outlives each test, and pytest runs every test module in one process: a "
+        "conftest.py autouse fixture must give each test an empty database (drop and "
+        "re-create the schema, or delete every row), or one test's rows break the next."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
+_SQLALCHEMY_TYPED_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-typed",
+    "text": (
+        "Python SQLAlchemy: declare ORM models in the SQLAlchemy 2.0 typed style — a "
+        "`class Base(DeclarativeBase)` and columns as `id: Mapped[int] = "
+        "mapped_column(primary_key=True)` — never a bare `id = Column(Integer)`: the "
+        "type checker reads a bare Column attribute as Column[int], not int, so every "
+        "caller that passes it on as a plain value fails the typecheck. Pin "
+        "SQLAlchemy>=2.0."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
+_SQLALCHEMY_RELATIONSHIP_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-relationships",
+    "text": (
+        "Python SQLAlchemy relationships: write `back_populates=` or `backref=` only "
+        "when BOTH mapped classes are in this ticket's files, or the other class "
+        "already exists (written by a ticket this one depends on) in a file this "
+        "ticket also lists in its files and so can add the matching side. Otherwise "
+        "declare a one-sided `relationship()` with neither: SQLAlchemy configures "
+        "every mapper together on first use, so a back_populates naming an attribute "
+        "the other class lacks fails every model, every query and every test."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
+_SQLALCHEMY_SQLITE_CONSTRAINT = {
+    "id": "PC-python-sqlalchemy-sqlite",
+    "text": (
+        "Python SQLAlchemy over SQLite: every module reaches the database through "
+        "SQLAlchemy, never through sqlite3.connect(). An in-memory database is ONE "
+        "shared engine, `create_engine('sqlite://', poolclass=StaticPool, "
+        "connect_args={'check_same_thread': False})`; `Base.metadata.create_all`, "
+        "`drop_all` and `Session` take that engine, never a sqlite3 connection, which "
+        "has none of the methods they call (AttributeError: 'sqlite3.Connection' "
+        "object has no attribute '_run_ddl_visitor')."
+    ),
+    "scope": "global",
+    "source": NODE_ID,
+}
+
+
+def _stack_constraints(
+    stack: StackDecision | None, payload: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Pinned constraints the planner adds itself for a known stack footgun."""
+    if stack is None or stack.language != "python":
+        return []
+    text = str(payload).lower()
+    return [c for c, words in ((_SQLITE_MEMORY_CONSTRAINT, ("sqlite",)),
+                               (_SQLALCHEMY_TYPED_CONSTRAINT, ("sqlalchemy",)),
+                               (_SQLALCHEMY_RELATIONSHIP_CONSTRAINT, ("sqlalchemy",)),
+                               (_SQLALCHEMY_SQLITE_CONSTRAINT, ("sqlite", "sqlalchemy")))
+            if all(w in text for w in words)]
 
 
 def ticket_owner(ticket: Ticket) -> str:
@@ -2499,9 +3010,12 @@ def _newest_intent(state: FactoryState, rt: AgentRuntime) -> IntentBrief | None:
     return max(briefs, key=lambda b: b.seq) if briefs else None
 
 
-def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
+def _prior_plan(
+    state: FactoryState, rt: AgentRuntime, *, inline: bool = False
+) -> _PriorPlan | None:
     """None unless every live planner ticket carries the prefix of a known epic
-    (an inline plan has no epics to target) and the PRD resolves."""
+    (an inline plan has no epics to target) and the PRD resolves. ``inline`` asks
+    instead for a plan none of whose tickets carries an epic prefix, with no epics."""
     every = sorted(
         (t for t in _newest_by_id(state, rt, TICKET_KIND, Ticket).values()
          if t.supersedes != t.id),
@@ -2512,14 +3026,20 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
     if not live or not prds:
         return None
     epic_of: dict[str, str] = {}
-    for t in live:
-        m = _EPIC_OF_TICKET.match(t.id)
-        if m is None:
+    epics: list[_Epic] = []
+    if inline:
+        if any(_EPIC_OF_TICKET.match(t.id) for t in live):
             return None
-        epic_of[t.id] = m.group(1)
-    epics = _latest_epics(state, rt) or _epics_from_tickets(live, epic_of)
-    if not set(epic_of.values()) <= {e.id for e in epics}:
-        return None
+    else:
+        for t in live:
+            m = _EPIC_OF_TICKET.match(t.id)
+            if m is None:
+                return None
+            epic_of[t.id] = m.group(1)
+        epics = _latest_epics(state, rt) or _epics_from_tickets(live, epic_of)
+        if not set(epic_of.values()) <= {e.id for e in epics}:
+            return None
+    owned = {t.id for t in live}
     prd = max(prds, key=lambda p: p.seq)
     # Criteria are never tombstoned: only the current PRD's ids are live, so a
     # scenario a later pass dropped stays dropped.
@@ -2527,7 +3047,7 @@ def _prior_plan(state: FactoryState, rt: AgentRuntime) -> _PriorPlan | None:
     criteria = {
         cid: c for cid, c in
         _newest_by_id(state, rt, "acceptance_criterion", AcceptanceCriterion).items()
-        if c.ticket_id in epic_of and cid in current
+        if c.ticket_id in owned and cid in current
     }
     critiques = list(_newest_by_id(state, rt, "criteria_findings", CriteriaCritique).values())
     designs = list(_newest_by_id(state, rt, "system_design", SystemDesign).values())
@@ -2570,28 +3090,46 @@ def _target_epics(findings: tuple[str, ...], prior: _PriorPlan) -> tuple[str, ..
     return tuple(e.id for e in prior.epics if e.id in hit)
 
 
-def _prior_items(prior: _PriorPlan, epic_id: str) -> list[dict[str, Any]]:
-    """An untouched epic's live tickets back as raw items (scenarios from their
-    criteria, cross-epic deps left to :func:`_link_epics`), so the merge
-    re-derives every dependency against the re-planned epics."""
+def _ticket_items(
+    tickets: Iterable[Ticket], criteria: Iterable[AcceptanceCriterion],
+    epic_of: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Checked tickets back as raw items (scenarios from their criteria), the
+    planner's own tickets aside. With ``epic_of`` each item is tagged with its epic
+    and keeps only its same-epic deps (:func:`_link_epics` re-derives the rest)."""
+    scenarios: dict[str, list[dict[str, Any]]] = {}
+    for c in criteria:
+        scenarios.setdefault(c.ticket_id or "", []).append(
+            {"id": c.id, "text": c.text, "given": list(c.given), "when": list(c.when),
+             "then": list(c.then), "criticality": c.criticality.value,
+             "security_abuse": c.security_abuse, "covers": list(c.covers)}
+        )
     return [
         {
             "id": t.id, "title": t.title, "description": t.description,
             "specialty": t.specialty.value, "difficulty": t.difficulty.value,
-            "depends_on": [d for d in t.depends_on if prior.epic_of.get(d) == epic_id],
+            "depends_on": [
+                d for d in t.depends_on
+                if (epic_of.get(d) == epic_of.get(t.id) if epic_of
+                    else d not in _GENERATED_TICKETS)
+            ],
             "files": list(t.files), "reads": list(t.reads),
             "implements": list(t.implements), "consumes": list(t.consumes),
             "entrypoint": t.entrypoint,
-            "scenarios": [
-                {"id": c.id, "text": c.text, "given": list(c.given), "when": list(c.when),
-                 "then": list(c.then), "criticality": c.criticality.value,
-                 "security_abuse": c.security_abuse, "covers": list(c.covers)}
-                for c in prior.criteria.values() if c.ticket_id == t.id
-            ],
-            _EPIC_KEY: epic_id,
+            "scenarios": scenarios.get(t.id, []),
+            **({_EPIC_KEY: epic_of.get(t.id, "")} if epic_of else {}),
         }
-        for t in prior.tickets if prior.epic_of[t.id] == epic_id
+        for t in tickets if t.id not in _GENERATED_TICKETS
     ]
+
+
+def _prior_items(prior: _PriorPlan, epic_id: str) -> list[dict[str, Any]]:
+    """An untouched epic's live tickets back as raw items, so the merge re-derives
+    every dependency against the re-planned epics."""
+    return _ticket_items(
+        (t for t in prior.tickets if prior.epic_of[t.id] == epic_id),
+        prior.criteria.values(), prior.epic_of,
+    )
 
 
 def _norm_title(title: str) -> str:
@@ -2824,6 +3362,193 @@ def _revision_note(what: str, before: int, after: int, kept: bool) -> str:
             f"{after} finding(s).")
 
 
+# ---- patch, don't re-plan: one delta over only the tickets the findings name -------
+
+
+def _ticket_frame(frame: _Frame) -> _Frame:
+    """``frame`` checking only what a ticket delta can change: the contracts, their
+    compile and the run command are held as they are."""
+    return replace(frame, interfaces=(), language="", compiled=CompileResult(), run=None,
+                   stack_findings=())
+
+
+def _patchable(
+    findings: Iterable[str], items: Sequence[dict[str, Any]], frame: _Frame,
+    overflow: Sequence[str],
+) -> bool:
+    """True when there are tickets to patch, none was dropped at a cap (the full
+    re-plan consolidates so no work is lost) and the tickets alone reproduce every
+    finding: one the contracts or the run command cause needs a full re-plan."""
+    if not items or overflow:
+        return False
+    fit = _assemble(items, _ticket_frame(frame))
+    return not fit.overflow and set(findings) <= set(fit.blocking)
+
+
+def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
+    """What the Spec gate checks of the criteria themselves, beside the critique,
+    run over the entries it would materialize (``gate_wiring._criteria_list``)."""
+    if not criteria:
+        return ("criteria set is empty",)
+    out: list[str] = []
+    for c in criteria:
+        entry: dict[str, Any] = {"id": c.id, "text": c.text, "oracle": c.oracle_hint}
+        if c.given or c.when or c.then:
+            entry.update(given=list(c.given), when=list(c.when), then=list(c.then))
+        missing = [f for f in _GATE_FIELDS if not str(entry.get(f) or "").strip()]
+        if missing:
+            out.append(f"criterion {c.id}: missing/empty {', '.join(missing)}")
+        if steps := _incomplete_steps(entry):
+            out.append(f"criterion {c.id}: scenario has no {'/'.join(steps)} step")
+    if not any(c.security_abuse for c in criteria):
+        out.append("no criterion flags security_abuse=true")
+    return tuple(out)
+
+
+# A plan this small goes to the delta whole: a fix often lands in a ticket no finding
+# names ("fold contracts-2 into the ticket it serves"), and a summary-only ticket can't
+# be edited.
+_SHOW_ALL_TICKETS = 8
+
+
+def _affected(
+    findings: Iterable[str], items: Sequence[dict[str, Any]], contracts: Iterable[str]
+) -> set[str]:
+    """Ids of the tickets the delta sees in full: every one in a small plan, else the
+    ones the findings name: by id, by a scenario they own, or by a contract they
+    implement or consume (matched as text: a name may hold spaces)."""
+    if len(items) <= _SHOW_ALL_TICKETS:
+        return {i["id"] for i in items}
+    findings = tuple(findings)
+    tokens = {tok.strip(".") for f in findings for tok in _SAFE_TICKET_ID.findall(f)}
+    named = {n for n in contracts if n and any(n in f for f in findings)}
+    return {
+        i["id"] for i in items
+        if i["id"] in tokens
+        or named.intersection((*i["implements"], *i["consumes"]))
+        or any(s["id"] in tokens for s in i["scenarios"])
+    }
+
+
+_INDEX_KEYS = (
+    "id", "title", "specialty", "difficulty", "depends_on", "files", "implements",
+    "consumes", "entrypoint",
+)
+
+
+def _delta_text(
+    request: str, findings: Sequence[str], items: Sequence[dict[str, Any]],
+    shown: set[str], contracts: Sequence[tuple[str, str]], brief: IntentBrief | None,
+    epic_ids: frozenset[str],
+) -> str:
+    """The delta call's prompt: the findings, the ``shown`` tickets in full and
+    only a summary of the rest, so the reply stays a fraction of the plan."""
+    full = [{k: v for k, v in i.items() if k != _EPIC_KEY} for i in items if i["id"] in shown]
+    index = [
+        {**{k: i[k] for k in _INDEX_KEYS}, "scenario_ids": [s["id"] for s in i["scenarios"]]}
+        for i in items if i["id"] not in shown
+    ]
+    used = {
+        *(n for n, _ in contracts if any(n in f for f in findings)),
+        *(n for i in full for n in (*i["implements"], *i["consumes"])),
+    }
+    return (
+        f"REQUEST:\n{request}\n\nPLAN CHECK FINDINGS:\n- " + "\n- ".join(findings)
+        + _goals_text(brief)
+        + "\n\nINTERFACE CONTRACTS (fixed):\n"
+        + ("\n".join(f"- {n}: {spec}" if n in used else f"- {n}" for n, spec in contracts)
+           or "(none)")
+        + "\n\nTICKETS THE FINDINGS NAME (in full; only these may be changed):\n"
+        + (as_text(full) if full else "(none)")
+        + "\n\nEVERY OTHER TICKET (summary for reference: never change one, list its "
+        "scenarios or move one off it; you may still remove the ticket):\n"
+        + (as_text(index) if index else "(none)")
+        + (f"\n\nEPICS: {', '.join(sorted(epic_ids))}. Every ticket id keeps its epic "
+           "prefix (E1-T01); a new ticket's id starts with the prefix of its epic, and "
+           "its depends_on names only tickets of that epic." if epic_ids else "")
+    )
+
+
+def _merge_delta(
+    items: Sequence[dict[str, Any]], delta: dict[str, Any], epic_ids: frozenset[str],
+    shown: set[str],
+) -> list[dict[str, Any]] | None:
+    """``items`` with ``delta`` applied by id. A listed ticket's fields replace the
+    old ones and its scenarios merge by id (one listed on another ticket moves
+    there); removals drop tickets and scenarios. None for a delta that changes
+    nothing, names a ticket outside the plan's epics, leaves no ticket, lists one
+    scenario on two tickets, or edits a ticket the model saw only as a summary
+    (not in ``shown``): changing it, or moving or removing a scenario on it,
+    would overwrite content it never saw."""
+    upserts: dict[str, dict[str, Any]] = {}
+    for u in _objs(delta.get("tickets")):
+        tid = _str(u.get("id")).strip()
+        if tid and tid not in _GENERATED_TICKETS:
+            upserts[tid] = {k: v for k, v in u.items() if not k.startswith("__")}
+    removed = set(_strs(delta.get("remove_tickets")))
+    dropped = set(_strs(delta.get("remove_scenarios")))
+    if not (upserts or removed or dropped):
+        _rejected("it changes nothing")
+        return None
+    summarized = {i["id"] for i in items} - shown
+    if edited := summarized & set(upserts):
+        _rejected(f"it rewrites summary-only ticket(s) {', '.join(sorted(edited))}")
+        return None
+    listed: dict[str, str] = {}
+    for tid, u in upserts.items():
+        for s in _objs(u.get("scenarios")):
+            sid = _str(s.get("id")).strip()
+            if sid and listed.setdefault(sid, tid) != tid:
+                _rejected(f"it lists scenario {sid} on two tickets")
+                return None
+    owner = {s["id"]: i["id"] for i in items for s in i["scenarios"]}
+    if moved := [sid for sid in (*listed, *dropped) if owner.get(sid) in summarized]:
+        _rejected(f"it moves or removes scenario(s) {', '.join(moved)} "
+                         "of a summary-only ticket")
+        return None
+    out: dict[str, dict[str, Any]] = {
+        i["id"]: {**i, "scenarios": [
+            s for s in i["scenarios"]
+            if s["id"] not in dropped and listed.get(s["id"], i["id"]) == i["id"]
+        ]}
+        for i in items if i["id"] not in removed
+    }
+    for tid, u in upserts.items():
+        epic = _EPIC_OF_TICKET.match(tid)
+        if epic_ids and (epic is None or epic.group(1) not in epic_ids):
+            _rejected(f"ticket {tid} is outside the plan's epics")
+            return None
+        old = out.get(tid, {})
+        new = _objs(u.get("scenarios"))
+        mine = {sid: s for s in new if (sid := _str(s.get("id")).strip())}
+        kept = [mine.pop(s["id"], s) for s in _objs(old.get("scenarios"))]
+        entry = {**old, **u, "id": tid, "scenarios": [
+            s for s in (*kept, *mine.values(), *(s for s in new if not _str(s.get("id")).strip()))
+            if _str(s.get("id")).strip() not in dropped
+        ]}
+        if epic_ids and epic is not None:
+            eid = epic.group(1)
+            entry[_EPIC_KEY] = eid
+            entry["depends_on"] = [
+                d for d in _steps(entry.get("depends_on")) if d.startswith(f"{eid}-")
+            ]
+        out[tid] = entry
+    if not out:
+        _rejected("it leaves no ticket")
+        return None
+    return list(out.values())
+
+
+def _rejected(why: str) -> None:
+    progress.log(f"planner delta rejected: {why}; re-planning in full")
+    return None
+
+
+def _patch_note(before: int) -> str:
+    return (f" Patched the plan in-node with one delta call after its own plan check: "
+            f"{before} -> 0 finding(s).")
+
+
 def make_planner_node(
     rt: AgentRuntime,
     index: SymbolIndex | None = None,
@@ -2914,6 +3639,49 @@ def make_planner_node(
             )
         ]
         return merged, missing, omissions, concerns
+
+    def _patch(
+        state: FactoryState, findings: Sequence[str], items: Sequence[dict[str, Any]],
+        contracts: Sequence[tuple[str, str]], frame: _Frame, structural: frozenset[str],
+    ) -> _Fit | None:
+        """One delta call closing ``findings``, merged into ``items`` and put through
+        the same assembly as a full plan; the merged plan's fit. None (re-plan in
+        full) for a delta that does not merge or flags a security/abuse omission,
+        or a merged plan still failing a check, dropping work at a cap, or with a
+        gate-checked criteria problem outside ``structural``. The caller keeps the
+        plan's own criteria review: the delta never saw it, so it cannot clear it."""
+        epic_ids = frozenset(e.id for e in frame.epics)
+        shown = _affected(findings, items, (n for n, _ in contracts))
+        try:
+            delta = _call(DELTA_SOP, DELTA_SCHEMA, _delta_text(
+                str(state.get("request", "")), findings, items, shown, contracts,
+                frame.brief, epic_ids,
+            ))
+        except ProxyUnavailable as exc:
+            # Only an unparseable reply falls back: a transport outage stays one.
+            if not isinstance(exc.__cause__, StructuredOutputError):
+                raise
+            _rejected("its reply did not parse")
+            return None
+        merged = _merge_delta(items, delta, epic_ids, shown)
+        if merged is None:
+            return None
+        if _strs(_section(delta, "criteria_review").get("security_abuse_omissions")):
+            _rejected("it reports a security/abuse omission")
+            return None
+        fit = _assemble(merged, frame)
+        if fit.blocking:
+            _rejected(f"{len(fit.blocking)} finding(s) still open: "
+                             + " | ".join(fit.blocking)[:400])
+            return None
+        if fit.overflow:
+            _rejected("the merged plan drops work at a cap")
+            return None
+        if new := set(_structural_findings(fit.criteria)) - structural:
+            _rejected("new criteria problem(s): " + " | ".join(sorted(new))[:400])
+            return None
+        progress.log(f"planner delta accepted: {len(findings)} finding(s) closed")
+        return fit
 
     def _draft(
         state: FactoryState, payload: dict[str, Any], seqs: dict[str, Seq],
@@ -3019,6 +3787,7 @@ def make_planner_node(
             tickets_seq=seqs["tickets"],
             criteria_seq=seqs["criteria"],
             base=base,
+            stack_findings=_stack_command_findings(decided),
         )
         return _Draft(
             payload=payload, brief=brief, interfaces=interfaces, epics=epics,
@@ -3055,6 +3824,25 @@ def make_planner_node(
             )
             what = f"epic(s) {', '.join(targets)}"
         else:
+            items = _ticket_items(
+                draft.fit.tickets, draft.fit.criteria,
+                _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
+            )
+            # An open review gap needs the full re-plan: the delta never sees it.
+            if draft.missing or draft.omissions:
+                progress.log("planner delta skipped: the review has an open gap")
+            elif not _patchable(blocking, items, draft.frame, draft.fit.overflow):
+                progress.log("planner delta skipped: a finding needs more than the tickets "
+                             "changed")
+            else:
+                fit = _patch(
+                    state, notes, items,
+                    [(_str(i.get("name")), _contract_text(i))
+                     for i in _objs(draft.payload.get("interfaces"))],
+                    draft.frame, frozenset(_structural_findings(draft.fit.criteria)),
+                )
+                if fit is not None:
+                    return replace(draft, fit=fit), _patch_note(len(blocking))
             text = _revision_block(
                 notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
             )
@@ -3074,6 +3862,12 @@ def make_planner_node(
         targets = _target_epics(findings, prior) if findings and prior else None
         if findings and prior and targets:
             return _replan_epics(state, config, prior, targets, findings)
+        if findings:
+            patched = _patch_replan(
+                state, config, prior or _prior_plan(state, rt, inline=True), findings
+            )
+            if patched is not None:
+                return patched
         spans = _retrieve_spans(index, state)
         if toolchains is None:
             from foundry.toolchains import available_toolchains
@@ -3163,7 +3957,11 @@ def make_planner_node(
             seq=design_seq,
         )
         constraints_seq = seq("pinned_constraints")
-        constraints = _build_constraints(payload.get("pinned_constraints"), constraints_seq)
+        constraints = _build_constraints(
+            [*_objs(payload.get("pinned_constraints")),
+             *_stack_constraints(draft.frame.stack, payload)],
+            constraints_seq,
+        )
         retired = _retired_constraints(state, constraints, constraints_seq)
 
         epics_seq = seq("artifact:epics")
@@ -3278,12 +4076,10 @@ def make_planner_node(
         criteria, PRD criterion ids, critique, ownership); the plan-level
         records of the earlier pass stay current. Findings the merged plan still
         has get one in-node re-run of the epics they name."""
-        store = rt.cas
 
         def seq(key: str) -> Seq:
             return rt.seq(config, NODE_ID, key)
 
-        stack = state.get("stack")
         chosen = [e for e in prior.epics if e.id in targets]
         inputs = (_intake_text(state), prior.brief, _interfaces_text(prior.interfaces))
         contents = [
@@ -3307,25 +4103,7 @@ def make_planner_node(
             )
         ]
         tickets_seq = seq("artifact:tickets")
-        base = _base(state)
-        existing = base.contract_names if base is not None else frozenset()
-        frame = _Frame(
-            names={name for name, _ in prior.interfaces} | existing,
-            epics=prior.epics,
-            cap=MAX_PLAN_TICKETS,
-            generated=prior.generated,
-            stack=stack,
-            brief=prior.intent,
-            run=None if stack is None or stack.profile else stack.run,
-            declared=prior.declared | existing,
-            # The contracts are the earlier pass's, already checked there.
-            interfaces=(),
-            language="",
-            compiled=CompileResult(),
-            tickets_seq=tickets_seq,
-            criteria_seq=seq("artifact:acceptance_criteria"),
-            base=base,
-        )
+        frame = _prior_frame(state, prior, tickets_seq, seq("artifact:acceptance_criteria"))
         fit = _assemble(raw, frame, overflow)
         rerun: tuple[str, ...] = ()
         check_note = ""
@@ -3348,21 +4126,120 @@ def make_planner_node(
                     concerns += concerns2
                 else:
                     rerun = ()
+        replanned = (*targets, *rerun)
+        old = prior.critique
+        return _emit_replan(
+            config, state, prior, fit, tickets_seq,
+            missing=(*_untagged(old.missing if old else (), replanned), *missing),
+            omissions=(
+                *_untagged(old.security_abuse_omissions if old else (), replanned), *omissions
+            ),
+            what=f"Re-planned epic(s) {', '.join(targets)}",
+            note=(f" Self-revised epic(s) {', '.join(revised)} once." if revised else "")
+            + check_note,
+            concerns=concerns,
+        )
+
+    def _prior_frame(
+        state: FactoryState, prior: _PriorPlan, tickets_seq: Seq, criteria_seq: Seq
+    ) -> _Frame:
+        stack = state.get("stack")
+        base = _base(state)
+        existing = base.contract_names if base is not None else frozenset()
+        return _Frame(
+            names={name for name, _ in prior.interfaces} | existing,
+            epics=prior.epics,
+            cap=MAX_PLAN_TICKETS if prior.epics else MAX_TICKETS,
+            generated=prior.generated,
+            stack=stack,
+            brief=prior.intent,
+            run=None if stack is None or stack.profile else stack.run,
+            declared=prior.declared | existing,
+            # The contracts are the earlier pass's, already checked there.
+            interfaces=(),
+            language="",
+            compiled=CompileResult(),
+            tickets_seq=tickets_seq,
+            criteria_seq=criteria_seq,
+            base=base,
+        )
+
+    def _patch_replan(
+        state: FactoryState,
+        config: RunnableConfig,
+        prior: _PriorPlan | None,
+        findings: tuple[str, ...],
+    ) -> dict[str, Any] | None:
+        """A Spec-gate re-plan as one delta over the previous pass's tickets, its
+        plan-level records and contracts standing. None (re-plan in full) when a
+        check finding needs more than the tickets changed, or when the merged plan
+        would still fail the gate: a check finding, a criteria problem or a
+        security/abuse omission left open."""
+        if prior is None:
+            return None
+        old = prior.critique
+        # The delta never sees the review: an open gap needs the full re-plan.
+        if old is not None and (old.security_abuse_omissions or old.missing):
+            progress.log("planner delta skipped: the review has an open gap")
+            return None
+        checked = (*old.contract_findings, *old.coverage_findings) if old else ()
+        items = _ticket_items(prior.tickets, prior.criteria.values(), prior.epic_of)
+        # Placeholder Seqs until the patch is accepted: a fallback mints its own.
+        frame = _prior_frame(state, prior, prior.prd.seq, prior.prd.seq)
+        if not _patchable(checked, items, frame, ()):
+            progress.log("planner delta skipped: a finding needs more than the tickets changed")
+            return None
+        fit = _patch(state, findings, items, prior.interfaces, frame, frozenset())
+        if fit is None:
+            return None
+        tickets_seq = rt.seq(config, NODE_ID, "artifact:tickets")
+        criteria_seq = rt.seq(config, NODE_ID, "artifact:acceptance_criteria")
+        fit = replace(
+            fit,
+            tickets=[t.model_copy(update={"seq": tickets_seq._replace(local=t.seq.local)})
+                     for t in fit.tickets],
+            criteria=[c.model_copy(update={"seq": criteria_seq._replace(local=c.seq.local)})
+                      for c in fit.criteria],
+        )
+        return _emit_replan(
+            config, state, prior, fit, tickets_seq, missing=(), omissions=(),
+            what="Patched the plan",
+            note=" Patched with one delta call instead of a full re-plan.",
+            concerns=[],
+        )
+
+    def _emit_replan(
+        config: RunnableConfig,
+        state: FactoryState,
+        prior: _PriorPlan,
+        fit: _Fit,
+        tickets_seq: Seq,
+        *,
+        missing: tuple[str, ...],
+        omissions: tuple[str, ...],
+        what: str,
+        note: str,
+        concerns: list[str],
+    ) -> dict[str, Any]:
+        """Re-emit what a re-plan of the tickets changes (tickets + tombstones,
+        criteria, PRD criterion ids, critique, ownership); the plan-level records
+        of the earlier pass stay current."""
+        store = rt.cas
+
+        def seq(key: str) -> Seq:
+            return rt.seq(config, NODE_ID, key)
+
         tickets, criteria = fit.tickets, fit.criteria
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")
         prd = prior.prd.model_copy(
             update={"criterion_ids": tuple(c.id for c in criteria), "seq": prd_seq}
         )
-        replanned = (*targets, *rerun)
-        old = prior.critique
         critique_seq = seq("artifact:criteria_findings")
         critique = CriteriaCritique(
             prd_uri=prd.prd_uri,
-            missing=(*_untagged(old.missing if old else (), replanned), *missing),
-            security_abuse_omissions=(
-                *_untagged(old.security_abuse_omissions if old else (), replanned), *omissions
-            ),
+            missing=missing,
+            security_abuse_omissions=omissions,
             judgment_provenance=JudgmentProvenance.SELF,
             seq=critique_seq,
             contract_findings=fit.contract_findings,
@@ -3383,7 +4260,7 @@ def make_planner_node(
             ),
             emit_artifact(ownership, "ownership_map", NODE_ID, ownership_seq, store=store),
         ]
-        concerns += fit.concerns
+        concerns = [*concerns, *fit.concerns]
         if dropped:
             concerns.append("Re-plan retired ticket(s) " + ", ".join(t.id for t in dropped) + ".")
         if critique.spec_gate_blocking():
@@ -3398,13 +4275,13 @@ def make_planner_node(
                     role=ROLE,
                     seq=seq("journal"),
                     summary=(
-                        f"Re-planned epic(s) {', '.join(targets)} of {prd.title!r}: "
+                        f"{what} of {prd.title!r}: "
                         f"{len(criteria)} acceptance criteria ({high_risk} high-risk), "
-                        f"{len(tickets)} tickets across {len(prior.epics)} epics, "
-                        f"{len(ownership.owners)} ownership units. "
+                        f"{len(tickets)} tickets"
+                        + (f" across {len(prior.epics)} epics" if prior.epics else "")
+                        + f", {len(ownership.owners)} ownership units. "
                         "Revised after a Spec-gate failure."
-                        + (f" Self-revised epic(s) {', '.join(revised)} once." if revised else "")
-                        + check_note
+                        + note
                     ),
                     concerns=tuple(concerns),
                 )

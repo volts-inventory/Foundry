@@ -83,9 +83,9 @@ def test_smoke_gate_missing_toolchain_is_grounding_unavailable(tmp_path: Path) -
 
 def test_smoke_boundary_includes_smoke_verdict() -> None:
     from foundry.graph.gate_wiring import (
+        _BOUNDARY_GATES,
         BUILD_TEST_BOUNDARY,
         BUILD_TEST_SMOKE_BOUNDARY,
-        _BOUNDARY_GATES,
     )
 
     assert _BOUNDARY_GATES[BUILD_TEST_BOUNDARY] == frozenset({"build", "test"})
@@ -93,8 +93,8 @@ def test_smoke_boundary_includes_smoke_verdict() -> None:
 
 
 def test_no_profile_records_an_attested_unpinned_smoke_pass(tmp_path: Path) -> None:
-    from foundry.gates import TwoZoneGateRunner, ZoneBSigner
     from foundry.agents._runtime import AgentRuntime
+    from foundry.gates import TwoZoneGateRunner, ZoneBSigner
     from foundry.graph.gate_wiring import run_build_test_gates
     from foundry.proxy import ModelProviderProxy
     from foundry.proxy.test_doubles import MockTransport

@@ -30,6 +30,7 @@ from foundry.state.factory_state import FactoryState
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.agents.quality._common import ArtifactResolver
+    from foundry.graph.gate_wiring import BlobResolver
 
 __all__ = ["build_quality_subgraph"]
 
@@ -38,7 +39,7 @@ _REVIEWER = "reviewer"
 
 
 def build_quality_subgraph(
-    rt: AgentRuntime, *, resolve: ArtifactResolver
+    rt: AgentRuntime, *, resolve: ArtifactResolver, resolve_blob: BlobResolver | None = None
 ) -> StateGraph[FactoryState]:
     """Build the Layer-4 quality subgraph (UNCOMPILED) over ``FactoryState``.
 
@@ -47,7 +48,7 @@ def build_quality_subgraph(
     ``TestPlan`` with no oracles → a VACUOUS Test gate pass.
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
-    reviewer = make_reviewer_node(rt, resolve=resolve)
+    reviewer = make_reviewer_node(rt, resolve=resolve, resolve_blob=resolve_blob)
 
     # A concrete ``def`` (not the ``NodeFn`` Callable alias) so mypy can bind
     # ``add_node``'s ``_NodeWithConfig`` Protocol TypeVar (SG2/IM5).

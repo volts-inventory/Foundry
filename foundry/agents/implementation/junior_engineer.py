@@ -22,6 +22,8 @@ What these helpers are careful about (LEARNINGS L4/L5/L7, arch §2/§2b):
 
 from __future__ import annotations
 
+import contextlib
+import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
@@ -32,16 +34,17 @@ from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact
-from foundry.schemas.gates import GateResult, GateStatus
+from foundry.schemas.gates import FixPass, GateResult, GateStatus
 from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
 from foundry.state.reducers import DETERMINISTIC_GATES, live_constraints
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
-    from foundry.graph.gate_wiring import BlobResolver
+    from foundry.gates.self_check import CheckBase, CheckSpec, SelfCheckSettings
+    from foundry.graph.gate_wiring import BlobResolver, FailureCluster, _DiffOps
     from foundry.state.factory_state import FactoryState
 
     # Reconstitutes a typed body from its content-addressed handle (the same INFRA
@@ -65,7 +68,8 @@ _FIXER_PERSONA = (
 )
 _FIXER_RULES = (
     "The failures below are the tail of each gate's output: re-run the failing "
-    "command yourself (see `verify`) to read the whole output before you edit.",
+    "command yourself (see `verify`) to read the whole output before you edit, unless "
+    "the summary says it cannot run here.",
     "After each fix re-run the commands in `verify` (install only once its package "
     "manifest exists; then build and typecheck; then the tests) and keep going until "
     "they all pass or you run out of turns. If one cannot run here (missing tool, no "
@@ -76,9 +80,24 @@ _FIXER_RULES = (
     "point the step module's binding at it (pytest-bdd: scenarios(\"<path relative to "
     "the module>\")) and implement its steps. Fix one feature file group at a time.",
 )
+# The first two rules for a fixer session with the ``check`` tool.
+_FIXER_CHECK_RULES = (
+    "The failures below are the tail of each gate's output: call `check` to see them as "
+    "the gates report them on this tree (the build and the acceptance scenarios), or "
+    "re-run the failing command in `verify` for its whole output, before you edit.",
+    "After each fix call `check`, and keep going until it lists nothing as yours or you "
+    "run out of turns: done is refused while it does. `check` does not run the stack's "
+    "own test command: re-run a failing test named below from `verify` yourself. If one "
+    "cannot run here (missing tool, no network), say so in a TRIAGE line.",
+)
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
+# A local model spends ~10 of a fix pass's turns re-reading files before its first edit.
+_LOCAL_FIX_TURN_BUDGET = 40
+# The files a failure names are inlined in the fix packet, so they cost no read turns.
+_INLINE_FILES = 3
+_INLINE_CHARS = 8_000
 _DEFAULT_COST_BUDGET_MICROUSD = 1_000_000  # integer micro-USD, never floats
 
 
@@ -162,15 +181,114 @@ def _failed_gates(state: FactoryState) -> list[GateResult]:
     ]
 
 
+# pytest's per-test detail header: ``____ test_name ____`` (or Class.test_name).
+_TEST_HEADER = re.compile(r"^_{3,} (\S+) _{3,}$")
+# ... and for a module that failed to collect: ``____ ERROR collecting tests/x.py ____``.
+_COLLECT_HEADER = re.compile(r"^_{3,} ERROR collecting (\S+) _{3,}$")
+
+
+def fix_target(
+    state: FactoryState, resolve: ArtifactResolver, failed: Sequence[GateResult],
+) -> tuple[FailureCluster | None, int]:
+    """The failure cluster the fix loop's newest check aimed the next pass at
+    (``FixPass.target``), among ``failed``'s clusters, and how many failures the
+    other clusters hold. ``(None, 0)`` before a plan, or when the plan's cluster is
+    no longer failing."""
+    from foundry.agents.implementation.tickets import built_task_ids, read_tickets
+    from foundry.graph.gate_wiring import failure_clusters, window_passes
+
+    passes = window_passes(state, resolve)
+    if not passes or passes[-1].target is None:
+        return None, 0
+    clusters = failure_clusters(failed, read_tickets(state, resolve), built_task_ids(state))
+    aimed = next((c for c in clusters if c.key == passes[-1].target), None)
+    if aimed is None or len(clusters) < 2:
+        return None, 0
+    return aimed, sum(len(c.items) for c in clusters if c is not aimed)
+
+
+def scope_gates(
+    failed: Sequence[GateResult], cluster: FailureCluster,
+) -> list[GateResult]:
+    """``failed`` cut down to ``cluster``: the gates it has failures in, and from a
+    gate whose failures name ids, only the lines (and pytest's ``___ test ___``
+    detail blocks) of the cluster's ids — lines naming no id are kept as context."""
+    from foundry.graph.gate_wiring import failing_ids
+
+    gates = {i.partition(":")[0] for i in cluster.items}
+    mine = {i.partition(":")[2] for i in cluster.items}
+    out: list[GateResult] = []
+    for g in failed:
+        if g.name not in gates:
+            continue
+        if not failing_ids(g.findings):
+            out.append(g)
+            continue
+        names = {i.rsplit("::", 1)[-1] for i in mine}
+        kept: list[str] = []
+        skipping = False
+        for line in g.findings:
+            st = line.strip()
+            header = _TEST_HEADER.match(st)
+            collecting = _COLLECT_HEADER.match(st)
+            if collecting is not None:
+                skipping = collecting.group(1) not in mine
+            elif header is not None:
+                test = header.group(1).rsplit(".", 1)[-1]
+                skipping = test not in names
+            elif st.startswith("="):  # a section line ends the detail block
+                skipping = False
+            ids = failing_ids([line])
+            if ids:
+                if set(ids) & mine:
+                    kept.append(line)
+            elif not skipping:
+                kept.append(line)
+        out.append(g.model_copy(update={"findings": tuple(kept)}))
+    return out
+
+
+def _cluster_gates(
+    state: FactoryState, resolve: ArtifactResolver, *, scoped: bool = True,
+) -> tuple[list[GateResult], tuple[str, ...]]:
+    """The failed gates a fixer pass is shown — scoped to the planned cluster — and
+    the summary lines that say so."""
+    failed = _failed_gates(state)
+    if not scoped:
+        return failed, ()
+    cluster, others = fix_target(state, resolve, failed)
+    if cluster is None:
+        return failed, ()
+    return scope_gates(failed, cluster), (
+        f"this pass fixes ONE failure cluster: {cluster.key} ({len(cluster.items)} "
+        "failure(s), listed below)",
+        f"{others} other failure(s) are handled separately — don't touch them",
+    )
+
+
+def fix_failures(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
+    """:func:`_prior_failures` scoped to the fix pass's planned cluster."""
+    out: list[str] = []
+    for g in _cluster_gates(state, resolve)[0]:
+        out.append(f"[{g.name} gate FAILED]")
+        out.extend(g.findings)
+    return tuple(out)
+
+
 def _fix_summary(
     state: FactoryState,
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
     *,
     attempt: int,
+    tree: Mapping[str, str | None] | None = None,
+    scoped: bool = True,
 ) -> tuple[str, ...]:
     """The head of a fixer pass's input: the failing gates and the tests/scenarios
-    they name, then what the previous pass of this fix loop touched and reported.
+    they name, the files to edit first (with their content from ``tree``, the
+    integrated tree), then what the previous pass of this fix loop touched and
+    reported. With ``scoped`` (a fixer pass) only the planned failure cluster's
+    failures are listed (:func:`fix_target`).
     Fresh attempts from a summary of earlier rollouts beat one ever-growing repair
     context (arXiv 2602.18998, 2604.16529). Read off state; no model call."""
     from foundry.graph.gate_wiring import (
@@ -180,35 +298,289 @@ def _fix_summary(
         _of_kind,
         _resolve_typed,
         failing_ids,
+        pip_manifest_failure,
     )
 
-    failed = _failed_gates(state)
+    failed, scope = _cluster_gates(state, resolve, scoped=scoped)
     ids = [i for g in failed for i in failing_ids(g.findings)]
+    named = _named_files(failed, tree)
     out = [
         "[fix summary]",
+        *scope,
         "failed gates: " + (", ".join(g.name for g in failed) or "none recorded"),
         "failing tests/scenarios: " + (", ".join(ids) or "none named; see the gate output"),
     ]
-    # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
-    # diff is this loop's previous pass, not an earlier wave's.
+    if named:
+        out.append("Edit these files first: " + ", ".join(named)
+                   + " (the failure names them)")
+    if tree is not None:
+        from foundry.agents.implementation.tickets import (
+            built_task_ids,
+            read_tickets,
+            unwritten_ticket_files,
+        )
+
+        out.extend(unwritten_ticket_files(
+            [line for g in failed for line in g.findings], read_tickets(state, resolve),
+            built_task_ids(state), tree, state.get("stack")))
+    if pip_manifest_failure(failed):
+        out.append("pip could not install a dependency the manifest declares. The install "
+                   "cannot be re-run in this sandbox (no network), so do not try: edit the "
+                   "manifest line the gate output names (a package that does not exist on "
+                   "PyPI, e.g. a standard-library module, or a version that was never "
+                   "released) and remove or correct it.")
+    from foundry.graph.gate_wiring import window_passes
+
     fixes = [a for a in _of_kind(state, FEATURE_DIFF_KIND)
              if a.task_id and a.task_id.startswith("fix-")]
-    if attempt >= 2 and fixes:
+    passes = window_passes(state, resolve)
+    if any(p.outcome not in ("initial", "restored") for p in passes):
+        out.extend(_pass_log(state, passes, resolve, resolve_blob))
+        newest = next((p for p in reversed(passes) if p.fix_task
+                       and p.fix_task.startswith("fix-")), None)
+        # A reverted pass's edits are no longer on the tree: the log says so.
+        if (named and newest is not None and passes[-1].outcome != "restored"
+                and not set(newest.touched) & set(named)):
+            out.append(f"the last fix pass ({newest.fix_task}) never edited "
+                       f"{', '.join(named)}, the file(s) the failure names: edit them "
+                       "before anything else")
+    # attempt counts the failing checks of this fix loop: from 2 on, the newest fix
+    # diff is this loop's previous pass, not an earlier wave's. (A run from before the
+    # pass ledger existed.)
+    elif attempt >= 2 and fixes:
         prev = max(fixes, key=lambda a: a.seq)
         try:
             ops = _diff_ops(_resolve_typed(prev, resolve, FeatureDiff, FEATURE_DIFF_KIND),
                             resolve_blob)
-            touched = sorted({*ops.writes, *ops.deletes, *ops.patches})
-            files = ", ".join(touched) or "no files"
+            files = touched_files(ops)
+            touched: set[str] | None = {*ops.writes, *ops.deletes, *ops.patches}
         except MaterializationError:
-            files = "an unreadable diff"
-        out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
-                   "gates above failing: try a different approach")
+            files, touched = "an unreadable diff", None
+        cut_off = any(t.run_against == f"task/{prev.task_id}"
+                      and t.explanation.startswith(TURN_CAP_NOTE)
+                      for t in state.get("gate_triage") or ())
+        broke = regressed_gates(state)
+        # A pass that changed nothing left the tree the wave built: a gate that broke
+        # since the tree before was broken by the wave, not by this pass.
+        if touched == set():
+            out.append(f"previous fix pass ({prev.task_id}) changed no file"
+                       + (" (it ran out of turns before its first edit)" if cut_off else "")
+                       + ": reading files changes nothing; make the edits this time")
+        elif broke:
+            # A pass cut off mid-refactor leaves callers of what it renamed or moved
+            # broken; "a different approach" would pile a second change on the first.
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and broke the "
+                       f"{', '.join(broke)} gate(s), which passed before it"
+                       + (" (it ran out of turns before it finished)" if cut_off else "")
+                       + ": its change is incomplete. Finish it first — update every caller "
+                       "and test of what it renamed, moved or removed — or undo it")
+        elif cut_off:
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and ran out of "
+                       "turns before it finished, leaving the gates above failing: check "
+                       "whether its edits are complete before trying a different approach")
+        else:
+            out.append(f"previous fix pass ({prev.task_id}) touched {files} and left the "
+                       "gates above failing: try a different approach")
+        if named and touched is not None and not touched & set(named):
+            out.append(f"previous fix pass never edited {', '.join(named)}, the file(s) the "
+                       "failure names: edit them before anything else")
         out.extend(f"previous fix pass reported: {t.explanation[:300]}"
                    for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
                    if t.run_against == f"task/{prev.task_id}")
+    out.extend(_inline(named, tree))
     out.append("gate output (tail):")
     return tuple(out)
+
+
+# proxy_agent's note for a session that hit packet.turn_budget.
+TURN_CAP_NOTE = "turn budget exhausted"
+
+_LOG_ENTRIES = 8
+_LOG_CHARS = 1_500
+_LOG_REPORT_CHARS = 150
+_LOG_PATCH_CHARS = 1_200
+_LOG_IDS = 4
+
+
+def _norm(failing: Iterable[str]) -> set[str]:
+    """A tree's failures with the build's compiler lines folded into one: whether
+    the build broke, not which lines changed."""
+    return {"build:" if f.startswith("build:") else f for f in failing}
+
+
+def _what(failing: Iterable[str]) -> str:
+    """Ledger failures (``gate:id``) for the log: a build failure as "the build"
+    (its signature is compiler lines, not ids), tests as ``test_a``, a few of them."""
+    failing = set(failing)
+    ids = sorted({f.split(":", 1)[-1].rsplit("::", 1)[-1][:60] for f in failing
+                  if not f.startswith("build:")})
+    more = len(ids) - _LOG_IDS
+    parts = ["the build"] if any(f.startswith("build:") for f in failing) else []
+    if ids:
+        parts.append(",".join(ids[:_LOG_IDS]) + (f" +{more} more" if more > 0 else ""))
+    return ", ".join(parts)
+
+
+def _pass_line(entry: FixPass, base: FixPass | None, reverted: bool, report: str) -> str:
+    head = f"pass {entry.pass_no} ({entry.fix_task or 'no diff'}): "
+    if not entry.touched:
+        line = head + "no file edited"
+    elif entry.outcome == "error":
+        line = head + f"edited {', '.join(entry.touched)} — the gates ERRORed (not judged)"
+    elif entry.outcome == "no-change":
+        line = head + f"edited {', '.join(entry.touched)} — no change to the tree"
+    else:
+        was = _norm(base.failing) if base is not None else set()
+        now = _norm(entry.failing)
+        fixed, broke = was - now, now - was
+        build = "build broken" if any(f.startswith("build:") for f in now) else "build ok"
+        line = head + f"edited {', '.join(entry.touched)} — "
+        if entry.outcome == "lateral":
+            n_was = base.score[2] if base is not None and base.score else len(was)
+            n_now = entry.score[2] if entry.score else len(now)
+            line += f"lateral: {n_was}→{n_now}"
+            if broke:
+                line += f", now failing {_what(broke)}"
+                if fixed:
+                    line += f" instead of {_what(fixed)}"
+        else:
+            line += entry.outcome.upper() + (", reverted" if reverted else "")
+            parts = ([f"fixed {_what(fixed)}"] if fixed else []) + (
+                [f"broke {_what(broke)}"] if broke else [])
+            if parts:
+                line += ": " + "; ".join(parts)
+        line += f" ({build})"
+    return line + (f" — reported: {report}" if report else "")
+
+
+def _patch_text(
+    state: FactoryState, task_id: str, resolve: ArtifactResolver, resolve_blob: BlobResolver,
+) -> str | None:
+    from foundry.graph.gate_wiring import (
+        FEATURE_DIFF_KIND,
+        MaterializationError,
+        _maybe_snapshot_files,
+        _of_kind,
+        _resolve_typed,
+    )
+
+    art = next((a for a in _of_kind(state, FEATURE_DIFF_KIND) if a.task_id == task_id), None)
+    if art is None:
+        return None
+    try:
+        diff = _resolve_typed(art, resolve, FeatureDiff, FEATURE_DIFF_KIND)
+        body = resolve_blob(diff.diff_uri)
+        text = body.decode("utf-8") if isinstance(body, bytes) else body
+        files = _maybe_snapshot_files(diff.diff_uri, text)
+    except (MaterializationError, KeyError, UnicodeDecodeError):
+        return None
+    if files is not None:
+        text = "\n".join(f"--- {rel}\n{content}" for rel, content in sorted(files.items()))
+    return text[:_LOG_PATCH_CHARS]
+
+
+def _pass_log(
+    state: FactoryState, passes: Sequence[FixPass], resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> list[str]:
+    """What this fix loop's passes tried, newest last, from its ledger: the files each
+    edited, how the tree came out against the best before it (the tests it fixed
+    and broke), whether it was reverted, and what the pass itself reported. A
+    worse pass that fixed something hands its patch on, to reapply without the
+    breakage. Fixer passes that each start from a summary of the earlier ones
+    instead of only the last stop repeating a reverted approach."""
+    notes: dict[str, list[str]] = {}
+    for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq):
+        task = t.run_against.removeprefix("task/")
+        if task != t.run_against:
+            notes.setdefault(task, []).append(" ".join(t.explanation.split()))
+    reports = {task: "; ".join(n)[:_LOG_REPORT_CHARS] for task, n in notes.items()}
+    lines: list[str] = []
+    salvage: tuple[FixPass, set[str], set[str]] | None = None
+    for i, entry in enumerate(passes):
+        if entry.outcome in ("initial", "restored"):
+            continue
+        base = _best_before(passes[:i])
+        reverted = i + 1 < len(passes) and passes[i + 1].outcome == "restored"
+        lines.append(_pass_line(entry, base, reverted,
+                                reports.get(entry.fix_task or "", "")))
+        if entry.outcome == "worse" and base is not None and entry.fix_task:
+            fixed = _norm(base.failing) - _norm(entry.failing)
+            if fixed:
+                salvage = (entry, fixed, _norm(entry.failing) - _norm(base.failing))
+    shown: list[str] = []
+    room = _LOG_CHARS
+    for line in reversed(lines[-_LOG_ENTRIES:]):
+        if len(line) > room and shown:
+            break
+        shown.insert(0, line[:room])
+        room -= len(line)
+    out = ["[fix passes so far in this loop]"]
+    if len(lines) > len(shown):
+        out.append(f"({len(lines) - len(shown)} earlier pass(es) not shown)")
+    out.extend(shown)
+    if salvage is not None:
+        entry, fixed, broke = salvage
+        patch = _patch_text(state, entry.fix_task or "", resolve, resolve_blob)
+        if patch:
+            out.append(f"{entry.fix_task}'s change fixed {_what(fixed)} but was worse "
+                       f"overall: reapply this part without breaking "
+                       f"{_what(broke) or 'the build'}:\n{patch}")
+    out.append("do not repeat an approach marked WORSE or no-change from this tree.")
+    return out
+
+
+def _best_before(passes: Sequence[FixPass]) -> FixPass | None:
+    from foundry.graph.gate_wiring import best_entry
+
+    return best_entry(passes, passes[0].window) if passes else None
+
+
+def regressed_gates(state: FactoryState) -> tuple[str, ...]:
+    """The tree gates that FAIL on the newest tree and PASSed on the tree checked
+    before it: what the change between the two broke."""
+    trees: dict[str, dict[str, GateResult]] = {}
+    for g in sorted(state.get("gates") or (), key=lambda g: g.seq):
+        if g.name in DETERMINISTIC_GATES and g.name != "spec":
+            trees.setdefault(g.run_against, {})[g.name] = g
+    order = sorted(trees.values(), key=lambda v: max(g.seq for g in v.values()))
+    if len(order) < 2:
+        return ()
+    prev, cur = order[-2:]
+    return tuple(sorted(n for n, g in cur.items() if g.status is GateStatus.FAIL
+                        and n in prev and prev[n].status is GateStatus.PASS))
+
+
+def _named_files(
+    failed: Sequence[GateResult], tree: Mapping[str, str | None] | None
+) -> tuple[str, ...]:
+    """The files the failure names, kept to those in ``tree`` when one is given
+    (both pip manifests are candidates; a project usually has one)."""
+    from foundry.graph.gate_wiring import failure_files
+
+    files = failure_files(failed)
+    if tree is None:
+        return files
+    return tuple(f for f in files if tree.get(f) is not None)
+
+
+def _inline(named: Sequence[str], tree: Mapping[str, str | None] | None) -> list[str]:
+    """The current content of the first few named files, within a size cap; a file
+    that does not fit is left for the agent to read."""
+    out: list[str] = []
+    room = _INLINE_CHARS
+    for rel in named[:_INLINE_FILES]:
+        content = (tree or {}).get(rel)
+        if content is None or len(content) > room:
+            continue
+        room -= len(content)
+        out.append(f"current content of {rel}:\n{content}")
+    return out
+
+
+def touched_files(ops: _DiffOps) -> str:
+    """The paths one diff writes, deletes or patches, for a model-facing summary."""
+    return ", ".join(sorted({*ops.writes, *ops.deletes, *ops.patches})) or "no files"
 
 
 def _build_packet(
@@ -319,10 +691,12 @@ def _run_one_task(
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
+    check: CheckSpec | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
-    ``review`` then annotates the kept diff while the sandbox is alive.
+    ``review`` then annotates the kept diff while the sandbox is alive; ``check``
+    is the session's gate check (:mod:`foundry.gates.self_check`).
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse), then the diff keyed by
     ``content_digest`` (L7) so a re-run re-derives the same key and the
@@ -349,7 +723,10 @@ def _run_one_task(
             rules=rules,
             verify=verify,
         )
-        result: AdapterResult = rt.adapter.run(packet, sandbox)
+        from foundry.gates.self_check import check_scope
+
+        with check_scope(check):
+            result: AdapterResult = rt.adapter.run(packet, sandbox)
         from foundry.agents.implementation.tickets import trim_to_write_scope
 
         # An empty scope still drops gate inputs (feature files, criteria).
@@ -448,12 +825,12 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
     """The built tickets' files: what the fixer is repairing. Its writes elsewhere
     are kept but noted. Empty = no focus (a built ticket declared no scope)."""
     from foundry.agents.implementation.tickets import (
-        _built_task_ids,
+        built_task_ids,
         read_tickets,
         task_id_for_ticket,
     )
 
-    built = _built_task_ids(state)
+    built = built_task_ids(state)
     files: list[str] = []
     for t in read_tickets(state, resolve):
         if task_id_for_ticket(t.id) not in built:
@@ -462,6 +839,23 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
             return ()
         files.extend(f for f in t.files if f not in files)
     return tuple(files)
+
+
+def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) -> CheckSpec:
+    """A fixer session's gate check: the scenarios a wave check judges, its own the
+    planned failure cluster's items (every failure when no cluster is planned)."""
+    from foundry.gates.self_check import CheckSpec
+    from foundry.graph.gate_wiring import wave_scenarios
+
+    cluster, _ = fix_target(state, resolve, _failed_gates(state))
+    items = cluster.items if cluster is not None else ()
+    return CheckSpec(
+        base=base, scope=wave_scenarios(state, resolve),
+        own_refs=(frozenset(i.partition(":")[2] for i in items if i.startswith("test:"))
+                  if cluster is not None else None),
+        own_build=cluster is None or any(i.startswith("build:") for i in items),
+        rules=dict(zip(_FIXER_RULES, _FIXER_CHECK_RULES, strict=False)),
+    )
 
 
 def make_fixer_node(
@@ -473,6 +867,7 @@ def make_fixer_node(
     snapshot_store: str | None = None,
     turn_budget: int = _DEFAULT_TURN_BUDGET,
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+    self_check: SelfCheckSettings | None = None,
 ) -> NodeFn:
     """One coding session that repairs the INTEGRATED tree after a failed gate.
 
@@ -481,38 +876,31 @@ def make_fixer_node(
     failure. The fixer instead seeds a single sandbox with the integrated tree, hands
     the adapter the latest failures behind a :func:`_fix_summary`, and emits one
     FeatureDiff whose seq is lifted past every existing diff, so integration applies
-    it on top (later-by-Seq wins)."""
+    it on top (later-by-Seq wins). ``self_check`` gives the session the gates as a
+    ``check`` tool, its own failures the planned cluster's."""
     if rt.adapter is None or rt.cas is None:
         raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        import tempfile
-
         from foundry.graph.gate_wiring import (
             FEATURE_DIFF_KIND,
-            GATE_INPUT_FILES,
             MaterializationError,
             _fix_attempts,
             _of_kind,
-            materialize_workdir,
+            integrated_files,
+            lift_epoch,
         )
 
         attempt = _fix_attempts(state, config)
+        budget = turn_budget
+        # The fixer's packet carries no tier, so it runs on the default level.
+        fix_tier: str | None = None
+        is_local = getattr(rt.adapter, "is_local", None)
+        if callable(is_local) and is_local(fix_tier):
+            budget = max(turn_budget, _LOCAL_FIX_TURN_BUDGET)
         try:
-            with tempfile.TemporaryDirectory(prefix="foundry-fix-") as tmp:
-                materialize_workdir(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob)
-                # Gate inputs (criteria.json) stay out of the agent's worktree: an agent
-                # told to "make the gates pass" must not be handed the oracle to edit.
-                overlay: dict[str, str | None] = {}
-                for f in sorted(Path(tmp).rglob("*")):
-                    rel = f.relative_to(tmp).as_posix()
-                    if not f.is_file() or rel in GATE_INPUT_FILES:
-                        continue
-                    try:
-                        overlay[rel] = f.read_text(encoding="utf-8")
-                    except UnicodeDecodeError:
-                        continue  # a base tree's binary asset: the sandbox clone has it
-
+            overlay: dict[str, str | None] = dict(
+                integrated_files(state, resolve=resolve, resolve_blob=resolve_blob))
         except MaterializationError as exc:
             # The gate already recorded this tree as ERROR; returning no diff lets the
             # bounded fix loop halt in order instead of crashing the run.
@@ -535,11 +923,20 @@ def make_fixer_node(
         from foundry.agents.implementation.tickets import group_failures_by_ticket, read_tickets
 
         failures = (
-            *_fix_summary(state, resolve, resolve_blob, attempt=attempt),
-            *group_failures_by_ticket(_prior_failures(state), read_tickets(state, resolve)),
+            *_fix_summary(state, resolve, resolve_blob, attempt=attempt, tree=overlay),
+            *group_failures_by_ticket(fix_failures(state, resolve), read_tickets(state, resolve)),
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
+
+        diagnosis = None
+        if (cloud := diagnosis_tier(rt, fix_tier)) is not None:
+            diagnosis = diagnose(rt, cloud, label=f"fix attempt {attempt}", summary=failures,
+                                 files=_named_files(_failed_gates(state), overlay),
+                                 tree=overlay)
+            if diagnosis is not None:
+                failures = (*diagnosis.packet_lines(), *failures)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
 
         focus = _fix_focus(state, resolve)
@@ -565,35 +962,42 @@ def make_fixer_node(
             branch=f"task/{task_id}",
             seq=rt.seq(config, FIXER_NODE_ID, f"task:{task_id}"),
         )
-        writes = _run_one_task(
-            rt,
-            task,
-            state.get("pinned_constraints") or (),
-            config,
-            source_dir=source_dir,
-            snapshot_store=snapshot_store,
-            turn_budget=turn_budget,
-            cost_budget_microusd=cost_budget_microusd,
-            prior_failures=failures,
-            persona=persona,
-            overlay=overlay,
-            rules=_FIXER_RULES,
-            verify=verify_commands(state.get("stack")),
-            review=lambda result, sandbox: note_fix_writes(
-                result, sandbox, task_id, focus=focus, contracts=contracts),
-        )
-        # Integration orders diffs by Seq. A fresh diff key starts at epoch 1, tying
-        # with (and possibly sorting under) the diffs it repairs, so lift its epoch
-        # past every existing diff.
-        top = max(a.seq.emission_epoch for a in _of_kind(state, FEATURE_DIFF_KIND))
-        writes["artifacts"] = [
-            a.model_copy(update={"seq": a.seq._replace(emission_epoch=top + 1)})
-            for a in writes["artifacts"]
-        ]
+        with contextlib.ExitStack() as base_scope:
+            base: CheckBase | None = None
+            if self_check is not None and self_check.enabled():
+                from foundry.gates.self_check import check_base
+
+                base = base_scope.enter_context(check_base(
+                    state, resolve=resolve, resolve_blob=resolve_blob, rt=rt,
+                    settings=self_check))
+            writes = _run_one_task(
+                rt,
+                task,
+                state.get("pinned_constraints") or (),
+                config,
+                source_dir=source_dir,
+                snapshot_store=snapshot_store,
+                turn_budget=budget,
+                cost_budget_microusd=cost_budget_microusd,
+                prior_failures=failures,
+                persona=persona,
+                overlay=overlay,
+                rules=_FIXER_RULES,
+                verify=verify_commands(state.get("stack")),
+                review=lambda result, sandbox: note_fix_writes(
+                    result, sandbox, task_id, focus=focus, contracts=contracts),
+                check=_fix_check(base, state, resolve) if base is not None else None,
+            )
+        # Integration applies it on top of the diffs it repairs (none yet when every
+        # ticket failed).
+        writes["artifacts"] = [a.model_copy(update={"seq": lift_epoch(state, a.seq)})
+                               for a in writes["artifacts"]]
         writes.setdefault("agent_journal", []).append(journal_entry(
             node_id=FIXER_NODE_ID, role="Backend Engineer",
             seq=rt.seq(config, FIXER_NODE_ID, f"journal:{task_id}"),
             summary=f"Fixed the failing gates (attempt {attempt})",
+            concerns=((f"diagnosis from {cloud}: {diagnosis.summary()}",)
+                      if diagnosis is not None else ()),
         ))
         return writes
 

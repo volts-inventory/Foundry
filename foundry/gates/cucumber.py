@@ -1,8 +1,11 @@
 """Cucumber Messages (NDJSON) scenario accounting for the Test gate's BDD path.
 
-Any language's official Cucumber runner (cucumber-js, cucumber-jvm, godog, ...) can
-write Cucumber Messages; the gate runs the planned ``bdd`` command with
-``$FOUNDRY_BDD_REPORT`` pointing at a file it created, then maps each trusted
+The gate runs the planned ``bdd`` command with ``$FOUNDRY_BDD_REPORT`` pointing at a
+file it created. cucumber-js, cucumber-jvm and Reqnroll write Cucumber Messages there
+natively; godog and cucumber-rs have no Messages writer, so for a Go or Rust project
+the gate also accepts their legacy Cucumber JSON and converts it
+(``convert_cucumber_json``), reading the step patterns — which that format omits —
+from the project's own source. Either way the gate then maps each trusted
 scenario (``features/<ticket>.feature::<criterion id>``) to an outcome in the same
 vocabulary as the pytest-bdd path (passed / failed / skipped / missing / unmatched /
 catch-all).
@@ -37,6 +40,7 @@ __all__ = [
     "CUCUMBER_RESIDUAL",
     "ReportDigest",
     "ReportError",
+    "convert_cucumber_json",
     "create_report_file",
     "expression_to_regex",
     "make_probes",
@@ -44,6 +48,7 @@ __all__ = [
     "read_verified_report",
     "record_report",
     "scenario_outcomes",
+    "source_step_patterns",
 ]
 
 CUCUMBER_RESIDUAL = (
@@ -81,19 +86,21 @@ def create_report_file(directory: Path) -> Path:
     return path
 
 
-def _read_regular(path: Path) -> bytes:
+def _read_regular(path: Path, cap: int = _MAX_REPORT_BYTES, what: str = "report") -> bytes:
+    """``path``'s bytes, opened without following a symlink or blocking on a FIFO,
+    and only if it is a regular file of at most ``cap`` bytes."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
-        raise ReportError(f"report not readable ({exc.strerror})") from exc
+        raise ReportError(f"{what} not readable ({exc.strerror})") from exc
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
-            raise ReportError("report is not a regular file")
-        if st.st_size > _MAX_REPORT_BYTES:
-            raise ReportError(f"report exceeds {_MAX_REPORT_BYTES} bytes")
+            raise ReportError(f"{what} is not a regular file")
+        if st.st_size > cap:
+            raise ReportError(f"{what} exceeds {cap} bytes")
         chunks: list[bytes] = []
-        remaining = _MAX_REPORT_BYTES + 1
+        remaining = cap + 1
         while remaining > 0:
             chunk = os.read(fd, min(remaining, 1 << 20))
             if not chunk:
@@ -103,8 +110,8 @@ def _read_regular(path: Path) -> bytes:
     finally:
         os.close(fd)
     data = b"".join(chunks)
-    if len(data) > _MAX_REPORT_BYTES:
-        raise ReportError(f"report exceeds {_MAX_REPORT_BYTES} bytes")
+    if len(data) > cap:
+        raise ReportError(f"{what} exceeds {cap} bytes")
     return data
 
 
@@ -133,9 +140,12 @@ def parse_messages(data: bytes) -> list[dict[str, Any]]:
     return envelopes
 
 
-def read_verified_report(path: Path, digest: ReportDigest | None) -> list[dict[str, Any]]:
+def read_verified_report(
+    path: Path, digest: ReportDigest | None, workdir: Path | None = None
+) -> list[dict[str, Any]]:
     """Read the report, check it against the digest recorded when the runner exited,
-    and parse it. Raises ``ReportError`` on any mismatch."""
+    and parse it — Cucumber JSON from a Go / Rust project in ``workdir`` is converted.
+    Raises ``ReportError`` on any mismatch."""
     if digest is None:
         raise ReportError("report was missing or unreadable when the runner exited")
     data = _read_regular(path)
@@ -143,6 +153,10 @@ def read_verified_report(path: Path, digest: ReportDigest | None) -> list[dict[s
         raise ReportError("report changed after the runner exited")
     if not data:
         raise ReportError("report is empty — the bdd command did not write Cucumber Messages")
+    if data.lstrip()[:1] == b"[":
+        if workdir is None:
+            raise ReportError("report is legacy Cucumber JSON, not Cucumber Messages")
+        return convert_cucumber_json(data, workdir)
     return parse_messages(data)
 
 
@@ -270,6 +284,44 @@ def _catch_all_ids(
     return flagged, notes
 
 
+def _eval_patterns(
+    jobs: list[tuple[str, str]], sets: list[list[str]]
+) -> tuple[list[str | None], tuple[str, ...]]:
+    """Per pattern (``("full"|"search", regex)``): one ``1``/``0`` per set (every
+    text in the set matches), ``"E"`` when it does not compile, ``None`` when the
+    child ran out of time before answering it."""
+    if not jobs:
+        return [], ()
+    payload = json.dumps({"patterns": jobs, "sets": sets})
+    notes: tuple[str, ...] = ()
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", _MATCH_CHILD],
+            input=payload.encode(),
+            capture_output=True,
+            timeout=_PATTERN_EVAL_TIMEOUT_S,
+        )
+        answers = proc.stdout.decode().split()
+    except subprocess.TimeoutExpired as exc:
+        answers = (exc.stdout or b"").decode().split()
+        notes = (
+            "BDD step-definition patterns took too long to evaluate; the "
+            "unevaluated ones are treated as catch-all matchers",
+        )
+    return [*answers, *[None] * (len(jobs) - len(answers))][: len(jobs)], notes
+
+
+def _def_job(step_def: dict[str, Any], params: dict[str, list[str]]) -> tuple[str, str] | None:
+    pattern = step_def.get("pattern") or {}
+    source = str(pattern.get("source", ""))
+    try:
+        if pattern.get("type") == "REGULAR_EXPRESSION":
+            return ("search", _js_to_py(source))
+        return ("full", expression_to_regex(source, params))
+    except ValueError:
+        return None
+
+
 def _catch_all_sets(
     step_defs: dict[str, dict[str, Any]],
     params: dict[str, list[str]],
@@ -277,36 +329,9 @@ def _catch_all_sets(
 ) -> tuple[list[set[str]], tuple[str, ...]]:
     """For each probe set, the definition ids that accept every probe in it."""
     ids = sorted(step_defs)
-    patterns: list[tuple[str, str] | None] = []
-    for sid in ids:
-        pattern = step_defs[sid].get("pattern") or {}
-        source = str(pattern.get("source", ""))
-        try:
-            if pattern.get("type") == "REGULAR_EXPRESSION":
-                patterns.append(("search", _js_to_py(source)))
-            else:
-                patterns.append(("full", expression_to_regex(source, params)))
-        except ValueError:
-            patterns.append(None)
-    jobs = [p for p in patterns if p is not None]
-    notes: tuple[str, ...] = ()
-    answers: list[str] = []
-    if jobs:
-        payload = json.dumps({"patterns": jobs, "sets": [list(s) for s in probe_sets]})
-        try:
-            proc = subprocess.run(
-                [sys.executable, "-I", "-S", "-c", _MATCH_CHILD],
-                input=payload.encode(),
-                capture_output=True,
-                timeout=_PATTERN_EVAL_TIMEOUT_S,
-            )
-            answers = proc.stdout.decode().split()
-        except subprocess.TimeoutExpired as exc:
-            answers = (exc.stdout or b"").decode().split()
-            notes = (
-                "BDD step-definition patterns took too long to evaluate; the "
-                "unevaluated ones are treated as catch-all matchers",
-            )
+    patterns = [_def_job(step_defs[sid], params) for sid in ids]
+    answers, notes = _eval_patterns([p for p in patterns if p is not None],
+                                    [list(s) for s in probe_sets])
     flagged: list[set[str]] = [set() for _ in probe_sets]
     it = iter(answers)
     for sid, pat in zip(ids, patterns, strict=True):
@@ -315,6 +340,249 @@ def _catch_all_sets(
             if answer is None or len(answer) != len(probe_sets) or answer[i] != "0":
                 out.add(sid)
     return flagged, notes
+
+
+# ---- legacy Cucumber JSON (godog, cucumber-rs) --------------------------------
+
+_SKIP_DIRS = frozenset({".git", "vendor", "target", "node_modules"})
+_MAX_SOURCE_FILE = 1 << 20
+_MAX_SOURCE_TOTAL = 32 << 20
+# godog: sc.Step / Given / When / Then with a string-literal regex (optionally
+# wrapped in regexp.MustCompile).
+_GO_STEP = re.compile(
+    r"\.(?:Step|Given|When|Then)\(\s*(?:regexp\.MustCompile\(\s*)?"
+    r'(`[^`]*`|"(?:[^"\\\n]|\\.)*")'
+)
+# cucumber-rs: #[given("literal")], #[when(expr = "...")], #[then(regex = r"...")].
+_RS_STEP = re.compile(
+    r"#\[\s*(?:cucumber\s*::\s*)?(?:given|when|then|step)\s*\(\s*(?:(expr|regex)\s*=\s*)?"
+    r'(r(#*)"(?s:.*?)"\3|"(?:[^"\\]|\\.)*")'
+)
+_STEP_KEYWORD_TYPES = {"given": "Context", "when": "Action", "then": "Outcome"}
+_JSON_STATUS = {
+    "passed": "PASSED", "failed": "FAILED", "undefined": "UNDEFINED",
+    "pending": "PENDING", "skipped": "SKIPPED", "ambiguous": "AMBIGUOUS",
+}
+
+
+def _quoted(literal: str) -> str | None:
+    """A Go / Rust double-quoted string literal's value (JSON escapes); ``None`` if
+    it uses an escape JSON lacks."""
+    try:
+        value = json.loads(literal)
+    except ValueError:
+        return None
+    return value if isinstance(value, str) else None
+
+
+def _source_files(workdir: Path, suffix: str) -> list[Path]:
+    out: list[Path] = []
+    for root, dirs, files in os.walk(workdir):
+        # The go tool ignores _* and testdata directories: so does the scan.
+        dirs[:] = sorted(
+            d for d in dirs
+            if d not in _SKIP_DIRS and not d.startswith(".")
+            and not (suffix == ".go" and (d.startswith("_") or d == "testdata"))
+        )
+        out.extend(Path(root) / f for f in sorted(files) if f.endswith(suffix))
+    return out
+
+
+# String literals (kept) and comments (blanked), so a commented-out registration
+# is not read and a `//` inside a pattern is not taken for a comment.
+_GO_TOKENS = re.compile(
+    r'(?P<s>`[^`]*`|"(?:[^"\\\n]|\\.)*"|\'(?:[^\'\\\n]|\\.)*\')'
+    r"|(?P<c>//[^\n]*|/\*.*?\*/)",
+    re.DOTALL,
+)
+_RS_TOKENS = re.compile(
+    r'(?P<s>b?r(#*)".*?"\2|b?"(?:[^"\\]|\\.)*"|\'(?:[^\'\\\n]|\\.)\')'
+    r"|(?P<c>//[^\n]*|/\*.*?\*/)",
+    re.DOTALL,
+)
+_GO_CALL = re.compile(r"\.(?:Step|Given|When|Then)\(")
+_GO_LITERAL_ARG = re.compile(r'\s*(?:regexp\.MustCompile\(\s*)?(?:`|")')
+
+
+def _strip_comments(text: str, tokens: re.Pattern[str]) -> str:
+    def blank(m: re.Match[str]) -> str:
+        if m.group("s") is not None:
+            return m.group(0)
+        return re.sub(r"[^\n]", " ", m.group(0))
+
+    return tokens.sub(blank, text)
+
+
+def _two_args(text: str, start: int) -> bool:
+    """Whether the call whose ``(`` ends at ``start`` takes two or more arguments
+    (godog's registrations do; a game loop's ``sim.Step(dt)`` does not). String
+    literals are masked by the caller."""
+    depth = 0
+    for ch in text[start:]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                return False
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return True
+    return False
+
+
+def _non_literal_go_step(text: str) -> int | None:
+    """The offset of a two-argument ``.Step/.Given/.When/.Then(`` call whose pattern
+    is not a string literal (or ``regexp.MustCompile`` of one), else ``None``."""
+    masked = _GO_TOKENS.sub(lambda m: "_" * len(m.group(0)), text)
+    for m in _GO_CALL.finditer(masked):
+        if _two_args(masked, m.end()) and not _GO_LITERAL_ARG.match(text, m.end()):
+            return m.start()
+    return None
+
+
+def source_step_patterns(workdir: Path) -> list[tuple[str, str]] | None:
+    """``(pattern type, source)`` of every step definition registered with a string
+    literal in a Go (godog) or Rust (cucumber-rs) project, or ``None`` when the
+    workdir is neither. A godog registration whose pattern is not a literal raises
+    ``ReportError`` (its catch-all check cannot run); a source file that cannot be
+    read safely is skipped, so the steps it defines count as unchecked."""
+    workdir = Path(workdir)
+    kinds = [(s, rx, tok) for marker, s, rx, tok in (
+        ("go.mod", ".go", _GO_STEP, _GO_TOKENS), ("Cargo.toml", ".rs", _RS_STEP, _RS_TOKENS),
+    ) if (workdir / marker).is_file()]
+    if not kinds:
+        return None
+    found: list[tuple[str, str]] = []
+    total = 0
+    for suffix, rx, tokens in kinds:
+        for path in _source_files(workdir, suffix):
+            cap = min(_MAX_SOURCE_FILE, _MAX_SOURCE_TOTAL - total)
+            try:
+                data = _read_regular(path, cap, "step source")
+            except ReportError:
+                continue
+            total += len(data)
+            text = _strip_comments(data.decode("utf-8", errors="replace"), tokens)
+            if suffix == ".go" and (at := _non_literal_go_step(text)) is not None:
+                line = text.count("\n", 0, at) + 1
+                raise ReportError(
+                    f"{path.relative_to(workdir).as_posix()}:{line} registers a godog "
+                    "step whose pattern is not a string literal, so the gate cannot "
+                    "check it for a catch-all — use sc.Step(`^...$`, fn)"
+                )
+            for m in rx.finditer(text):
+                lit = m.group(1 if suffix == ".go" else 2)
+                if lit.startswith("`"):
+                    value: str | None = lit[1:-1]
+                elif lit.startswith("r"):
+                    value = lit[len(m.group(3)) + 2 : -1 - len(m.group(3))]
+                else:
+                    value = _quoted(lit)
+                if value is None:
+                    continue
+                if suffix == ".go" or m.group(1) == "regex":
+                    found.append(("REGULAR_EXPRESSION", value))
+                elif m.group(1) == "expr":
+                    found.append(("CUCUMBER_EXPRESSION", value))
+                else:
+                    found.append(("REGULAR_EXPRESSION", "^" + re.escape(value) + "$"))
+    return list(dict.fromkeys(found))
+
+
+def _step_type(keyword: str, previous: str) -> str:
+    word = keyword.strip().lower()
+    if word in ("and", "but", "*"):
+        return previous
+    return _STEP_KEYWORD_TYPES.get(word, "")
+
+
+def convert_cucumber_json(data: bytes, workdir: Path) -> list[dict[str, Any]]:
+    """Cucumber Messages envelopes from a godog / cucumber-rs Cucumber JSON report.
+
+    The report carries step text, keyword and status but no step patterns, so the
+    ``stepDefinition`` envelopes are the literal patterns found in the project's
+    source, and each executed step is bound to every one of them that matches its
+    text: ``scenario_outcomes`` then probes them for catch-alls exactly as it does a
+    native report, and a step no source pattern matches is unchecked. A skipped step
+    that no source pattern matches is undefined (cucumber-rs reports it so)."""
+    patterns = source_step_patterns(workdir)
+    if patterns is None:
+        raise ReportError(
+            "report is legacy Cucumber JSON, which the gate accepts only from godog (Go) "
+            "and cucumber-rs (Rust); this runner can write Cucumber Messages — use its "
+            "message formatter (cucumber-js `--format message:$FOUNDRY_BDD_REPORT`, "
+            "cucumber-jvm `-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`)"
+        )
+    try:
+        features = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ReportError(f"report is not valid Cucumber JSON ({exc})") from exc
+    if not isinstance(features, list) or not all(isinstance(f, dict) for f in features):
+        raise ReportError("report is not a Cucumber JSON feature list")
+
+    def dicts(value: Any) -> list[dict[str, Any]]:
+        return [v for v in value if isinstance(v, dict)] if isinstance(value, list) else []
+
+    scenarios: list[tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]] = []
+    for feature in features:
+        background: list[dict[str, Any]] = []
+        for el in dicts(feature.get("elements")):
+            if el.get("type") == "background":
+                background = dicts(el.get("steps"))
+                continue
+            hooks = dicts(el.get("before")) + dicts(el.get("after"))
+            steps = background + dicts(el.get("steps"))
+            background = []
+            scenarios.append((str(feature.get("uri", "")), str(el.get("name", "")), steps, hooks))
+
+    texts = sorted({str(s.get("name", "")) for _, _, steps, _ in scenarios for s in steps})
+    defs = {f"sd{i}": {"id": f"sd{i}", "pattern": {"type": t, "source": src}}
+            for i, (t, src) in enumerate(patterns)}
+    jobs = {sid: _def_job(d, {}) for sid, d in defs.items()}
+    runnable = [sid for sid, j in jobs.items() if j is not None]
+    answers, _ = _eval_patterns([j for j in jobs.values() if j is not None],
+                                [[t] for t in texts])
+    binds: dict[str, list[str]] = {t: [] for t in texts}
+    for sid, answer in zip(runnable, answers, strict=True):
+        if answer is not None and len(answer) == len(texts):
+            for text, bit in zip(texts, answer, strict=True):
+                if bit == "1":
+                    binds[text].append(sid)
+
+    envelopes: list[dict[str, Any]] = [{"stepDefinition": d} for d in defs.values()]
+    for n, (uri, name, steps, hooks) in enumerate(scenarios):
+        pickle_steps: list[dict[str, Any]] = []
+        test_steps: list[dict[str, Any]] = []
+        finished: list[dict[str, Any]] = []
+        kind = ""
+        for k, step in enumerate(steps):
+            text = str(step.get("name", ""))
+            kind = _step_type(str(step.get("keyword", "")), kind)
+            status = _JSON_STATUS.get(
+                str((step.get("result") or {}).get("status", "")).lower(), "UNKNOWN")
+            if status == "SKIPPED" and not binds[text]:
+                status = "UNDEFINED"
+            pid, tid = f"p{n}s{k}", f"t{n}s{k}"
+            pickle_steps.append({"id": pid, "type": kind, "text": text})
+            test_steps.append({"id": tid, "pickleStepId": pid,
+                               "stepDefinitionIds": binds[text] if status != "UNDEFINED" else []})
+            finished.append({"testCaseStartedId": f"r{n}", "testStepId": tid,
+                             "testStepResult": {"status": status}})
+        for k, hook in enumerate(hooks):
+            tid = f"t{n}h{k}"
+            status = _JSON_STATUS.get(
+                str((hook.get("result") or {}).get("status", "")).lower(), "UNKNOWN")
+            test_steps.append({"id": tid, "hookId": tid})
+            finished.append({"testCaseStartedId": f"r{n}", "testStepId": tid,
+                             "testStepResult": {"status": status}})
+        envelopes += [
+            {"pickle": {"id": f"p{n}", "uri": uri, "name": name, "steps": pickle_steps}},
+            {"testCase": {"id": f"c{n}", "pickleId": f"p{n}", "testSteps": test_steps}},
+            {"testCaseStarted": {"id": f"r{n}", "testCaseId": f"c{n}"}},
+            *({"testStepFinished": f} for f in finished),
+        ]
+    envelopes.append({"testRunFinished": {}})
+    return envelopes
 
 
 # ---- outcome mapping ---------------------------------------------------------

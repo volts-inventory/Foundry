@@ -69,11 +69,15 @@ from langgraph.graph import END, START, StateGraph
 from foundry.agents.implementation.tickets import cap_stopped, pending_wave
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.graph.gate_wiring import (
+    ADVANCE,
     BUILD_TEST_SMOKE_BOUNDARY,
+    FEATURE_DIFF_KIND,
     SPEC_BOUNDARY,
+    FixPolicy,
     WaveBuildCheck,
     bump_fix_attempts,
     fix_cap,
+    keep_best,
     route_after_gates,
     run_build_test_gates,
     run_spec_gate,
@@ -247,6 +251,7 @@ def build_supervisor_graph(
     workers: Mapping[str, int] | None = None,
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
+    fix_policy: FixPolicy | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -287,10 +292,16 @@ def build_supervisor_graph(
         produces — a gamed-green suite that clears the adequacy floor but does not
         kill a held-out mutant FAILs the gate in the SHIPPING graph. ``None`` (the
         default) keeps the adequacy floor only.
+    fix_policy:
+        How the build-side fix loops (each wave check and the final gate) are
+        bounded: :class:`~foundry.graph.gate_wiring.FixPolicy`. The default is the
+        ``max_fix_attempts`` bound; ``until_cap`` fixes until a dead-end rule or the
+        run's time cap stops it. The Spec boundary always keeps the attempts bound.
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
+    policy = (fix_policy or FixPolicy()).bound(rt)
 
     # -- triage: classify + seed route/budget ---------------------------------
     def triage(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -325,10 +336,11 @@ def build_supervisor_graph(
         workers=workers, ticket_tiers=ticket_tiers, on_task=on_task,
         wave_check=WaveBuildCheck(
             rt, runner, resolve, resolve_blob,
-            max_fix_attempts=max_fix_attempts, profile=profile,
+            max_fix_attempts=max_fix_attempts, profile=profile, ticket_tiers=ticket_tiers,
+            fix_policy=policy,
         ),
     ).compile()
-    quality = build_quality_subgraph(rt, resolve=resolve).compile()
+    quality = build_quality_subgraph(rt, resolve=resolve, resolve_blob=resolve_blob).compile()
 
     def planner_node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         out: dict[str, Any] = dict(planner.invoke(state, config))
@@ -359,7 +371,7 @@ def build_supervisor_graph(
     ) -> None:
         bump_fix_attempts(state, config, out, boundary=boundary,
                           records=runner.records, max_fix_attempts=max_fix_attempts,
-                          total_cap=fix_cap(state, resolve, max_fix_attempts))
+                          total_cap=fix_cap(state, resolve, max_fix_attempts), fix_policy=policy)
 
     def _gate_workdir(name: str) -> Path:
         # A fresh materialization tree per gate run (materialize_workdir writes
@@ -397,9 +409,8 @@ def build_supervisor_graph(
     # command records an attested "not pinned" smoke PASS.
     bt_boundary = BUILD_TEST_SMOKE_BOUNDARY
 
-    def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
-        _stop_if_cancelled()
-        out = run_build_test_gates(
+    def _final_gates(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        return run_build_test_gates(
             state,
             config,
             rt=rt,
@@ -410,6 +421,13 @@ def build_supervisor_graph(
             discriminator_factory=discriminator_factory,
             profile=profile,
         )
+
+    def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        _stop_if_cancelled()
+        out = _final_gates(state, config)
+        keep_best(state, config, out, boundary=bt_boundary, scope=frozenset(), rt=rt,
+                  resolve=resolve, resolve_blob=resolve_blob,
+                  rerun=lambda s: _final_gates(s, config), policy=policy)
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=bt_boundary)
         return out
@@ -443,6 +461,18 @@ def build_supervisor_graph(
         # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
         if pending_wave(state, resolve):
             return "halt"
+        # No ticket landed (all skipped or blocked behind a skipped one): the
+        # reviewer has no diff to judge, so the final gates record why the empty
+        # tree fails, once (only they emit a ``smoke`` verdict) — a fix pass has
+        # nothing to repair, so it halts.
+        if not any(a.kind == FEATURE_DIFF_KIND for a in state.get("artifacts") or ()):
+            judged = any(g.name == "smoke" for g in state.get("gates") or ())
+            return "halt" if judged else _BUILD_TEST_GATE
+        # Fixing until the cap, the final loop may take many passes: the review (a
+        # model call that judges no gate) is skipped on its re-entries and runs once
+        # the gates pass (_route_build_test), not once per pass.
+        if policy.until_cap and any(g.name == "smoke" for g in state.get("gates") or ()):
+            return _BUILD_TEST_GATE
         return _QUALITY
 
     # -- conditional routers (advance / fix / halt) ---------------------------
@@ -456,14 +486,32 @@ def build_supervisor_graph(
         )
 
     def _route_build_test(state: FactoryState, config: RunnableConfig) -> str:
-        return route_after_gates(
+        decision = route_after_gates(
             state,
             config,
             boundary=bt_boundary,
             records=runner.records,
             max_fix_attempts=max_fix_attempts,
             total_cap=fix_cap(state, resolve, max_fix_attempts),
+            fix_policy=policy,
         )
+        # The gates passed on a tree a fix pass made after the review was skipped
+        # (_route_implementation): review it now, once.
+        if decision == ADVANCE and policy.until_cap and _review_skipped(state):
+            return _QUALITY
+        return decision
+
+    def _review_skipped(state: FactoryState) -> bool:
+        return len({g.run_against for g in state.get("gates") or ()
+                    if g.name == "smoke"}) > 1
+
+    def _route_quality(state: FactoryState, config: RunnableConfig) -> str:
+        # After the gates passed, the review is the run's last step.
+        if policy.until_cap and route_after_gates(
+                state, config, boundary=bt_boundary, records=runner.records,
+                max_fix_attempts=max_fix_attempts, fix_policy=policy) == ADVANCE:
+            return END
+        return _BUILD_TEST_GATE
 
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------
     g.add_node(_TRIAGE, triage)
@@ -497,16 +545,18 @@ def build_supervisor_graph(
     g.add_conditional_edges(
         _IMPLEMENTATION,
         _route_implementation,
-        {_QUALITY: _QUALITY, _TOKEN_CAP: _TOKEN_CAP, "halt": END},
+        {_QUALITY: _QUALITY, _BUILD_TEST_GATE: _BUILD_TEST_GATE,
+         _TOKEN_CAP: _TOKEN_CAP, "halt": END},
     )
     g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
-    g.add_edge(_QUALITY, _BUILD_TEST_GATE)
+    g.add_conditional_edges(_QUALITY, _route_quality,
+                            {_BUILD_TEST_GATE: _BUILD_TEST_GATE, END: END})
 
     # BUILD+TEST boundary: advance -> END; fix -> back to implementation; halt -> END.
     g.add_conditional_edges(
         _BUILD_TEST_GATE,
         _route_build_test,
-        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END},
+        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END, _QUALITY: _QUALITY},
     )
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 

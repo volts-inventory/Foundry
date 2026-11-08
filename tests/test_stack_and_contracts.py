@@ -178,7 +178,8 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
     assert "only `interface` and `type` declarations" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
-    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json")
+    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json",
+                             "package-lock.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
     for t in rest:
         assert t.depends_on[:2] == (CONTRACTS_TICKET_ID, HARNESS_TICKET_ID)
@@ -187,6 +188,106 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     concerns = writes["agent_journal"][0].concerns
     assert any("T-002: dropped the gate-owned contract file(s) src/contracts.ts" in c
                for c in concerns)
+
+
+@pytest.mark.parametrize(("language", "planned", "expected"), [
+    # The planner's harness_files lacked the manifest (the failed Go build gave go.mod
+    # to a feature ticket): the harness still owns manifest, lockfile and runner.
+    ("go", ["bdd/godog_test.go"], ("bdd/godog_test.go", "go.mod", "go.sum")),
+    ("javascript", [], ("package.json", "package-lock.json", "cucumber.json")),
+    ("typescript", ["cucumber.mjs"], ("cucumber.mjs", "package.json", "package-lock.json",
+                                     "tsconfig.json", "cucumber.json")),
+    ("rust", ["Cargo.toml"], ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs")),
+])
+def test_harness_ticket_owns_the_manifest_lockfile_and_runner(
+    language: str, planned: list[str], expected: tuple[str, ...],
+) -> None:
+    from foundry.agents.planner import _generated_tickets
+
+    stack = StackDecision(language=language, bdd="run-bdd")
+    tickets, _ = _generated_tickets(
+        [], {"harness_files": planned}, stack, Seq("r", 0, 0, "planner", 0)
+    )
+    [harness] = tickets
+    assert harness.id == HARNESS_TICKET_ID
+    assert harness.files == expected
+
+
+def test_harness_ticket_carries_the_stack_runner_recipe() -> None:
+    from foundry.agents.planner import _generated_tickets
+    from foundry.gates.profiles import bdd_runner_hint
+
+    stack = StackDecision(language="go", bdd="go test -count=1 ./bdd")
+    [harness], _ = _generated_tickets([], {}, stack, Seq("r", 0, 0, "planner", 0))
+    assert bdd_runner_hint("go") and bdd_runner_hint("go") in harness.description
+
+
+@pytest.mark.parametrize("language", ["rust", "go", "javascript", "typescript"])
+def test_harness_ticket_writes_only_its_files(language: str) -> None:
+    # Told to "set up the project skeleton", the rust harness declared [lib]/[[bin]]
+    # at files a later ticket owns; its stubs were dropped and wave 0 never built.
+    from foundry.agents.implementation.personas import persona_for
+    from foundry.agents.planner import _generated_tickets
+
+    stack = StackDecision(language=language, bdd="run-bdd", build="b", run="r")
+    [harness], _ = _generated_tickets([], {}, stack, Seq("r", 0, 0, "planner", 0))
+    assert "skeleton" not in harness.description
+    assert "Write ONLY your files" in harness.description
+    assert "declare no build target at a source file you do not write" in harness.description
+    assert "run `r`" in harness.description
+    persona = persona_for("test", stack, harness=True)
+    assert "skeleton" not in persona and "declare no build target" in persona
+
+
+def test_rust_harness_declares_no_lib_or_bin_target() -> None:
+    from foundry.gates.profiles import bdd_runner_hint
+
+    assert "Declare no [lib] or [[bin]] section" in bdd_runner_hint("rust")
+
+
+def test_js_harness_forces_cucumber_to_exit() -> None:
+    # A step that started the app's server and never closed it hung cucumber-js
+    # until the gate's 600s kill.
+    from foundry.gates.profiles import bdd_runner_hint
+
+    for language in ("javascript", "typescript"):
+        assert '"forceExit": true' in bdd_runner_hint(language)
+        assert "AfterAll" in bdd_runner_hint(language)
+
+
+def test_a_rust_stack_without_an_install_fetches_its_crates() -> None:
+    # No install meant nothing fetched cucumber: the offline build tried crates.io.
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "rust", "build": "cargo build", "bdd": "cargo test --test cucumber"}
+    stack, concerns = _stack_decision({"stack": raw}, ["rust"])
+    assert stack is not None and stack.install == "cargo fetch"
+    assert any("`cargo fetch`" in c for c in concerns)
+    pinned, _ = _stack_decision({"stack": {**raw, "install": "cargo vendor"}}, ["rust"])
+    assert pinned is not None and pinned.install == "cargo vendor"
+    # A stack already on a checkpoint (planned before the default) gets it at gate time.
+    assert stack_profile(StackDecision(language="rust", build="cargo build",
+                                       test="cargo test")).install_cmd == "cargo fetch"
+    assert stack_profile(_js(test="t")).install_cmd is None
+
+
+@pytest.mark.parametrize(("install", "ran"), [
+    # `cargo update` only resolves the lockfile: the build (no [dependencies])
+    # passed and the offline bdd step could not download cucumber's crates.
+    ("cargo update", "cargo update && cargo fetch"),
+    ("cargo generate-lockfile", "cargo generate-lockfile && cargo fetch"),
+    ("cargo fetch", "cargo fetch"),
+    ("cargo update && cargo fetch --locked", "cargo update && cargo fetch --locked"),
+    ("cargo vendor", "cargo vendor"),
+])
+def test_a_rust_install_always_downloads_the_crates(install: str, ran: str) -> None:
+    from foundry.agents.planner import _stack_decision
+
+    stack = StackDecision(language="rust", install=install, test="cargo test")
+    assert stack_profile(stack).install_cmd == ran
+    planned, _ = _stack_decision(
+        {"stack": {"language": "rust", "install": install, "test": "cargo test"}}, ["rust"])
+    assert planned is not None and planned.install == ran
 
 
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
@@ -205,6 +306,44 @@ def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
 def test_python_stack_without_bdd_or_code_contracts_generates_nothing() -> None:
     writes, cas, _ = _plan_once({**PLAN, "stack": PYTHON_STACK})
     assert [t.id for t in _tickets(writes, cas)] == ["T-001", "T-002", "T-003"]
+
+
+def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None:
+    # A Flask build gave requirements.txt to its entrypoint (the last wave): every
+    # earlier wave check installed nothing and failed on `No module named 'werkzeug'`,
+    # and the fixer may not write a later wave's file.
+    tickets = json.loads(json.dumps(PLAN["tickets"]))
+    entry = next(t for t in tickets if t.get("entrypoint"))
+    entry["files"] = [*entry["files"], "requirements.txt"]
+    assert entry["depends_on"]
+    stack = {**PYTHON_STACK, "framework": "Flask"}
+    writes, cas, _ = _plan_once({**PLAN, "stack": stack, "tickets": tickets})
+    deps, *rest = _tickets(writes, cas)
+    assert deps.id == HARNESS_TICKET_ID and deps.depends_on == ()
+    assert deps.files == ("requirements.txt",)
+    assert "Flask" in deps.description and "pinned with ==" in deps.description
+    assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
+    # The owner can still extend it.
+    assert "requirements.txt" in next(t for t in rest if t.id == entry["id"]).files
+
+
+def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:
+    tickets = json.loads(json.dumps(PLAN["tickets"]))
+    first = next(t for t in tickets if not t["depends_on"])
+    first["files"] = [*first["files"], "pyproject.toml"]
+    writes, cas, _ = _plan_once({**PLAN, "stack": PYTHON_STACK, "tickets": tickets})
+    assert HARNESS_TICKET_ID not in [t.id for t in _tickets(writes, cas)]
+
+
+def test_python_framework_with_no_manifest_owner_gets_a_requirements_ticket() -> None:
+    # No ticket owned a manifest: the only one was the import-derived scaffold, which
+    # is never installed, so every check after the first failed `No module named`.
+    stack = {**PYTHON_STACK, "framework": "Flask"}
+    writes, cas, _ = _plan_once({**PLAN, "stack": stack})
+    deps, *rest = _tickets(writes, cas)
+    assert deps.id == HARNESS_TICKET_ID and deps.files == ("requirements.txt",)
+    assert "Flask" in deps.description
+    assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
 
 
 def test_a_model_ticket_cannot_take_a_fixer_id() -> None:
@@ -406,8 +545,41 @@ def test_python_stack_keeps_the_trusted_harness() -> None:
     assert (plain.build_cmd, plain.test_cmd, plain.install_cmd) == (None, None, None)
     typed = stack_profile(StackDecision(language="python", typecheck="python3 -m mypy ."))
     assert typed.build_cmd is not None and typed.build_cmd[2].endswith(
-        "-m compileall -q . && python3 -m mypy ."
+        "-m compileall -q . && python3 -m mypy --ignore-missing-imports "
+        "--disable-error-code import-not-found --disable-error-code import-untyped ."
     )
+
+
+def test_python_typecheck_tolerates_an_unstubbed_library(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    (tmp_path / "app.py").write_text("import flask_login_zz\nimport other_zz.sub\n")
+    # A model-written config that would otherwise make the missing stubs an error.
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.mypy]\nstrict = true\nignore_missing_imports = false\n'
+        '[[tool.mypy.overrides]]\nmodule = ["flask_login_zz", "other_zz.*"]\n'
+        "ignore_missing_imports = false\n"
+    )
+    (tmp_path / "mypy.ini").write_text(
+        "[mypy]\nignore_missing_imports = False\n"
+        "[mypy-flask_login_zz]\nignore_missing_imports = False\n"
+    )
+    typecheck = f"{sys.executable} -m mypy --cache-dir /dev/null app.py"
+    profile = stack_profile(StackDecision(language="python", build="true", typecheck=typecheck))
+    assert profile.build_cmd is not None
+    for config in ("mypy.ini", "pyproject.toml"):
+        if config == "pyproject.toml":
+            (tmp_path / "mypy.ini").unlink()
+        bare = subprocess.run(typecheck, shell=True, cwd=tmp_path, capture_output=True)
+        assert bare.returncode == 1, config
+        run = subprocess.run(profile.build_cmd, cwd=tmp_path, capture_output=True, text=True)
+        assert run.returncode == 0, (config, run.stdout, run.stderr)
+    # A non-Python stack's command, or `mypy` as part of a path, is left alone.
+    js = stack_profile(StackDecision(language="javascript", typecheck="mypy .", test="true"))
+    assert js.build_cmd is not None and js.build_cmd[2] == "mypy ."
+    own = stack_profile(StackDecision(language="python", typecheck="./bin/mypy.sh x"))
+    assert own.build_cmd is not None and own.build_cmd[2].endswith("./bin/mypy.sh x")
 
 
 def _runner_rt() -> tuple[Any, Any, Any]:
@@ -654,6 +826,16 @@ def test_no_python_manifest_is_scaffolded_for_another_stack(tmp_path: Path) -> N
     assert (tmp_path / "py" / "requirements.txt").exists()
 
 
+def test_an_agent_worktree_gets_no_scaffolded_manifest(tmp_path: Path) -> None:
+    # An engineer handed the scaffold kept it, header and all, so its declaration
+    # was never installed.
+    files = {"app.py": "import flask\n"}
+    state, resolve, blob = _diff_state([("T-001", files)], StackDecision(language="python"))
+    materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob,
+                        scaffold_manifest=False)
+    assert not (tmp_path / "requirements.txt").exists()
+
+
 # ---- personas --------------------------------------------------------------------------
 
 
@@ -714,3 +896,93 @@ def test_a_missing_contract_edge_that_would_close_a_cycle_stays_a_finding() -> N
     out, concerns = _add_contract_deps(tickets)
     assert out == tickets and concerns == []
     assert any("does not depend on B" in f for f in _contract_findings(out, []))
+
+
+def test_a_single_quoted_bdd_report_path_is_rewritten_to_expand() -> None:
+    # cucumber-js wrote to a file literally named $FOUNDRY_BDD_REPORT.
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "javascript", "test": "npx jest",
+           "bdd": "npx cucumber-js --format 'message:$FOUNDRY_BDD_REPORT'"}
+    stack, concerns = _stack_decision({"stack": raw}, ["javascript"])
+    assert stack is not None
+    assert stack.bdd == 'npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
+    assert any("single-quotes" in c for c in concerns)
+
+
+@pytest.mark.parametrize(("bdd", "flagged"), [
+    ("npx cucumber-js --format json:report.json", "legacy `json:`"),
+    ("npx cucumber-js --import 'features/**/*.ts' --format \"message:$FOUNDRY_BDD_REPORT\"",
+     "without a loader"),
+    ('NODE_OPTIONS="--import tsx" npx cucumber-js --import features/s.ts '
+     '--format "message:$FOUNDRY_BDD_REPORT"', None),
+    ('npx cucumber-js --require-module ts-node/register --require features/s.ts '
+     '--format "message:$FOUNDRY_BDD_REPORT"', None),
+    ('npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"', None),
+])
+def test_cucumber_js_commands_the_gate_cannot_read_are_flagged(
+    bdd: str, flagged: str | None
+) -> None:
+    from foundry.agents.planner import _stack_command_findings
+
+    findings = " ".join(_stack_command_findings(_js(test="t", bdd=bdd)))
+    assert (flagged in findings) if flagged else not findings
+    # A profile pin is the operator's call.
+    assert _stack_command_findings(_js(test="t", bdd=bdd, profile="node")) == ()
+
+
+@pytest.mark.parametrize(("framework", "run", "flagged"), [
+    ("express", "node app.js", True),
+    ("express", "npm start", True),
+    ("Flask", "python3 app.py", True),
+    ("", "flask run", True),
+    ("", "uvicorn app.main:app --port 8000", True),
+    ("express", "node smoke.js", False),
+    ("commander", "node index.js", False),
+    ("express", "node src/server.js --smoke", False),
+])
+def test_a_web_stack_run_that_starts_the_bare_server_is_flagged(
+    framework: str, run: str, flagged: bool
+) -> None:
+    # `node app.js` never exited: the smoke check hung 600s three times.
+    from foundry.agents.planner import _stack_command_findings
+
+    findings = _stack_command_findings(_js(test="t", framework=framework, run=run))
+    assert bool(findings) is flagged
+    if flagged:
+        assert "port 0" in findings[0]
+
+
+def test_js_harness_recipe_fixes_the_command_and_config() -> None:
+    from foundry.gates.profiles import bdd_runner_hint
+
+    js, ts = bdd_runner_hint("javascript"), bdd_runner_hint("typescript")
+    assert 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`' in js
+    config = json.loads(js.split("MUST be exactly:\n")[1].split("\n")[0])
+    assert config == {"default": {"paths": ["features/**/*.feature"],
+                                  "import": ["features/step_definitions/**/*.js"],
+                                  "forceExit": True}}
+    assert 'NODE_OPTIONS="--import tsx" npx cucumber-js' in ts
+    assert "features/step_definitions/**/*.ts" in ts and "**/*.js" not in ts
+
+
+def test_bdd_quoting_rewrites_only_the_word_holding_the_report_variable() -> None:
+    from foundry.agents.planner import _bdd_quoting
+
+    unquoted = "npx cucumber-js --tags '@smoke' --format message:$FOUNDRY_BDD_REPORT --name 'login'"
+    assert _bdd_quoting(unquoted) == unquoted
+    assert _bdd_quoting("npx cucumber-js --tags '@smoke' --format 'message:$FOUNDRY_BDD_REPORT'"
+                        " --name 'login'") == (
+        "npx cucumber-js --tags '@smoke' --format \"message:$FOUNDRY_BDD_REPORT\""
+        " --name 'login'")
+
+
+def test_stack_profile_adds_mypy_flags_only_to_a_mypy_invocation() -> None:
+    from foundry.gates.profiles import _MYPY, _MYPY_LENIENT
+
+    def fix(cmd: str) -> str:
+        return _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, cmd)
+
+    assert fix("pip install mypy && mypy .") == f"pip install mypy && {_MYPY_LENIENT} ."
+    assert fix("uv run mypy .") == f"uv run {_MYPY_LENIENT} ."
+    assert fix("mypy .") == f"{_MYPY_LENIENT} ."

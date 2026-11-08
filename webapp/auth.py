@@ -123,7 +123,9 @@ def ensure_seeded() -> None:
         salt = secrets.token_bytes(SALT_BYTES)
         _write(
             {
-                "username": (os.environ.get("FOUNDRY_ADMIN_USERNAME") or "admin").strip() or "admin",
+                "username": (
+                    (os.environ.get("FOUNDRY_ADMIN_USERNAME") or "admin").strip() or "admin"
+                ),
                 "salt": salt.hex(),
                 "iterations": ITERATIONS,
                 "hash": _hash(seed or SEED_PASSWORD, salt),

@@ -103,16 +103,23 @@ _EXCLUDED_DIRS = frozenset({
 })
 
 
+# Cargo and Maven build into a top-level target/: output, not source, in their projects.
+_TARGET_DIR_MANIFESTS = ("Cargo.toml", "pom.xml")
+
+
 def walk_worktree(root: Path) -> dict[str, bytes]:
     """The worktree's file map (relative POSIX path -> raw bytes), excluding
     VCS/scratch dirs. Symlinks are skipped (never followed — a link out of the
     tree must not pull external content into the authored slice)."""
     files: dict[str, bytes] = {}
+    top = _EXCLUDED_TOP_DIRS
+    if any((root / m).is_file() for m in _TARGET_DIR_MANIFESTS):
+        top = top | {"target"}
     for path in sorted(root.rglob("*")):
         if path.is_symlink() or not path.is_file():
             continue
         rel = path.relative_to(root)
-        if rel.parts and rel.parts[0] in _EXCLUDED_TOP_DIRS:
+        if rel.parts and rel.parts[0] in top:
             continue
         if any(part in _EXCLUDED_DIRS for part in rel.parts[:-1]):
             continue
@@ -409,7 +416,9 @@ class ClaudeCodeAdapter:
             # the gates decide whether the partial tree passes.
             summary = "claude hard-killed at the sandbox wall-clock cap"
         elif envelope.get("is_error"):
-            summary = f"claude reported is_error: {str(envelope.get('result'))[:400]}"
+            summary = (f"claude reported is_error (subtype={envelope.get('subtype')}, "
+                       f"num_turns={envelope.get('num_turns')}): "
+                       f"{str(envelope.get('result'))[:400]}")
         elif not envelope and result.returncode != 0:
             raise AdapterUnavailableError(
                 f"claude exit {result.returncode} with no parseable envelope: "
@@ -437,7 +446,8 @@ class ClaudeCodeAdapter:
         blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         diff_uri = sandbox.put_blob(blob.encode("utf-8"))
 
-        notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope)
+        notes = self._triage_notes(summary, sandbox, deleted, skipped_binary, envelope,
+                                   failed=result.timed_out or bool(envelope.get("is_error")))
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -467,6 +477,8 @@ class ClaudeCodeAdapter:
         deleted: list[str],
         skipped_binary: list[str],
         envelope: dict[str, Any],
+        *,
+        failed: bool = False,
     ) -> list[str]:
         """Advisory notes only (gov §1c): the agent's TRIAGE lines, plus what the
         snapshot slice could NOT carry, plus the observed cost + the credential
@@ -476,6 +488,7 @@ class ClaudeCodeAdapter:
             for line in summary.splitlines()
             if line.strip().startswith("TRIAGE:")
         ]
+        reported = bool(notes)
         for path in deleted:
             notes.append(f"deleted from the tree slice: {path}")
         for path in skipped_binary:
@@ -486,6 +499,10 @@ class ClaudeCodeAdapter:
         grant = sandbox.credential_grant_record
         if grant:
             notes.append(f"model-auth grant active in sandbox: {', '.join(grant)}")
-        if not notes:
-            notes.append(summary.strip()[:500] or "run completed with no summary text")
+        if failed:
+            notes.insert(0, summary)
+        elif not reported:
+            # Even beside the cost / grant notes: a session that changed nothing
+            # is otherwise unexplained.
+            notes.insert(0, summary.strip()[:500] or "run completed with no summary text")
         return notes

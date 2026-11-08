@@ -150,7 +150,8 @@ def test_lineage_revision_is_content_derived():
 # ---- 2. judgment path: stamped, verifiable, admitted --------------------------
 
 
-def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1"):
+def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1",
+               failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())):
     return proxy.judge(
         "review_node",
         "cas://artifact/abc",
@@ -159,6 +160,8 @@ def judge_once(proxy: ModelProviderProxy, *, nonce: str = "nonce-1"):
         "REVIEW SOP",
         [{"role": "user", "content": "review this diff"}],
         seq=make_seq("review_node"),
+        failing_gates=failing[0],
+        failing_tests=failing[1],
     )
 
 
@@ -196,19 +199,107 @@ def _finding(text: str, **evidence: str) -> dict[str, str]:
             "actual": "", **evidence}
 
 
-def _judge_findings(findings: list[object]) -> GateResult:
+def _judge_findings(findings: list[object],
+                    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())) -> GateResult:
     transport = FakeTransport(
         text=json.dumps({"status": "request-changes", "findings": findings})
     )
     proxy, _ = make_proxy(transport)
-    return judge_once(proxy).gate_result
+    return judge_once(proxy, failing=failing).gate_result
+
+
+_FAILING = (("test",), ("tests/test_a.py::test_x",))
 
 
 def test_request_changes_verdict_maps_to_fail_with_findings(verifier, installed):
-    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")])
+    g = _judge_findings([_finding("missing tests", failing_check="tests/test_a.py::test_x")],
+                        _FAILING)
     assert g.status == GateStatus.FAIL
     assert g.findings == ("missing tests [evidence: failing tests/test_a.py::test_x]",)
     assert verifier.verify_judgment_binding(g)  # a FAIL verdict is stamped too
+
+
+@pytest.mark.parametrize("evidence", [
+    {"failing_check": "test"},  # the failing gate by name
+    {"failing_check": "TEST_X"},  # the failing test by its unique short id
+    {"command": "pytest tests/test_a.py::test_x"},  # the command names it
+])
+def test_a_finding_citing_a_failing_check_blocks(verifier, installed, evidence):
+    g = _judge_findings([_finding("broken", **evidence)], _FAILING)
+    assert g.status == GateStatus.FAIL
+    assert g.findings[0].startswith("broken [evidence: failing ")
+
+
+def test_a_finding_citing_a_passing_scenario_is_advisory_and_passes(verifier, installed):
+    # The local-model failure: every gate passed, the reviewer cited a scenario id.
+    g = _judge_findings([_finding("total-sum check is fragile", failing_check="S001",
+                                  command="pytest -k S001", expected="", actual="")],
+                        _FAILING)
+    assert g.status == GateStatus.PASS
+    assert g.findings == (ADVISORY_PREFIX + "total-sum check is fragile"
+                          " [cites S001: not failing in this build's gates]",)
+    assert verifier.verify_judgment_binding(g)
+
+
+def test_with_no_failing_checks_a_citation_is_advisory_but_a_reproduction_blocks(
+        verifier, installed):
+    cites = _finding("fails", failing_check="tests/test_a.py::test_x")
+    assert _judge_findings([cites]).status == GateStatus.PASS
+    repro = _finding("wrong total", command="dice 2d6 --seed 1", expected="7", actual="12")
+    g = _judge_findings([cites, repro])
+    assert g.status == GateStatus.FAIL
+    assert g.findings[0].startswith(ADVISORY_PREFIX)
+    assert g.findings[1] == "wrong total [evidence: `dice 2d6 --seed 1` expected '7', got '12']"
+
+
+def test_mixed_findings_block_on_the_backed_one_and_keep_the_rest_advisory(verifier, installed):
+    g = _judge_findings([
+        _finding("doesn't assert exit code 1", failing_check="S002"),
+        _finding("mocking Popen is pointless"),
+        _finding("add() is broken", failing_check="test_x"),
+        _finding("same output", command="dice 1d6", expected="4 ", actual=" 4"),
+    ], _FAILING)
+    assert g.status == GateStatus.FAIL
+    assert [f.startswith(ADVISORY_PREFIX) for f in g.findings] == [True, True, False, True]
+
+
+def _blocks(failing: tuple[tuple[str, ...], tuple[str, ...]], **evidence: str) -> bool:
+    return _judge_findings([_finding("f", **evidence)], failing).status == GateStatus.FAIL
+
+
+def test_a_parametrized_test_id_is_matched_whole():
+    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ("tests/t.py::test_add[1-2]",))
+    assert _blocks(failing, failing_check="tests/t.py::test_add[1-2]")
+    assert _blocks(failing, command="pytest 'tests/t.py::test_add[1-2]' -q")
+    assert not _blocks(failing, failing_check="tests/t.py::test_add[3-4]")
+
+
+@pytest.mark.parametrize(("evidence", "blocks"), [
+    ({"failing_check": " Security "}, True),  # the whole failing_check is the gate
+    ({"failing_check": "security concern in parser"}, False),
+    ({"command": "npm test"}, False),
+    ({"command": "security"}, False),  # a gate name counts only as failing_check
+])
+def test_a_gate_name_counts_only_as_the_whole_failing_check(verifier, installed,
+                                                            evidence, blocks):
+    assert _blocks((("security", "test"), ()), **evidence) is blocks
+
+
+def test_a_short_id_matches_only_when_unique_and_the_citation_is_unqualified():
+    both = ((), ("features/T1.feature::S001", "features/T2.feature::S001"))
+    assert not _blocks(both, failing_check="S001")  # ambiguous: names neither
+    assert _blocks(both, failing_check="features/T2.feature::S001")
+    one = ((), ("features/T1.feature::S001",))
+    assert _blocks(one, failing_check="S001")
+    assert not _blocks(one, failing_check="features/T2.feature::S001")  # qualified elsewhere
+    assert not _blocks(((), ("a/test_x.py::test_add", "b/test_y.py::test_add")),
+                       command="pytest -k test_add")
+
+
+def test_the_evidence_label_names_the_id_that_matched():
+    g = _judge_findings([_finding("broken", failing_check="S009",
+                                  command="pytest tests/test_a.py::test_x")], _FAILING)
+    assert g.findings == ("broken [evidence: failing tests/test_a.py::test_x]",)
 
 
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):
@@ -632,14 +723,12 @@ def test_usage_limit_without_epoch_rides_backoff():
     assert is_rl is True and ra is None
 
 
-def test_cli_hang_and_timeout_ride_the_transient_budget():
-    """A spent Max window often STALLS the claude CLI instead of printing a limit,
-    so it's hard-killed at the wall-clock cap. That (and a bare timeout) must ride
-    the generous bounded budget, not fail the run after 3 quick transport attempts
-    — while a genuine non-transient error still fails closed."""
+def test_network_timeout_rides_the_transient_budget():
+    """A bare SDK/HTTP timeout rides the generous bounded budget, not fail the run
+    after 3 quick transport attempts — while a genuine non-transient error still
+    fails closed. (A CLI wall-clock hard-kill has its own budget — below.)"""
     from foundry.proxy.model_provider_proxy import _classify_rate_limit
 
-    assert _classify_rate_limit(RuntimeError("claude CLI hard-killed at wall-clock cap"))[0]
     assert _classify_rate_limit(TimeoutError("command timed out after 300s"))[0]
     assert _classify_rate_limit(RuntimeError("5-hour limit reached"))[0]
     # NOT transient: a real config/transport error still fails hard (no waiting)
@@ -689,7 +778,7 @@ def test_client_cache_rebuilds_after_auth_error():
 
     cache = _ClientCache(factory)      # TTL off by default
     first = cache.get()
-    with pytest.raises(Exception):
+    with pytest.raises(Exception, match="401 Unauthorized"):
         cache.run(lambda _c: (_ for _ in ()).throw(Exception("401 Unauthorized")))
     second = cache.get()
     assert second is not first and len(built) == 2   # auth error dropped the client
@@ -714,7 +803,7 @@ def test_client_cache_keeps_injected_client_on_transient_error():
                          clock=lambda: 1e9)
     # An injected client is never proactively refreshed, and a NON-auth error
     # (a transient blip) leaves it in place for the retry layer to re-drive.
-    with pytest.raises(Exception):
+    with pytest.raises(ConnectionError, match="blip"):
         cache.run(lambda _c: (_ for _ in ()).throw(ConnectionError("blip")))
     assert cache.get() is sentinel
 
@@ -782,3 +871,73 @@ def test_a_finished_call_is_replayed_from_the_call_cache(tmp_path):
     other = again.complete("planner", "T1", "SOP", [{"role": "user", "content": "y"}],
                            purpose="gate")
     assert len(transport.requests) == sent + 1 and other is not None
+
+
+class _HardKilledTransport:
+    """Fails with the CLI wall-clock hard-kill ``fails`` times, then serves."""
+
+    def __init__(self, fails: int) -> None:
+        self.fails = fails
+        self.attempts = 0
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        self.attempts += 1
+        if self.attempts <= self.fails:
+            raise RuntimeError("claude CLI hard-killed at 1800s")
+        return ProviderResponse(
+            served_model=request["model"], request_id="req_hk",
+            text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+        )
+
+
+def test_wall_clock_hard_kill_is_not_a_rate_limit_and_retries_once(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+):
+    """An identical prompt that already ran the whole CLI cap is retried ONCE on
+    its own budget, then fails closed — never ridden on the 6-wait rate-limit
+    budget (that silently burned 37+ minutes on one planner call). Every failed
+    attempt is logged with its reason and attempt count."""
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+    rl_waits: list[float] = []
+    transport = _HardKilledTransport(fails=99)
+    proxy = _rl_proxy(transport, sleeper=rl_waits.append, rl_retries=6)
+    with pytest.raises(ProxyUnavailable, match="hard-killed at 1800s"):
+        proxy.complete("plan", "T1", "SOP", [{"role": "user", "content": "x"}],
+                       purpose="ideation")
+    assert transport.attempts == 2
+    err = capsys.readouterr().err
+    assert "retry model call: plan (T1, ideation) — claude CLI hard-killed at 1800s [1/2]" in err
+    assert err.count("retry model call") == 1
+
+
+def test_wall_clock_hard_kill_recovers_on_its_single_retry():
+    transport = _HardKilledTransport(fails=1)
+    proxy = _rl_proxy(transport, sleeper=lambda _s: None)
+    result = proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}],
+                            purpose="gate")
+    assert result.text == APPROVE_JSON
+    assert transport.attempts == 2
+
+
+def test_every_failed_rate_limit_wait_is_logged(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+):
+    monkeypatch.setenv("FOUNDRY_PROGRESS", "1")
+
+    class _Throttled:
+        attempts = 0
+
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.attempts += 1
+            if self.attempts <= 2:
+                raise RuntimeError("429 too many requests")
+            return ProviderResponse(
+                served_model=request["model"], request_id="req_t",
+                text=APPROVE_JSON, usage=dict(USAGE), stop_reason="end_turn",
+            )
+
+    proxy = _rl_proxy(_Throttled(), sleeper=lambda _s: None, rl_retries=6, rl_base=2.0)
+    proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    err = capsys.readouterr().err
+    assert "429 too many requests [1/7], waiting 2s" in err
+    assert "429 too many requests [2/7], waiting 4s" in err

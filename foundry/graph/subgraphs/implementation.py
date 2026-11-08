@@ -27,13 +27,15 @@ from langgraph.graph import END, START, StateGraph
 
 from foundry.agents.implementation import make_fixer_node, ready_tasks
 from foundry.agents.implementation.tickets import (
+    built_task_ids,
     cap_stopped,
     has_tickets,
     make_engineering_node,
     pending_wave,
     tickets_settled,
 )
-from foundry.graph.gate_wiring import ADVANCE, FIX, HALT
+from foundry.gates.self_check import SelfCheckSettings
+from foundry.graph.gate_wiring import ADVANCE, ESCALATE, FIX, HALT, RESTART, pending_restarts
 from foundry.state.factory_state import FactoryState
 
 if TYPE_CHECKING:
@@ -112,12 +114,15 @@ def build_implementation_subgraph(
     # Per-wave integration check (§2b): only with a fixer to route a FAIL to.
     gate_id = "wave_gate"
     check = wave_check if can_fix else None
+    # The sessions run the wave check's gates themselves as a `check` tool.
+    self_check = SelfCheckSettings(profile=check.profile) if check is not None else None
     if can_fix:
         assert blobs is not None
         fixer = make_fixer_node(
             rt, source_dir=source_dir, resolve=resolve, resolve_blob=blobs,
             snapshot_store=snapshot_store,
             turn_budget=turn_budget, cost_budget_microusd=cost_budget_microusd,
+            self_check=self_check,
         )
 
         def _fixer(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -141,7 +146,7 @@ def build_implementation_subgraph(
         snapshot_store=snapshot_store, turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd, max_slots=max_slots,
         cost_cap_microusd=cost_cap_microusd, workers=workers,
-        ticket_tiers=ticket_tiers, on_task=on_task,
+        ticket_tiers=ticket_tiers, on_task=on_task, self_check=self_check,
     )
 
     def _engineering(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -156,7 +161,11 @@ def build_implementation_subgraph(
 
         def _after_check(state: FactoryState, config: RunnableConfig) -> str:
             assert check is not None
-            return {ADVANCE: eng_id, FIX: fixer_id, HALT: END}[check.route(state, config)]
+            # ESCALATE: the engineering node re-runs the requested local tickets on
+            # the cloud level, then the check runs again; RESTART: it rebuilds the
+            # planned tickets from scratch on their own tier.
+            return {ADVANCE: eng_id, ESCALATE: eng_id, RESTART: eng_id, FIX: fixer_id,
+                    HALT: END}[check.route(state, config)]
 
         g.add_node(gate_id, _wave_gate)
         g.add_conditional_edges(gate_id, _after_check,
@@ -166,7 +175,12 @@ def build_implementation_subgraph(
         # A spent token cap exits so the supervisor commits this wave, then stops.
         if cap_stopped(state) or not pending_wave(state, resolve):
             return END
-        return gate_id if check is not None else eng_id
+        # Nothing built yet (every ticket so far failed): the check would fail on the
+        # bare scaffold and send a fixer with nothing to repair ahead of the retry.
+        # Bounded: each failed pass spends an attempt until the ticket is skipped.
+        if check is None or not built_task_ids(state):
+            return eng_id
+        return gate_id
 
     g.add_conditional_edges(eng_id, _after_wave,
                             {eng_id: eng_id, END: END,
@@ -177,7 +191,8 @@ def build_implementation_subgraph(
             return END
         if (can_fix and state.get("phase") == "build_test_fix"
                 and tickets_settled(state, resolve)):
-            return fixer_id
+            # The final gate planned a ticket restart instead of a fixer pass.
+            return eng_id if pending_restarts(state, resolve) else fixer_id
         # Resuming a run the per-wave check halted: re-run that check (fresh budget)
         # on the waves already built before building the next one.
         if (check is not None and state.get("phase") == "resume"

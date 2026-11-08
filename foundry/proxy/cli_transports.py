@@ -43,9 +43,12 @@ when the backend is not the Anthropic SDK:
 from __future__ import annotations
 
 import json
+import math
+import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from types import EllipsisType
 from typing import Any, Literal
 
 from foundry.canonical import content_digest
@@ -59,6 +62,7 @@ from foundry.proxy.model_provider_proxy import (
     ModelProviderProxy,
     ProviderResponse,
     ProviderTransport,
+    ToolsUnsupported,
     _ClientCache,
 )
 
@@ -128,6 +132,92 @@ def _message_pairs(request: dict[str, Any]) -> list[tuple[str, str]]:
     return pairs
 
 
+def _chat_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """The request as OpenAI chat messages: the system block, then each message.
+    Anthropic-shape ``tool_use`` blocks become an assistant's ``tool_calls`` and
+    ``tool_result`` blocks become ``tool`` messages; other content flattens to
+    text exactly as :func:`_message_pairs` does."""
+    out: list[dict[str, Any]] = []
+    sys_text = _system_text(request)
+    if sys_text:
+        out.append({"role": "system", "content": sys_text})
+    for msg in request.get("messages", []):
+        if not isinstance(msg, dict):
+            continue
+        role = str(msg.get("role", "user"))
+        content = msg.get("content", "")
+        if not isinstance(content, list):
+            out.append({"role": role, "content": content if isinstance(content, str)
+                        else str(content)})
+            continue
+        texts: list[str] = []
+        calls: list[dict[str, Any]] = []
+        results = False
+        for c in content:
+            kind = c.get("type") if isinstance(c, dict) else None
+            if kind == "tool_use":
+                calls.append({"id": str(c.get("id", "")), "type": "function", "function": {
+                    "name": str(c.get("name", "")),
+                    "arguments": json.dumps(c.get("input") or {}),
+                }})
+            elif kind == "tool_result":
+                results = True
+                out.append({"role": "tool", "tool_call_id": str(c.get("tool_use_id", "")),
+                            "content": str(c.get("content", ""))})
+            else:
+                texts.append(str(c.get("text", "")) if isinstance(c, dict) else str(c))
+        if calls:
+            out.append({"role": role, "content": "\n".join(texts) or None, "tool_calls": calls})
+        elif texts or not results:
+            out.append({"role": role, "content": "\n".join(texts)})
+    return out
+
+
+def _chat_tools(request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Anthropic-shape tool specs as OpenAI ``function`` tools."""
+    return [
+        {"type": "function", "function": {
+            "name": str(t.get("name", "")),
+            "description": str(t.get("description", "")),
+            "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+        }}
+        for t in request.get("tools") or ()
+        if isinstance(t, dict)
+    ]
+
+
+def _chat_tool_calls(message: Any) -> tuple[dict[str, Any], ...]:
+    """An OpenAI chat message's ``tool_calls`` as ``{"id", "name", "input"}``,
+    with an ``"error"`` when the arguments are not a JSON object."""
+    calls: list[dict[str, Any]] = []
+    for i, tc in enumerate(getattr(message, "tool_calls", None) or ()):
+        fn = getattr(tc, "function", None)
+        name = str(getattr(fn, "name", "") or "")
+        raw = getattr(fn, "arguments", None)
+        call: dict[str, Any] = {"id": str(getattr(tc, "id", "") or f"tool_call_{i}"), "name": name}
+        if isinstance(raw, dict):
+            parsed: Any = raw
+        else:
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else {}
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict):
+            call["input"] = parsed
+        else:
+            call["input"] = {}
+            call["error"] = f"the arguments for {name} were not a JSON object"
+        calls.append(call)
+    return tuple(calls)
+
+
+def _is_tools_rejection(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status in (401, 403, 429, 529):
+        return False
+    return "tool" in str(exc).lower()
+
+
 def _schema_of(request: dict[str, Any]) -> dict[str, Any] | None:
     fmt = request.get("output_config", {})
     fmt = fmt.get("format", {}) if isinstance(fmt, dict) else {}
@@ -194,10 +284,25 @@ CliRunner = Callable[[Sequence[str], float | None], CliResult]
 
 
 # Default wall-clock cap for a CLI backend subprocess. Without it a hung
-# `claude`/`codex` invocation blocks its worker thread forever (the transports
-# accept timeout_s=None, but the shipped backends never set it). Override via
-# claude_cli_backend/codex_backend.
-_DEFAULT_CLI_TIMEOUT_S = 300.0
+# `claude`/`codex` invocation blocks its worker thread forever. It must be
+# generous: Opus emitting a large JSON plan in one `-p` call routinely runs past
+# 5 minutes, and a kill there throws the whole call away. Override per process
+# with FOUNDRY_CLI_TIMEOUT_S, or per backend via claude_cli_backend/codex_backend.
+_DEFAULT_CLI_TIMEOUT_S = 1800.0
+
+
+def _cli_timeout_s() -> float:
+    """FOUNDRY_CLI_TIMEOUT_S as a positive float, else the default. Read at call
+    time, not import time, so a .env loaded after import still applies."""
+    try:
+        value = float(os.environ.get("FOUNDRY_CLI_TIMEOUT_S") or _DEFAULT_CLI_TIMEOUT_S)
+    except ValueError:
+        return _DEFAULT_CLI_TIMEOUT_S
+    return value if math.isfinite(value) and value > 0 else _DEFAULT_CLI_TIMEOUT_S
+
+
+def _cap_label(timeout_s: float | None) -> str:
+    return f"{timeout_s:.0f}s" if timeout_s is not None else "wall-clock cap"
 
 
 def _default_cli_runner(argv: Sequence[str], timeout_s: float | None) -> CliResult:
@@ -333,7 +438,7 @@ class ClaudeCliTransport:
 
         result = self._run(argv, self._timeout_s)
         if result.timed_out:
-            raise TransportError("claude CLI hard-killed at wall-clock cap")
+            raise TransportError(f"claude CLI hard-killed at {_cap_label(self._timeout_s)}")
         parsed = _lenient_json_object(result.stdout)
         if not parsed and result.returncode != 0:
             raise TransportError(
@@ -459,7 +564,7 @@ class CodexCliTransport:
 
         result = self._run(argv, self._timeout_s)
         if result.timed_out:
-            raise TransportError("codex CLI hard-killed at wall-clock cap")
+            raise TransportError(f"codex CLI hard-killed at {_cap_label(self._timeout_s)}")
         served, text, usage = _extract_codex(result.stdout)
         if not text and result.returncode != 0:
             raise TransportError(
@@ -607,6 +712,10 @@ class OpenAITransport:
     """
 
     def __init__(self, client: Any | None = None) -> None:
+        # model -> tools accepted (True) / rejected (False; the proxy then raises
+        # ToolsUnsupported without sending). Support is per model, not per server.
+        self._tools_by_model: dict[str, bool] = {}
+
         def _build() -> Any:
             try:
                 import openai
@@ -621,19 +730,15 @@ class OpenAITransport:
     def _ensure_client(self) -> Any:
         return self._cache.get()
 
+    def tools_support(self, model: str) -> bool | None:
+        return self._tools_by_model.get(model)
+
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         model = request.get("model")
         if not isinstance(model, str) or not model:
             raise TransportError("openai transport requires a pinned model id on the request")
 
-        messages: list[dict[str, str]] = []
-        sys_text = _system_text(request)
-        if sys_text:
-            messages.append({"role": "system", "content": sys_text})
-        for role, text in _message_pairs(request):
-            messages.append({"role": role, "content": text})
-
-        params: dict[str, Any] = {"model": model, "messages": messages}
+        params: dict[str, Any] = {"model": model, "messages": _chat_messages(request)}
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_completion_tokens"] = max_tokens  # reasoning-model-safe form
@@ -648,8 +753,20 @@ class OpenAITransport:
                 "type": "json_schema",
                 "json_schema": {"name": "verdict", "schema": schema, "strict": True},
             }
-
-        response = self._cache.run(lambda c: c.chat.completions.create(**params))
+        if "tools" in request:
+            if self._tools_by_model.get(model) is False:
+                raise ToolsUnsupported(f"openai rejected tools for {model}")
+            params["tools"] = _chat_tools(request)
+            try:
+                response = self._cache.run(lambda c: c.chat.completions.create(**params))
+            except Exception as exc:
+                if model in self._tools_by_model or not _is_tools_rejection(exc):
+                    raise
+                self._tools_by_model[model] = False
+                raise ToolsUnsupported(f"openai rejected tools for {model}: {exc}") from exc
+            self._tools_by_model[model] = True
+        else:
+            response = self._cache.run(lambda c: c.chat.completions.create(**params))
         choice = response.choices[0] if getattr(response, "choices", None) else None
         text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
         usage = getattr(response, "usage", None)
@@ -664,6 +781,7 @@ class OpenAITransport:
                 cache_read=_as_int(getattr(details, "cached_tokens", 0)) if details else 0,
             ),
             stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
+            tool_calls=_chat_tool_calls(choice.message) if choice is not None else (),
         )
 
 
@@ -683,14 +801,17 @@ def claude_cli_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
-    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
+    timeout_s: float | None | EllipsisType = ...,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``claude -p``. Same Anthropic tier ids + lineage as the
     SDK transport, so calibration baselines carry over. ``timeout_s`` hard-caps each
-    subprocess (default 300s) so a hung CLI can't wedge the worker forever."""
+    subprocess (default FOUNDRY_CLI_TIMEOUT_S or 1800s; None = uncapped) so a hung
+    CLI can't wedge the worker forever."""
     return ModelProviderProxy(
-        transport=ClaudeCliTransport(runner=runner, timeout_s=timeout_s),
+        transport=ClaudeCliTransport(
+            runner=runner, timeout_s=_cli_timeout_s() if timeout_s is ... else timeout_s
+        ),
         lineage_map=LineageMap(DEFAULT_LINEAGE_ENTRIES),
         tier_models=tier_models,  # None ⇒ proxy default TIER_MODELS
         **proxy_kwargs,
@@ -719,14 +840,16 @@ def codex_backend(
     *,
     tier_models: dict[str, str] | None = None,
     runner: CliRunner | None = None,
-    timeout_s: float | None = _DEFAULT_CLI_TIMEOUT_S,
+    timeout_s: float | None | EllipsisType = ...,
     **proxy_kwargs: Any,
 ) -> ModelProviderProxy:
     """Proxy backed by ``codex exec``. OpenAI lineage — a genuinely different
-    served_family. ``timeout_s`` hard-caps each subprocess (default 300s) so a
-    hung CLI can't wedge the worker."""
+    served_family. ``timeout_s`` hard-caps each subprocess (default FOUNDRY_CLI_TIMEOUT_S or
+    1800s; None = uncapped) so a hung CLI can't wedge the worker."""
     return ModelProviderProxy(
-        transport=CodexCliTransport(runner=runner, timeout_s=timeout_s),
+        transport=CodexCliTransport(
+            runner=runner, timeout_s=_cli_timeout_s() if timeout_s is ... else timeout_s
+        ),
         lineage_map=LineageMap((*OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)),
         tier_models=tier_models or CODEX_TIER_MODELS,
         **proxy_kwargs,
@@ -741,9 +864,9 @@ def transport_for(name: BackendName) -> ProviderTransport:
     if name == "openai":
         return OpenAITransport()
     if name == "claude-cli":
-        return ClaudeCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+        return ClaudeCliTransport(timeout_s=_cli_timeout_s())
     if name == "codex":
-        return CodexCliTransport(timeout_s=_DEFAULT_CLI_TIMEOUT_S)
+        return CodexCliTransport(timeout_s=_cli_timeout_s())
     raise ValueError(f"unknown backend {name!r} (expected anthropic | openai | claude-cli | codex)")
 
 

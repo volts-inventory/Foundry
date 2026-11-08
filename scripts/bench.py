@@ -20,29 +20,49 @@ CASES = {
         "a Python command-line tool that prints summary statistics "
         "for each numeric column of a CSV file"
     ),
+    "node": "a small Node.js web app (Express) for a shopping list with add, check off and clear",
+    "go": "a Go command-line tool that counts word frequencies in text files and prints the top N",
+    "rust": "a Rust command-line tool that converts temperatures between C, F and Kelvin",
+    "notes": (
+        "a Python web app for personal notes: user sign-up and login with hashed passwords, "
+        "each user can create, edit, search and delete only their own notes, stored in SQLite"
+    ),
+    "shop": (
+        "a Python web shop: customer accounts with login, a product catalog with search, "
+        "a cart, checkout that records orders and decrements stock, order history, "
+        "and an admin area to manage products and view orders, stored in SQLite"
+    ),
 }
 
 START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")
 REUSE = re.compile(r"reuse model call: ")
 DONE = re.compile(r"done\s+model call: (\S+) \([^)]*\) in ([\d.]+)([sm])\b")
 STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
+RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
 
 
-def run_case(mode: str, backend: str, case: str, cap: int, out_dir: Path) -> None:
+def run_case(
+    mode: str, backend: str, case: str, cap: int, out_dir: Path, scope: str = "demo"
+) -> None:
     root = out_dir / mode / case
     root.mkdir(parents=True, exist_ok=True)
     cmd = [
         sys.executable, "-m", "foundry.cli", CASES[case],
-        "--backend", backend, "--model-mode", mode, "--scope", "demo",
+        "--backend", backend, "--model-mode", mode, "--scope", scope,
         "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
     ]  # fmt: skip
-    env = {**os.environ, "FOUNDRY_PROGRESS": "1", "FOUNDRY_GATE_SANDBOX": "inprocess"}
+    env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
+    # Rerunning a case resumes its saved state, so its log and wall time carry on.
+    meta = root / "run.json"
+    before = json.loads(meta.read_text()).get("wall_s", 0.0) if meta.exists() else 0.0
     start = time.monotonic()
-    with (root / "run.log").open("w") as log:
+    with (root / "run.log").open("a") as log:
+        log.write(f"\n{RUN_MARK}\n")
+        log.flush()
         code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
-    (root / "run.json").write_text(
-        json.dumps({"wall_s": round(time.monotonic() - start, 1), "exit_code": code})
+    meta.write_text(
+        json.dumps({"wall_s": round(before + time.monotonic() - start, 1), "exit_code": code})
     )
 
 
@@ -64,6 +84,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     if (root / "run.json").exists():
         meta = json.loads((root / "run.json").read_text())
     log = (root / "run.log").read_text(errors="replace") if (root / "run.log").exists() else ""
+    last_run = log.rsplit(RUN_MARK, 1)[-1]
     by_node: Counter[str] = Counter()
     by_tier: Counter[str] = Counter()
     secs_by_node: dict[str, float] = {}
@@ -91,7 +112,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     return {
         "wall_s": meta.get("wall_s"),
         "exit_code": code,
-        "stopped_by_time_cap": "time cap reached" in log,
+        "stopped_by_time_cap": meta.get("exit_code") == 3 and "time cap reached" in last_run,
         "model_calls": sum(by_node.values()),
         "calls_by_node": dict(by_node),
         "calls_by_tier": dict(by_tier),
@@ -129,17 +150,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mode", choices=["local", "hybrid", "cloud"], required=True)
     ap.add_argument("--backend", default="claude-cli")
     ap.add_argument("--out-dir", type=Path, required=True)
-    ap.add_argument("--cases", default=",".join(CASES))
-    ap.add_argument("--time-cap", type=int, default=120, help="minutes per case")
+    ap.add_argument("--cases", default="dice,todo,csv")
+    ap.add_argument("--scope", choices=["auto", "demo", "standard"], default="demo")
+    ap.add_argument(
+        "--time-cap",
+        type=int,
+        default=None,
+        help="minutes per case (default: 120 cloud, 600 with a local model)",
+    )
     ap.add_argument("--summarize-only", action="store_true")
     args = ap.parse_args(argv)
     cases = [c for c in args.cases.split(",") if c]
     unknown = [c for c in cases if c not in CASES]
     if unknown:
         ap.error(f"unknown cases: {', '.join(unknown)}")
+    if args.time_cap is None:
+        args.time_cap = 120 if args.mode == "cloud" else 600
     if not args.summarize_only:
         for case in cases:
-            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir)
+            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir, args.scope)
     mode_dir = args.out_dir / args.mode
     summary = {c: summarize_case(mode_dir / c) for c in cases if (mode_dir / c).is_dir()}
     mode_dir.mkdir(parents=True, exist_ok=True)

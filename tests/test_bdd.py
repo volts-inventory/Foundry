@@ -198,10 +198,10 @@ def test_gate_passes_when_every_scenario_passes(tmp_path: Path) -> None:
 def test_gate_passes_inside_namespace_sandbox(tmp_path: Path, monkeypatch: Any) -> None:
     import pytest
 
-    from foundry.gates.sandbox import unshare_available
+    from foundry.gates.sandbox import sandbox_backend
 
-    if not unshare_available():
-        pytest.skip("no unprivileged user namespaces")
+    if sandbox_backend() is None:
+        pytest.skip("no gate sandbox on this host")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     gate = TestGate()
     obs = gate.execute(_project(tmp_path, _STEPS.replace("{expected}", "n")))
@@ -222,6 +222,71 @@ def test_gate_fails_on_missing_step_definitions(tmp_path: Path) -> None:
     obs = gate.execute(_project(tmp_path, unbound))
     assert gate.decide(obs) is GateStatus.FAIL
     assert set(obs.structured[BDD_KEY].values()) == {"failed"}
+
+
+def test_a_step_argument_no_step_provides_gets_the_pytest_bdd_fix(tmp_path: Path) -> None:
+    # A local model returned the Given's value and took it as a When parameter, three
+    # fix passes running: pytest-bdd looked for a fixture named `items` every time.
+    steps = _STEPS.replace("{expected}", "1").replace(', target_fixture="items"', "")
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert 'parsers.parse("... {items} ...")' in hint
+    assert 'target_fixture="items"' in hint and "pytest fixture named `items`" in hint
+
+
+def test_a_step_text_defined_twice_is_named_as_the_unset_argument(tmp_path: Path) -> None:
+    # A local fixer gave each scenario its own `@given` of one shared step line, each
+    # with its own target_fixture: pytest-bdd ran only the last, and two fix passes
+    # read "add target_fixture" while every definition already had one.
+    steps = _STEPS.replace("{expected}", "n").replace(
+        "def _empty():\n    return []\n",
+        'def _empty():\n    return []\n\n\n@given("an empty list", target_fixture="basket")\n'
+        "def _empty_basket():\n    return []\n",
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert '`@given("an empty list")` is defined 2 times (tests/test_t1.py; ' in hint
+    assert "target_fixture `items`, `basket`" in hint
+    assert "runs only the LAST definition" in hint and "define it once" in hint
+
+
+def test_a_step_text_defined_twice_is_named_on_any_failure(tmp_path: Path) -> None:
+    # The local shop run: two scenarios each defined `@then("the user dictionary is
+    # returned")`; the last read an attribute only its own scenario set, so the other
+    # failed with "'Context' object has no attribute" and the gate never said why.
+    steps = _STEPS.replace("{expected}", "n") + (
+        '\n\n@then(parsers.parse("the list has {n:d} item"))\n'
+        "def _count_again(items, n):\n    assert items.total == n\n"
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("`@then("))
+    assert hint.startswith('`@then("the list has {n:d} item")` is defined 2 times in '
+                           "tests/test_t1.py (lines 16, 21): pytest-bdd runs only the LAST")
+    assert "define each step text once" in hint
+
+
+def test_a_target_fixture_on_a_step_no_feature_line_reads_is_named(tmp_path: Path) -> None:
+    # The second fix pass then renamed the step texts apart: no feature line read them.
+    steps = _STEPS.replace("{expected}", "n").replace(
+        '@given("an empty list", target_fixture="items")',
+        '@given("an empty list", target_fixture="basket")\ndef _basket():\n    return []\n\n\n'
+        '@given("an empty list for AC-1", target_fixture="items")',
+    )
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, steps))
+    assert gate.decide(obs) is GateStatus.FAIL
+    hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
+    assert 'only `@given("an empty list for AC-1")` in tests/test_t1.py sets it' in hint
+    assert 'no step line in features/T1.feature reads "an empty list for AC-1"' in hint
+    assert hint.endswith('the nearest step line is "an empty list", whose step definition '
+                         "sets `basket`: scenarios that share a step line share its one step "
+                         "definition, so take `basket` as the parameter instead")
 
 
 def test_gate_fails_when_scenarios_are_never_bound(tmp_path: Path) -> None:
@@ -467,3 +532,39 @@ def test_a_dropped_tickets_scenarios_are_neither_specified_nor_executed(tmp_path
     assert [c["id"] for c in _criteria_list(state, resolve2)] == ["AC-1"]
     materialize_workdir(state, tmp_path, resolve=resolve2, resolve_blob=blob)
     assert sorted(p.name for p in (tmp_path / "features").iterdir()) == ["T1.feature"]
+
+
+def test_a_scenario_a_replan_dropped_from_a_kept_ticket_is_neither_specified_nor_run(
+    tmp_path: Path,
+) -> None:
+    # Local shop run: the third plan kept ticket E1-T01 but dropped its E1-AC02, whose
+    # older record stayed newest under that id. The wave check then demanded a scenario
+    # no ticket carried, and the fixer could not bind it without a later ticket's file.
+    from foundry.agents.quality._common import read_criteria
+    from foundry.graph.gate_wiring import _criteria_list, wave_scenarios
+    from foundry.schemas.implementation import Specialty, Ticket
+    from foundry.schemas.product import PRD
+
+    state, resolve, blob = _state((_ac("AC-1"), _ac("AC-2")), {"app.py": "X = 1\n"})
+    by_uri: dict[str, Any] = {}
+    replan = _seq("planner", 9)._replace(emission_epoch=2)
+    for kind, body in (
+        ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1", "AC-2"),
+                    seq=_seq("planner"))),
+        ("ticket", Ticket(id="T1", title="t", specialty=Specialty.BACKEND,
+                          scenario_ids=("AC-1",), seq=replan)),
+        ("acceptance_criterion", _ac("AC-1").model_copy(update={"seq": replan})),
+        ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1",), seq=replan)),
+    ):
+        h = emit_artifact(body, kind, "planner", body.seq)
+        state["artifacts"].append(h)
+        by_uri[h.uri] = body
+
+    def resolve2(a: Artifact) -> Any:
+        return by_uri[a.uri] if a.uri in by_uri else resolve(a)
+
+    assert [c["id"] for c in _criteria_list(state, resolve2)] == ["AC-1"]
+    assert [c.id for c in read_criteria(state, resolve2)] == ["AC-1"]
+    materialize_workdir(state, tmp_path, resolve=resolve2, resolve_blob=blob)
+    assert "AC-2" not in (tmp_path / "features" / "T1.feature").read_text()
+    assert wave_scenarios(state, resolve2) == {"features/T1.feature::AC-1"}

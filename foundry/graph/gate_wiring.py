@@ -1982,11 +1982,12 @@ def _unchanged_tree_recheck(
     return bool(old) and bool(prev) and bool(cur)
 
 
-def failing_streak(state: FactoryState, *, boundary: str) -> int:
+def failing_streak(state: FactoryState, *, boundary: str, since: str | None = None) -> int:
     """How many of the newest trees in a row the code itself fails at ``boundary``:
     a FAIL in the newest verdict per gate on the tree. ERROR (an infra error or a
     flake quarantine, see :func:`_failure_signature`) is not a code failure and,
-    like a pass, ends the streak."""
+    like a pass, ends the streak; so does the tree ``since`` (one an earlier wave
+    advanced from still failing, :data:`WAVE_ADVANCE_STOPS`)."""
     names = _BOUNDARY_GATES[boundary]
     trees: dict[str, dict[str, GateResult]] = {}
     for g in state.get("gates") or ():
@@ -1999,7 +2000,8 @@ def failing_streak(state: FactoryState, *, boundary: str) -> int:
     for verdicts in sorted(trees.values(), key=lambda v: max(g.seq for g in v.values()),
                            reverse=True):
         statuses = {g.status for g in verdicts.values()}
-        if GateStatus.FAIL not in statuses or GateStatus.ERROR in statuses:
+        if (GateStatus.FAIL not in statuses or GateStatus.ERROR in statuses
+                or next(iter(verdicts.values())).run_against == since):
             break
         streak += 1
     return streak
@@ -2145,8 +2147,10 @@ class FixPolicy:
     passes in a row ERRORed; or when the time cap leaves less than
     ``_PASS_HEADROOM`` x the window's median pass (``default_pass_s`` before any)
     — with ``wave_share``, a wave's loop gets only its share of the time left
-    when it started, ``1 / (unbuilt waves + 2)``. Without a time cap a window stops
-    after ``window_ceiling`` passes. ``meter`` returns the run's token meter.
+    when it started, ``1 / (unbuilt waves + 2)``, and running out of it moves the
+    run on to the next wave (:data:`WAVE_ADVANCE_STOPS`) instead of halting.
+    Without a time cap a window stops after ``window_ceiling`` passes. ``meter``
+    returns the run's token meter.
     ``restarts`` lets a loop rebuild a stuck cluster's tickets from scratch once
     (:func:`plan_next_pass`), in every mode."""
 
@@ -2242,6 +2246,26 @@ def fix_stop(
         return (rule, f"{max(left, 0) / 60:.1f} min left of {what}, under the "
                       f"{need / 60:.1f} min another pass takes")
     return None
+
+
+# Stops that end a wave check's loop but not the run while waves remain: the wave
+# advances on its best tree and the final gates repair what is left with the time
+# the share saved. ``carried``: the check fails only on what the wave it builds on
+# advanced with (:func:`advanced_from`).
+CARRIED_STOP = "carried"
+WAVE_ADVANCE_STOPS = frozenset({"wave-share", CARRIED_STOP})
+_WAVE_BOUNDARIES = frozenset({BUILD_BOUNDARY, BUILD_TEST_BOUNDARY})
+
+
+def advanced_from(state: FactoryState, window: str) -> FixPass | None:
+    """The check the wave ``window`` builds on advanced from still failing: the
+    newest wave-check entry of another window, if it stopped on a
+    :data:`WAVE_ADVANCE_STOPS` rule (a later window that went green, or ended any
+    other way, carries nothing)."""
+    others = [p for p in state.get("fix_passes") or ()
+              if p.boundary in _WAVE_BOUNDARIES and p.window != window]
+    newest = max(others, key=lambda p: p.seq, default=None)
+    return newest if newest is not None and newest.stop in WAVE_ADVANCE_STOPS else None
 
 
 def fix_window(state: FactoryState, boundary: str, scope: frozenset[str]) -> str:
@@ -2497,6 +2521,7 @@ def keep_best(
     rerun: Callable[[FactoryState], dict[str, Any]],
     policy: FixPolicy | None = None,
     unbuilt_waves: int | None = None,
+    carried: frozenset[str] = frozenset(),
 ) -> bool:
     """Record the check ``out`` holds in the fix-pass ledger and, when its tree is
     worse than the window's best, restore the best tree: a ``revert-<n>`` diff on
@@ -2509,7 +2534,10 @@ def keep_best(
     previous check: the fixer session, the check and the restore. Under a
     fix-until-cap ``policy`` a failing check whose loop must stop (:func:`fix_stop`;
     ``unbuilt_waves`` set for a wave check) gets the rule on its newest entry and a
-    :data:`FIX_STOP_TRIAGE` note naming it.
+    :data:`FIX_STOP_TRIAGE` note naming it. ``carried`` (a wave check with waves
+    left, :func:`advanced_from`): failures an earlier wave advanced with. A
+    check failing on those alone stops (:data:`CARRIED_STOP`), and no pass is
+    aimed at a cluster of them while the wave has failures of its own.
 
     Call before the budget is settled, on ``out``'s own verdicts."""
     known = len(out.get("fix_passes") or ())
@@ -2540,6 +2568,10 @@ def keep_best(
     if until_cap and (newest.score is None or any(newest.score[1:])):
         assert policy is not None
         stop = fix_stop(passes, policy, unbuilt_waves=unbuilt_waves)
+        if (stop is None and carried and unbuilt_waves and newest.score is not None
+                and set(newest.failing) <= carried):
+            stop = (CARRIED_STOP, "this wave's checks fail only on what the wave it "
+                                  "builds on advanced with")
     if newest.score is not None and any(newest.score[1:]):
         from foundry.agents.implementation.tickets import built_task_ids, read_tickets
 
@@ -2547,6 +2579,9 @@ def keep_best(
         verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
         clusters = failure_clusters(verdicts.values(), read_tickets(state, resolve),
                                     built_task_ids(state))
+        # An earlier wave's leftovers already had that wave's share: this wave's
+        # passes go to its own failures, the final gates to the rest.
+        clusters = tuple(c for c in clusters if not set(c.items) <= carried) or clusters
         # A pass that got a stage further may have broken ids the best tree passed:
         # the next pass goes after those first.
         before = best_entry(prior, new[0].window)
@@ -2569,6 +2604,8 @@ def keep_best(
         new[-1] = newest
     if stop is not None:
         rule, why = stop
+        if rule in WAVE_ADVANCE_STOPS and unbuilt_waves:
+            why += "; the run moves on to the next wave and the final gates fix the rest"
         new[-1] = newest.model_copy(update={"stop": rule})
         out.setdefault("gate_triage", []).append(GateTriage(
             name=FIX_STOP_TRIAGE, run_against=newest.tree,
@@ -3115,9 +3152,6 @@ class WaveBuildCheck:
             return frozenset()
         return scope
 
-    def _boundary(self, state: FactoryState) -> str:
-        return BUILD_TEST_BOUNDARY if self._scenarios(state) else BUILD_BOUNDARY
-
     def _check(self, state: FactoryState, config: RunnableConfig,
                scenarios: frozenset[str]) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
@@ -3133,10 +3167,14 @@ class WaveBuildCheck:
         boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
         # Escalation and the no-progress note judge this pass, not a restored tree.
         own: list[GateResult] = list(out.get("gates") or ())
+        window = fix_window(state, boundary, scenarios)
+        unbuilt = self._unbuilt_waves(state)
+        base = advanced_from(state, window) if self.fix_policy.until_cap else None
         reverted = keep_best(state, config, out, boundary=boundary, scope=scenarios,
                              rt=self.rt, resolve=self.resolve, resolve_blob=self.resolve_blob,
                              rerun=lambda s: self._check(s, config, scenarios),
-                             policy=self._policy, unbuilt_waves=self._unbuilt_waves(state))
+                             policy=self._policy, unbuilt_waves=unbuilt,
+                             carried=frozenset(base.failing) if base else frozenset())
         settle_fix_attempts(state, config, out, boundary=boundary,
                             records=self.runner.records, max_fix_attempts=self.max_fix_attempts,
                             total_cap=fix_cap(state, self.resolve, self.max_fix_attempts),
@@ -3154,11 +3192,20 @@ class WaveBuildCheck:
         }
         decision = self._route(post, config, boundary)
         judged: FactoryState = {**post, "gates": merge_gates(state.get("gates"), own)}
-        streak = failing_streak(judged, boundary=boundary) if decision != ADVANCE else 0
+        # The trees before the wave this one builds on advanced are not this wave's
+        # failures to escalate on.
+        streak = (failing_streak(judged, boundary=boundary, since=base.tree if base else None)
+                  if decision != ADVANCE else 0)
         picked: tuple[str, ...] = ()
         newest = (out.get("fix_passes") or [None])[-1]
         restarting = decision == FIX and newest is not None and bool(newest.restart_tickets)
-        if streak >= 1 and not restarting:
+        if self._advances(post, decision, window, unbuilt):
+            # No escalation either: its rebuild and re-check would open a new window
+            # with a new share, the overrun the share exists to prevent. A boundary
+            # left behind hands the next one a whole budget, as a green one does.
+            ledger = out.get("budget") or state.get("budget") or BudgetLedger()
+            out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
+        elif streak >= 1 and not restarting:
             from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
             from foundry.execution.adapters.tiered import (
                 ESCALATE_FALLBACK_TRIAGE,
@@ -3243,8 +3290,12 @@ class WaveBuildCheck:
         does — unless fixing until the cap, where the dead-end rules decide."""
         from foundry.agents.implementation.tickets import pending_escalations
 
-        boundary = self._boundary(state)
+        scenarios = self._scenarios(state)
+        boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
         decision = self._route(state, config, boundary)
+        if self._advances(state, decision, fix_window(state, boundary, scenarios),
+                          self._unbuilt_waves(state)):
+            return ADVANCE
         if decision != ADVANCE and pending_escalations(state, self.resolve):
             return ESCALATE
         if decision == FIX and pending_restarts(state, self.resolve):
@@ -3255,6 +3306,16 @@ class WaveBuildCheck:
                 or self._stopped_on_current_tree(state, config)):
             return HALT
         return decision
+
+    @staticmethod
+    def _advances(state: FactoryState, decision: str, window: str, unbuilt: int) -> bool:
+        """True iff a spent loop moves on to the next wave instead of halting the
+        run: its newest check stopped on a :data:`WAVE_ADVANCE_STOPS` rule with a
+        wave still to build."""
+        if decision != HALT or not unbuilt:
+            return False
+        passes = [p for p in state.get("fix_passes") or () if p.window == window]
+        return bool(passes) and max(passes, key=lambda p: p.seq).stop in WAVE_ADVANCE_STOPS
 
     def capped_off_target(self, state: FactoryState) -> bool:
         """True iff the newest fix pass ran out of turns without editing any file

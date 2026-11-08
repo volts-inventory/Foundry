@@ -365,3 +365,107 @@ def test_the_final_gate_restart_runs_the_engineering_node_not_the_fixer(
     diffs = {a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
     assert {"reset-T-001", "restart-T-001"} <= diffs and not any(
         d and d.startswith("fix-") for d in diffs)
+
+
+# ---- a wave's share runs out: the next wave, not a halt -------------------------
+
+
+@dataclass
+class _ShareMeter:
+    """A run clock at 3000 s: the cap leaves the first wave check almost no share,
+    then (from the second session on) is raised so later loops have time."""
+
+    calls: list[str]
+    elapsed_s: float = 3000.0
+
+    @property
+    def time_cap_s(self) -> float:
+        return 3600.0 if len(self.calls) <= 1 else 36_000.0
+
+    @property
+    def remaining_s(self) -> float:
+        return self.time_cap_s - self.elapsed_s
+
+
+def _share_policy(rec: _Recorder) -> FixPolicy:
+    meter = _ShareMeter(rec.calls)
+    return FixPolicy(until_cap=True, meter=lambda: meter)
+
+
+def _check(rec: _Recorder, store: ArtifactStore, policy: FixPolicy) -> Any:
+    from foundry.gates import TwoZoneGateRunner
+    from foundry.gates.attestation import ZoneBSigner
+    from foundry.graph.gate_wiring import WaveBuildCheck
+    from foundry.state.global_records import GlobalRecords
+    from tests.test_ticket_scheduler import _WAVE_KEY
+
+    runner = TwoZoneGateRunner(ZoneBSigner(_WAVE_KEY, "wave-kid"), GlobalRecords(), "s1", "l1")
+    return WaveBuildCheck(_runtime(rec, store), runner, store.resolve, store.resolve_blob,
+                          fix_policy=policy)
+
+
+def test_a_spent_wave_share_moves_on_to_the_next_wave(tmp_path: Path) -> None:
+    broken = {"app.py": "def broken(:\n"}
+    rec = _Recorder(writes={"T-001": broken, "T-002": {"b.py": "B = 1\n"}})
+    tickets = [_ticket("T-001", 0, files=("app.py",)),
+               _ticket("T-002", 1, files=("b.py",), deps=("T-001",))]
+    policy = _share_policy(rec)
+    out, ran, store = _wave_run(tmp_path, rec, tickets=tickets, fix_policy=policy)
+    # 600 s left over the wave and the final gate (+ slack): 150 s, no time for a pass.
+    assert ran == ["engineering", "wave_gate", "engineering"]
+    assert rec.calls == ["T-001", "T-002"] and rec.seen["T-002"]["app.py"] == broken["app.py"]
+    [entry] = out["fix_passes"]
+    assert entry.stop == "wave-share" and entry.failing
+    [note] = [t for t in out["gate_triage"] if t.name == FIX_STOP_TRIAGE]
+    assert "moves on to the next wave" in note.explanation
+    # The wave's failure stays on record; the final gates get a whole budget.
+    assert [g.status for g in out["gates"] if g.name == "build"] == [GateStatus.FAIL]
+    assert out["budget"].fix_attempts_since_all_green == 0
+
+    # With no wave left to build the same stop halts, as it always did.
+    check = _check(rec, store, policy)
+    cfg: Any = {"configurable": {"thread_id": "wave-run"}}
+    wave1 = {**out, "artifacts": [a for a in out["artifacts"] if a.task_id != "T-002"]}
+    assert check.route(wave1, cfg) == "advance"
+    last = {**wave1, "artifacts": [a for a in wave1["artifacts"] if not (
+        a.kind == "ticket" and store.resolve(a).id == "T-002")]}
+    assert check.route(last, cfg) == "halt"
+
+
+def test_a_later_wave_fixes_its_own_failures_not_the_ones_it_inherited(
+    tmp_path: Path,
+) -> None:
+    rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"},
+                            "T-002": {"b.py": "def b(:\n"},
+                            "fix-1": {"b.py": "def b():\n    pass\n"}})
+    tickets = [_ticket("T-001", 0, files=("app.py",)),
+               _ticket("T-002", 1, files=("b.py",), deps=("T-001",)),
+               _ticket("T-003", 2, files=("c.py",), deps=("T-002",))]
+    out, ran, _ = _wave_run(tmp_path, rec, tickets=tickets, fix_policy=_share_policy(rec))
+    # Wave 2 has time: it repairs b.py, then stops on app.py, wave 1's leftover.
+    assert ran == ["engineering", "wave_gate", "engineering", "wave_gate", "fixer",
+                   "wave_gate", "engineering"]
+    assert rec.calls == ["T-001", "T-002", "fix-1", "T-003"]
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert [p.stop for p in passes] == ["wave-share", None, "carried"]
+    assert set(passes[-1].failing) == set(passes[0].failing)
+    assert out["budget"].fix_attempts_since_all_green == 0
+
+
+def test_the_final_gates_still_block_a_tree_a_wave_left_red() -> None:
+    from foundry.graph.gate_wiring import route_after_gates
+    from foundry.state.global_records import GlobalRecords
+
+    advanced = _pass(0, "t0", "initial").model_copy(update={"stop": "wave-share"})
+    state: FactoryState = {**_final_state(("t1", _RED)), "fix_passes": [advanced],
+                           "budget": BudgetLedger()}
+    cfg: Any = {"configurable": {"thread_id": "run"}}
+    args: dict[str, Any] = {"boundary": BUILD_TEST_SMOKE_BOUNDARY, "records": GlobalRecords(),
+                            "fix_policy": _UNTIL_CAP}
+    assert route_after_gates(state, cfg, **args) == "fix"
+    assert _routes(True)["build_test_gate"](state, cfg) not in ("advance", "quality")
+    # The final loop's own stop halts: the red tree never ships.
+    final = _pass(1, "t1", "lateral").model_copy(
+        update={"boundary": BUILD_TEST_SMOKE_BOUNDARY, "stop": "time"})
+    assert route_after_gates({**state, "fix_passes": [advanced, final]}, cfg,
+                             **args) == "halt"

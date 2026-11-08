@@ -61,7 +61,7 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
         body = json.loads(sb.get_blob(result.diff_uri))
     assert body == {"kind": "full-file-snapshot", "files": {"mod.py": "X = 1\n"}}
     assert result.turns_used == 3
-    assert [t.explanation for t in result.triage] == ["no docs yet"]
+    assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
 
 
 def test_observations_feed_back(tmp_path: Path) -> None:
@@ -800,7 +800,7 @@ def test_native_tool_calls_in_one_turn_run_in_order_as_tool_results(tmp_path: Pa
     assert res[0]["content"].startswith("wrote a.txt")
     assert "first" in res[1]["content"]
     assert res[3]["content"].startswith("exit 0") and "second" in res[3]["content"]
-    assert [t.explanation for t in result.triage] == ["no docs"]
+    assert [t.explanation for t in result.triage] == ["built", "no docs"]
 
 
 def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None:

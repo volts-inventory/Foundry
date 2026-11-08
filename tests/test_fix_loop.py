@@ -1277,6 +1277,28 @@ def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
     assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
 
 
+def test_a_restarts_gate_check_runs_on_the_reset_tree(tmp_path: Path) -> None:
+    from foundry.gates.self_check import current_check
+
+    checked: list[set[str]] = []
+
+    class _Peek(_RestartRecorder):
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            spec = current_check()
+            if packet.task["id"] == "T-001" and "T-001" in self.calls and spec is not None:
+                root = spec.base.tree()[0]
+                checked.append({p.relative_to(root).as_posix()
+                                for p in root.rglob("*.py") if p.is_file()})
+            return super().run(packet, sandbox)
+
+    rec = _Peek(
+        writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}})
+    _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
+    # The session starts with no a.py or b.py (reset): neither does its check's tree.
+    assert len(checked) == 1 and not checked[0] & {"a.py", "b.py"}, checked
+
+
 def test_a_ticket_restarts_once_and_a_worse_restart_is_reverted(tmp_path: Path) -> None:
     from foundry.graph.gate_wiring import RESTARTED_TRIAGE
 

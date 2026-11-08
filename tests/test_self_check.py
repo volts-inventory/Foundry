@@ -316,10 +316,10 @@ def _observations(seen: list[list[dict[str, Any]]]) -> list[str]:
 
 def _run_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, actions: list[dict[str, Any]],
-    budget: int = 8,
+    budget: int = 8, turn_budget: int = 12, run: Any = None,
 ) -> tuple[Any, list[list[dict[str, Any]]], list[dict[str, str]]]:
     calls: list[dict[str, str]] = []
-    monkeypatch.setattr(self_check, "run_check", _red_unless("OK", calls))
+    monkeypatch.setattr(self_check, "run_check", run or _red_unless("OK", calls))
     spec = CheckSpec(base=_fake_base(tmp_path / "base", budget), scope=frozenset(),
                      own_refs=frozenset(), own_files=("app.py",),
                      rules={"VERIFY BEFORE YOU FINISH: run verify": CHECK_RULE})
@@ -327,7 +327,7 @@ def _run_loop(
     src = tmp_path / "src"
     src.mkdir()
     with Sandbox(src) as sb, check_scope(spec):
-        result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(), sb)
+        result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(turn_budget), sb)
     return result, seen, calls
 
 
@@ -418,6 +418,80 @@ def test_a_refusal_with_no_check_left_does_not_ask_for_one(
     refusal = _observations(seen)[2]
     assert "ERROR: not done" in refusal and "No checks are left" in refusal
     assert "call check" not in refusal
+
+
+_ERRORED = (GateOutcome("build", GateStatus.ERROR, ("pip: connection reset",)),)
+
+
+def _errors_after_opening(calls: list[Any]) -> Any:
+    def _run(spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()) -> Any:
+        calls.append(dict(files))
+        return (GateOutcome("build", GateStatus.PASS, ()),) if not files else _ERRORED
+    return _run
+
+
+def test_a_check_no_gate_could_judge_is_not_cached_and_spends_only_past_a_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    monkeypatch.setattr(self_check, "run_check", _errors_after_opening(calls))
+    session = SessionCheck(CheckSpec(base=_fake_base(tmp_path, budget=3), scope=frozenset(),
+                                     own_refs=frozenset(), own_files=("app.py",)))
+    session.opening()
+    tree = {"app.py": "a"}
+    assert session.check(tree, ()).errors
+    assert session.cached(tree, ()) is None and session.unjudged(tree, ())
+    assert session.left == 3
+    session.check(tree, ())
+    assert session.left == 3
+    session.check(tree, ())  # past the free unjudged runs: an always-broken gate is bounded
+    assert session.left == 2 and len(calls) == 4
+
+
+def test_an_unjudged_final_tree_is_unverified_and_done_keeps_its_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    result, _, _ = _run_loop(tmp_path, monkeypatch, [
+        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+        {"action": "done", "summary": "built it", "triage": ["the cache is untested"]},
+    ], run=_errors_after_opening(calls))
+    notes = [t.explanation for t in result.triage]
+    assert notes[:2] == ["built it", "the cache is untested"], notes
+    assert any(n.startswith(CHECK_UNVERIFIED) and "could not judge" in n for n in notes), notes
+    assert session_stop_reason(result.triage) is None
+
+
+def test_a_session_out_of_turns_with_checks_left_says_why_it_is_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_loop(tmp_path, monkeypatch, [
+        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+    ], turn_budget=1)
+    [note] = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_UNVERIFIED)]
+    assert "ended without checking" in note and "no check" not in note, note
+
+
+def test_the_session_end_walks_the_final_tree_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+
+    walks: list[Path] = []
+    real = proxy_agent.walk_worktree
+
+    def _walk(root: Path) -> Any:
+        walks.append(root)
+        return real(root)
+
+    monkeypatch.setattr(proxy_agent, "walk_worktree", _walk)
+    _run_loop(tmp_path, monkeypatch, [
+        {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+        {"action": "check"},
+        {"action": "done", "summary": "built it"},
+    ], budget=1)
+    # The start, the check, the done's check lookup, and one walk at the end.
+    assert len(walks) == 4, walks
 
 
 def test_check_without_a_gate_context_is_unavailable(tmp_path: Path) -> None:

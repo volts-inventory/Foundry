@@ -31,7 +31,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -65,6 +65,9 @@ __all__ = [
 ]
 
 CHECK_BUDGET = 8
+# Checks a session may run free while no gate can judge the tree (infra down);
+# past these an unjudged check spends the budget, so a broken gate cannot loop.
+_UNJUDGED_FREE = 2
 # Per gate step (the install, the build, the scoped scenarios): a local check is
 # seconds to a minute; a hung one must not eat the session.
 CHECK_TIMEOUT_S = 180.0
@@ -130,8 +133,10 @@ class CheckBase:
         resolve_blob: BlobResolver,
         rt: AgentRuntime,
         settings: SelfCheckSettings,
+        reset: tuple[Mapping[str, str], Sequence[str]] = ({}, ()),
     ) -> None:
         self.state = state
+        self._reset = reset
         self.rt = rt
         self.settings = settings
         self._tmp = tmp
@@ -154,6 +159,12 @@ class CheckBase:
                 shutil.rmtree(root, ignore_errors=True)
                 materialize_workdir(self.state, root, resolve=self._resolve,
                                     resolve_blob=self._resolve_blob, scaffold_manifest=False)
+                files, deleted = self._reset
+                if files or deleted:
+                    from foundry.agents.implementation.junior_engineer import _apply_overlay
+
+                    overlay: dict[str, str | None] = {**files, **dict.fromkeys(deleted)}
+                    _apply_overlay(root, overlay)
                 self._built = (root, tuple(planned_files(self.state, self._resolve)))
             return self._built
 
@@ -177,11 +188,13 @@ def check_base(
     resolve_blob: BlobResolver,
     rt: AgentRuntime,
     settings: SelfCheckSettings,
+    reset: tuple[Mapping[str, str], Sequence[str]] = ({}, ()),
 ) -> Iterator[CheckBase]:
-    """The :class:`CheckBase` for ``state``, removed on exit."""
+    """The :class:`CheckBase` for ``state`` with ``reset`` (files rewritten,
+    files deleted: a restart's) applied, removed on exit."""
     with tempfile.TemporaryDirectory(prefix="foundry-check-base-") as tmp:
         yield CheckBase(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob, rt=rt,
-                        settings=settings)
+                        settings=settings, reset=reset)
 
 
 @dataclass(frozen=True)
@@ -542,7 +555,8 @@ def render(v: CheckVerdict, *, left: int, cached: bool = False, opening: bool = 
 class SessionCheck:
     """One session's checks: the opening run on its starting tree (free), then at
     most ``budget`` runs, each cached by the in-scope changes it judged (an
-    unchanged tree answers from the cache, free)."""
+    unchanged tree answers from the cache, free). A run no gate could judge is
+    not cached and, for the first :data:`_UNJUDGED_FREE`, not counted."""
 
     def __init__(self, spec: CheckSpec, budget: int | None = None, label: str = "") -> None:
         self.spec = spec
@@ -552,6 +566,8 @@ class SessionCheck:
         # Gate name -> its first result that judged the tree (PASS or FAIL).
         self._start: dict[str, GateOutcome] = {}
         self._cache: dict[str, CheckVerdict] = {}
+        self._unjudged: set[str] = set()  # trees whose last run had a gate ERROR, not red
+        self._free = _UNJUDGED_FREE
 
     def _scoped(
         self, files: Mapping[str, str], deleted: Iterable[str]
@@ -573,7 +589,12 @@ class SessionCheck:
         for g in gates:
             if g.status in (GateStatus.PASS, GateStatus.FAIL):
                 self._start.setdefault(g.name, g)
-        self._cache[key] = verdict
+        # Short of red with a gate ERROR, the tree is not verified: never answer it cached.
+        if verdict.red or not verdict.errors:
+            self._cache[key] = verdict
+            self._unjudged.discard(key)
+        else:
+            self._unjudged.add(key)
         self.last = verdict
         status = "red" if verdict.red else "green" if verdict.green else "error"
         progress.log(f"self-check {self.label or '-'}: {status} ({len(verdict.yours)} own, "
@@ -592,9 +613,16 @@ class SessionCheck:
             self.last = verdict
         return verdict
 
+    def unjudged(self, files: Mapping[str, str], deleted: Iterable[str]) -> bool:
+        """Whether the last run on this tree could not judge it (a gate ERROR)."""
+        return self._scoped(files, deleted)[2] in self._unjudged
+
     def check(self, files: Mapping[str, str], deleted: Iterable[str]) -> CheckVerdict:
         """A counted run; the caller checks :meth:`cached` and ``left`` first."""
         kept, gone, key = self._scoped(files, deleted)
         verdict = self._run(kept, gone, key)
-        self.left -= 1  # only a check that judged the tree spends the budget
+        if key in self._unjudged and self._free > 0:
+            self._free -= 1
+        else:
+            self.left -= 1
         return verdict

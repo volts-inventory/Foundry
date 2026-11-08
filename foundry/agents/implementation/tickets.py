@@ -1848,8 +1848,10 @@ def make_engineering_node(
         if self_check is not None and blobs is not None and self_check.enabled():
             from foundry.gates.self_check import check_base
 
+            # A restart's sessions start on the reset tree: so do their checks.
             base = base_scope.enter_context(check_base(
-                state, resolve=resolve, resolve_blob=blobs, rt=rt, settings=self_check))
+                state, resolve=resolve, resolve_blob=blobs, rt=rt, settings=self_check,
+                reset=reset))
         checks: dict[str, CheckSpec] = {}
         scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
                                 built_contracts, names, stubs, skeleton, checks)

@@ -108,7 +108,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     return {
         "wall_s": meta.get("wall_s"),
         "exit_code": code,
-        "stopped_by_time_cap": "time cap reached" in log,
+        "stopped_by_time_cap": meta.get("exit_code") == 3 and "time cap reached" in log,
         "model_calls": sum(by_node.values()),
         "calls_by_node": dict(by_node),
         "calls_by_tier": dict(by_tier),

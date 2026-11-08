@@ -98,3 +98,4 @@ def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
     root = tmp_path / "local" / "dice"
     assert (root / "run.log").read_text() == "attempt 1\nattempt 2\n"
     assert json.loads((root / "run.json").read_text())["exit_code"] == 0
+    assert bench.summarize_case(root)["stopped_by_time_cap"] is False  # resumed to a pass

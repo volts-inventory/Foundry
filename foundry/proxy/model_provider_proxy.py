@@ -380,8 +380,8 @@ _AGENT_NODE_IDS = frozenset({"junior_engineer"})
 # A thinking turn spends its reasoning out of the answer's budget: at xhigh a hard
 # ticket, a verdict or the planner's plan JSON can think for 20K+ tokens first.
 _LOCAL_THINKING_MAX_TOKENS = 40960
-# One-shot xhigh calls (plan, verdict): what a 64K context leaves after the prompt.
-_LOCAL_DEEP_THINKING_MAX_TOKENS = 57344
+# One-shot xhigh calls (plan, verdict): what a 128K context leaves after the prompt.
+_LOCAL_DEEP_THINKING_MAX_TOKENS = 98304
 # A prompt the server saw as under this share of our estimate was cut to fit its
 # context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
 # so a healthy call reads at or above 1.

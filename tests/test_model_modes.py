@@ -661,7 +661,7 @@ def test_local_thinking_is_routed_per_call_kind(
     for req, thinks in zip(local.requests, expected, strict=True):
         # Thinking spends the answer's budget, so it lifts the cap (judgment too).
         assert req["max_tokens"] == (
-            (40960 if req is local.requests[1] else 57344) if thinks else
+            (40960 if req is local.requests[1] else 98304) if thinks else
             8192 if req is local.requests[2] else 16000)
     assert proxy.manifest[1]["thinking"] is expected[1]
     # Plan/verdict calls think at xhigh; agent turns (one of many) at medium.

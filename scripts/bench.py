@@ -40,6 +40,7 @@ DONE = re.compile(r"done\s+model call: (\S+) \([^)]*\) in ([\d.]+)([sm])\b")
 STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
 RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
+HINT_COUNTS = "hint_counts.json"
 
 
 def run_case(
@@ -55,15 +56,35 @@ def run_case(
     env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
     # Rerunning a case resumes its saved state, so its log and wall time carry on.
     meta = root / "run.json"
-    before = json.loads(meta.read_text()).get("wall_s", 0.0) if meta.exists() else 0.0
+    prior = json.loads(meta.read_text()) if meta.exists() else {}
+    # Each CLI process writes only its own counts: a stale file from an earlier
+    # segment would be summed twice if this one dies before writing.
+    for stale in (root / "state" / "calls").glob(f"*/{HINT_COUNTS}"):
+        stale.unlink()
     start = time.monotonic()
     with (root / "run.log").open("a") as log:
         log.write(f"\n{RUN_MARK}\n")
         log.flush()
         code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
     meta.write_text(
-        json.dumps({"wall_s": round(before + time.monotonic() - start, 1), "exit_code": code})
+        json.dumps(
+            {
+                "wall_s": round(prior.get("wall_s", 0.0) + time.monotonic() - start, 1),
+                "exit_code": code,
+                "hint_counts": add_counts(prior.get("hint_counts") or {}, root / "state"),
+            }
+        )
     )
+
+
+def add_counts(prior: dict[str, int], state: Path) -> dict[str, int]:
+    total: Counter[str] = Counter(prior)
+    for path in (state / "calls").glob(f"*/{HINT_COUNTS}"):
+        try:
+            total.update(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+    return dict(sorted(total.items()))
 
 
 def sum_tokens(state: Path) -> dict[str, int]:
@@ -124,6 +145,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
         "out_files": len(files),
         "verdict": VERDICTS.get(code) if code is not None else None,
         "released": bool(files) and code == 0,
+        "hint_counts": meta.get("hint_counts") or {},
     }
 
 
@@ -142,6 +164,10 @@ def render(summary: dict[str, dict[str, Any]]) -> str:
             f"{s['out_files']:>5} {s['verdict'] or '-':<8} {'Y' if s['released'] else 'N'}"
             f"{' (time cap)' if s['stopped_by_time_cap'] else ''}"
         )
+    for case, s in summary.items():
+        counts = s.get("hint_counts") or {}
+        fired = ", ".join(f"{k}={v}" for k, v in counts.items()) or "none"
+        rows.append(f"{case} hints: {fired}")
     return "\n".join(rows)
 
 

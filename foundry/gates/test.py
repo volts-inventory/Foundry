@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
+from foundry.telemetry import count, counted
 
 from . import cucumber
 from .bdd_scaffold import parse_feature, parse_fields, step_captures, step_matches
@@ -380,6 +381,7 @@ def bdd_findings(
 _COLLECT_ERROR = re.compile(r"^(?:_+ )?ERROR (?:collecting )?(\S+?\.py)\b", re.MULTILINE)
 
 
+@counted("test.uncollected_binding")
 def uncollected_binding_reasons(output: str, workdir: Path, refs: list[str]) -> dict[str, str]:
     """Scenario ref -> why it never ran, for each of ``refs`` whose feature file a
     step module binds that pytest failed to import (``ERROR collecting <module>``).
@@ -445,6 +447,7 @@ def _is_test_module(name: str) -> bool:
     )
 
 
+@counted("test.shared_state")
 def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per unique key a test's insert collided on. Tests in one pytest
     process share a module-level database (an in-memory SQLite engine lives as long
@@ -513,6 +516,7 @@ def _called_name(func: ast.expr) -> str | None:
     return func.attr if isinstance(func, ast.Attribute) else None
 
 
+@counted("test.conftest_binding")
 def conftest_binding_note(workdir: Path) -> str | None:
     """A finding naming the conftest.py files that call ``scenarios(``: pytest
     imports a conftest for fixtures but never collects its tests, so a binding
@@ -581,6 +585,7 @@ def _rebound_names(node: ast.stmt) -> set[str]:
     return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
 
 
+@counted("test.shadowed_scenario")
 def shadowed_scenario_notes(workdir: Path, refs: list[str]) -> tuple[str, ...]:
     """A finding per bound-but-unexecuted scenario whose generated test a later
     module-level definition replaces: ``scenarios(...)`` puts the scenario's test in
@@ -856,6 +861,7 @@ def _unset_target_note(
     )
 
 
+@counted("test.step_argument")
 def step_argument_hints(
     stdout: str, workdir: Path | None = None, features: Iterable[str] = ()
 ) -> tuple[str, ...]:
@@ -888,6 +894,7 @@ def step_argument_hints(
 _DUPLICATE_NOTES_MAX = 8
 
 
+@counted("test.duplicate_step")
 def duplicate_step_notes(workdir: Path, features: Iterable[str]) -> tuple[str, ...]:
     """One line per step text a step module that binds ``features`` defines more than
     once with the same keyword. pytest-bdd runs only the last of them for every
@@ -1134,6 +1141,7 @@ def step_module_notes(
     return tuple(out)
 
 
+@counted("test.static_step")
 def static_step_notes(
     workdir: Path, features: Iterable[str], *, params: bool = True
 ) -> tuple[str, ...]:
@@ -1310,6 +1318,7 @@ class TestGate:
         except cucumber.ReportError as exc:
             from .profiles import bdd_runner_hint
 
+            count("test.bdd_runner")
             hint = bdd_runner_hint(self.profile_name.removeprefix("stack:")) or (
                 'e.g. cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
             )
@@ -1322,6 +1331,7 @@ class TestGate:
             ]
             literal = _unexpanded_report_paths(workdir)
             if literal:
+                count("test.unexpanded_report_path")
                 notes.append(
                     f"the bdd command wrote its report to {', '.join(literal)} — a path "
                     f"literally named after ${_BDD_REPORT_ENV}: the variable was not "

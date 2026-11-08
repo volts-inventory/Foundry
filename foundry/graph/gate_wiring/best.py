@@ -36,6 +36,7 @@ from foundry.graph.gate_wiring.materialize import (
 from foundry.graph.gate_wiring.restarts import failure_clusters, plan_next_pass, restart_set
 from foundry.graph.gate_wiring.routing import _BOUNDARY_GATES, _fix_attempts
 from foundry.schemas.gates import FixPass, GateTriage
+from foundry.telemetry import count
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -174,6 +175,7 @@ def keep_best(
         new[-1] = newest
     if stop is not None:
         rule, why = stop
+        count(f"fix_stop.{rule}")
         if rule in WAVE_ADVANCE_STOPS and unbuilt_waves:
             why += "; the run moves on to the next wave and the final gates fix the rest"
         new[-1] = newest.model_copy(update={"stop": rule})

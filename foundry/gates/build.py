@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 
 from foundry.canonical import content_digest
 from foundry.schemas.gates import GateStatus, VerdictClass
+from foundry.telemetry import counted
 
 from .runner import ZoneAObservation, observe
 from .sandbox import ground_untrusted, toolchain_scope
@@ -131,6 +132,7 @@ def build_findings(
     return (f"{head}; last {len(tail)} output line(s):", *tail, *hints)
 
 
+@counted("build.forward_annotation")
 def forward_annotation_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per mypy ``name-defined`` error on a name its module uses only inside
     string literals (a quoted / forward annotation such as ``Mapped[list["CartItem"]]``):

@@ -31,6 +31,7 @@ exits and the supervisor raises it, after this wave's writes are committed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import posixpath
 import re
@@ -111,6 +112,7 @@ if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
     from foundry.execution.sandbox import Sandbox
+    from foundry.gates.self_check import CheckBase, CheckSpec, SelfCheckSettings
     from foundry.graph.gate_wiring import BlobResolver, _DiffOps
     from foundry.schemas.architecture import PinnedConstraint
     from foundry.state.factory_state import FactoryState
@@ -640,10 +642,14 @@ class _ScopedAdapter:
         names: Mapping[str, tuple[Mapping[str, Sequence[str]], bool]] | None = None,
         stubs: Mapping[str, tuple[Mapping[str, str], bool]] | None = None,
         skeleton: Mapping[str, str] | None = None,
+        checks: Mapping[str, CheckSpec] | None = None,
     ) -> None:
         assert rt.adapter is not None
         self._rt = rt
         self._scopes = scopes
+        # Task id -> its session's gate check (read by the proxy-agent loop); held by
+        # reference, so the node can add a ticket's before it submits it.
+        self._checks = checks if checks is not None else {}
         self._contracts = dict(contracts or {})
         # Task id -> (planned contract -> the names it declares, fail the attempt?).
         self._names = dict(names or {})
@@ -657,7 +663,10 @@ class _ScopedAdapter:
 
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         tid = str(packet.task.get("id"))
-        result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
+        from foundry.gates.self_check import check_scope
+
+        with check_scope(self._checks.get(tid)):
+            result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
         files = self._scopes.get(tid, ())
         result = trim_to_write_scope(result, sandbox, files, tid)
         try:
@@ -1080,10 +1089,12 @@ def scenario_rules(
     *,
     test: bool = False,
     ticket_id: str = "",
+    check: bool = False,
 ) -> list[str]:
     """The packet rules that tie a ticket to its gate-owned scenarios: the exact
     feature file(s) and scenario names, how to bind them on this stack, and never
-    to author a feature file. ``scenarios`` maps feature path -> scenario names.
+    to author a feature file. ``scenarios`` maps feature path -> scenario names;
+    ``check``: the session confirms them with the ``check`` tool.
     A ``test`` ticket is the binder itself, so it is never told another one binds.
     On pytest-bdd exactly one module binds them (:func:`step_module`): told to bind
     from each of four modules, a model wrote one step module four times and every
@@ -1103,7 +1114,9 @@ def scenario_rules(
             f"BIND THEM: the bdd command `{stack.bdd}` runs every {FEATURE_DIR}/*.feature "
             f"from the repo root; every Given/When/Then of {', '.join(paths)} needs a "
             "step definition the runner loads (an undefined or skipped step fails the "
-            "gate). Run the bdd command and confirm each of these scenarios passed."
+            "gate). "
+            + ("`check` runs them as the gate does: each of these scenarios must pass."
+               if check else "Run the bdd command and confirm each of these scenarios passed.")
         )
     elif _pytest_bdd(stack):
         binder = step_module(files, ticket_id)
@@ -1118,8 +1131,9 @@ def scenario_rules(
                 "which fails the gate"
                 + (f"; {', '.join(others)} must not call scenarios() on them, or every "
                    "scenario runs again" if others else "")
-                + ". The `scenarios` command in `verify` checks the binding and runs "
-                "them: every scenario above must pass. " + _PYTEST_BDD_ARGS
+                + (". `check` runs them as the gate does" if check else
+                   ". The `scenarios` command in `verify` checks the binding and runs them")
+                + ": every scenario above must pass. " + _PYTEST_BDD_ARGS
             )
         elif files and not test:
             rules.append(
@@ -1171,13 +1185,15 @@ def verify_rules(
     *,
     ticket_id: str = "",
     contract_files: Sequence[str] = (),
+    check: bool = False,
 ) -> list[str]:
     """The packet rules that make an agent check its own work before it finishes:
-    run the stack's commands (``verify``) and fix what fails in its own files; the
+    run the stack's commands (``verify``) — or, in a session with the ``check``
+    tool, the gates themselves — and fix what fails in its own files; the
     contracts ticket writes declarations only and type-checks its file alone; every
     other ticket uses the contract types instead of re-declaring them."""
     cmds = verify_commands(stack)
-    rules = [
+    rules = [CHECK_RULE if check else (
         "VERIFY BEFORE YOU FINISH: from this directory run "
         + ("the commands in `verify` (install only once its package manifest exists; "
            "then build and typecheck; then the tests that cover your files)"
@@ -1187,7 +1203,7 @@ def verify_rules(
         "Failures in other files, or caused by files later tickets have not written "
         "yet, are expected: leave them and name them in a TRIAGE line. If a command "
         "cannot run here (missing tool, no network), say so in a TRIAGE line."
-    ]
+    )]
     if "bdd" in cmds and "FOUNDRY_BDD_REPORT" in cmds["bdd"]:
         rules.append("The bdd command writes its report to $FOUNDRY_BDD_REPORT: set it "
                      "to a scratch file outside this directory when you run it.")
@@ -1195,7 +1211,7 @@ def verify_rules(
         files = ", ".join(contract_files) or "the contracts file"
         language = stack.language if stack else ""
         single = _SINGLE_FILE_TYPECHECK.get(language, "")
-        check = (single.format(file=" ".join(contract_files)) if single and contract_files
+        alone = (single.format(file=" ".join(contract_files)) if single and contract_files
                  else cmds.get("typecheck", "the language's type checker"))
         rules.append(
             f"DECLARATIONS ONLY in {files}: types, interfaces and signatures with no "
@@ -1203,7 +1219,7 @@ def verify_rules(
             "methods have `...` bodies; TypeScript: interface and type declarations "
             "(plus the enum/const values the contracts name). No implementations, "
             "helpers, I/O or validation. Type-check this file on its own before you "
-            f"finish (`{check}`) and fix every error it reports."
+            f"finish (`{alone}`) and fix every error it reports."
         )
     elif contract_files:
         rules.append(
@@ -1215,6 +1231,24 @@ def verify_rules(
             "type."
         )
     return rules
+
+
+CHECK_RULE = (
+    "VERIFY WITH `check` BEFORE YOU FINISH: `check` runs the gates themselves (the "
+    "build and type checker, and the acceptance scenarios that can run yet) on a copy "
+    "of this tree shaped as the gate sees it: offline, only the declared dependencies "
+    "installed. Call it after your edits, fix every failure it lists as yours, and "
+    "finish when it lists none; done is refused while it does. The commands in `verify` "
+    "are for reading a failure's full output. Failures it lists as pre-existing, or "
+    "caused by files later tickets have not written yet, are expected: leave them and "
+    "name them in a TRIAGE line."
+)
+
+
+def check_rewrites(plain: Sequence[str], checked: Sequence[str]) -> dict[str, str]:
+    """Rule -> its variant for a session with ``check`` (the two lists of one
+    packet's rules, built without and with ``check``)."""
+    return {a: b for a, b in zip(plain, checked, strict=True) if a != b}
 
 
 _BDD_FINDING = re.compile(r"^BDD criterion (\S+): scenario (\S+?)::\S+ (.*)$")
@@ -1462,6 +1496,49 @@ def bdd_scaffold_spans(
     )
 
 
+def _check_rules(
+    task: Task,
+    ticket: Ticket,
+    stack: StackDecision | None,
+    contract_files: Sequence[str],
+    scenarios: Mapping[str, Sequence[str]],
+    *,
+    check: bool = False,
+) -> list[str]:
+    """A ticket packet's scenario and verify rules (``check``: for a session that
+    has the ``check`` tool)."""
+    return [
+        *scenario_rules(ticket.files, scenarios, stack, test=ticket.specialty is Specialty.TEST,
+                        ticket_id=ticket.id, check=check),
+        *verify_rules(stack, ticket_id=task.id, contract_files=contract_files, check=check),
+    ]
+
+
+def _ticket_check(
+    base: CheckBase,
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    task: Task,
+    ticket: Ticket,
+    criteria: Mapping[str, AcceptanceCriterion],
+    contract_files: Sequence[str],
+    scenarios: Mapping[str, Sequence[str]],
+) -> CheckSpec:
+    """A ticket session's gate check: the scenarios whose carriers are built once
+    this ticket is, its own among them (those it carries or owns), its files."""
+    from foundry.gates.self_check import CheckSpec
+    from foundry.graph.gate_wiring import wave_scenarios
+
+    stack = state.get("stack")
+    own = frozenset(scenario_ref(c.ticket_id or ticket.id, c.id) for c in criteria.values()
+                    if c.id in ticket.scenario_ids or c.ticket_id == ticket.id)
+    plain = _check_rules(task, ticket, stack, contract_files, scenarios)
+    checked = _check_rules(task, ticket, stack, contract_files, scenarios, check=True)
+    return CheckSpec(base=base, scope=wave_scenarios(state, resolve, also=(task.id,)),
+                     own_refs=own, own_files=tuple(ticket.files),
+                     rules=check_rewrites(plain, checked))
+
+
 def _ticket_packet(
     task: Task,
     ticket: Ticket,
@@ -1481,9 +1558,7 @@ def _ticket_packet(
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
-        *scenario_rules(ticket.files, scenarios, stack,
-                        test=ticket.specialty is Specialty.TEST, ticket_id=ticket.id),
-        *verify_rules(stack, ticket_id=task.id, contract_files=contract_files),
+        *_check_rules(task, ticket, stack, contract_files, scenarios),
     ]
     if ticket.files:
         rules.insert(1, "Write ONLY these paths; changes anywhere else are discarded: "
@@ -1591,6 +1666,7 @@ def make_engineering_node(
     workers: Mapping[str, int] | None = None,
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
+    self_check: SelfCheckSettings | None = None,
 ) -> NodeFn:
     """Build the looping ``engineering`` node: each call builds ONE wave.
 
@@ -1598,7 +1674,9 @@ def make_engineering_node(
     :data:`DEFAULT_WORKERS`) under the global ``max_slots``; ``ticket_tiers`` maps
     difficulty -> model tier; ``on_task`` receives each ticket's start/done/failed
     :class:`TaskEvent`. ``cost_cap_microusd`` is the run's envelope, split across
-    specialties by ticket count and spent down across waves."""
+    specialties by ticket count and spent down across waves. ``self_check`` gives
+    each ticket session the gates as a ``check`` tool (the proxy-agent loop), run on
+    the integrated tree the wave builds on; ``None`` gives none."""
     if rt.adapter is None:
         raise ValueError("engineering requires rt.adapter (a WorkerAdapter)")
     limits = {**DEFAULT_WORKERS, **(workers or {})}
@@ -1760,8 +1838,17 @@ def make_engineering_node(
             for tid in restarts:
                 if tid in table:  # a restart's first attempt is strict, its retry lenient
                     table[tid] = (table[tid][0], True)  # type: ignore[assignment]
+        # The integrated tree the sessions' gate checks run on, removed with the pool.
+        base_scope = contextlib.ExitStack()
+        base: CheckBase | None = None
+        if self_check is not None and blobs is not None and self_check.enabled():
+            from foundry.gates.self_check import check_base
+
+            base = base_scope.enter_context(check_base(
+                state, resolve=resolve, resolve_blob=blobs, rt=rt, settings=self_check))
+        checks: dict[str, CheckSpec] = {}
         scoped = _ScopedAdapter(rt, {task_id_for_ticket(t.id): t.files for t in wave},
-                                built_contracts, names, stubs, skeleton)
+                                built_contracts, names, stubs, skeleton, checks)
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
         packets: dict[str, TaskPacket] = {}
@@ -1774,7 +1861,7 @@ def make_engineering_node(
                 f"builds on the bare base without the earlier waves' work: {overlay_error}"[:2000],
                 produced_by=NODE_ID, seq=rt.seq(config, NODE_ID, f"overlay:{wave[0].id}"),
             ))
-        with LocalWorkPool(
+        with base_scope, LocalWorkPool(
             sandbox_factory=make_sandbox,
             adapter_factory=lambda _name: scoped,
             max_slots=min(len(wave), max_slots),
@@ -1806,6 +1893,9 @@ def make_engineering_node(
                     contract_files=contract_files,
                     scenarios=owned,
                 )
+                if base is not None:
+                    checks[tid] = _ticket_check(base, state, resolve, tasks[tid], ticket,
+                                                criteria, contract_files, owned)
                 if extra := stub_rules(ticket, skeleton, contracts):
                     packet = packet.model_copy(update={"task": {
                         **packet.task, "rules": [*packet.task["rules"], *extra]}})

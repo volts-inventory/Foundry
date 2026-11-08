@@ -499,20 +499,35 @@ def manifest_digest(workdir: Path, requirements: tuple[str, ...]) -> str | None:
                            "requirements.txt": text})
 
 
+class _SharedInstall:
+    """One manifest digest's install outcome, shared by the builds that check it out."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.installed = False
+
+
 class PythonBuildEnv:
     """A build's venv and its install outcome, shared by that build's gates (and,
     when ``digest`` is set, by the run's later builds with the same manifests)."""
 
     def __init__(
-        self, root: Path, requirements: tuple[str, ...], digest: str | None = None
+        self, root: Path, requirements: tuple[str, ...], digest: str | None = None,
+        shared: _SharedInstall | None = None,
     ) -> None:
         self.venv = root / "venv"
         self.scratch = root / "src"  # the install's throwaway copy of the workdir
         self.requirements = requirements
         self.digest = digest
-        self.installed = False  # a successful install, reused while the digest matches
+        # The install itself, shared by every build of one manifest digest; ``ready``
+        # stays per build, so a concurrent build's checkout never resets it mid-gate.
+        self._shared = shared or _SharedInstall()
         self.ready = False  # set by this build's install step: may its gates run?
-        self._lock = threading.Lock()
+
+    @property
+    def installed(self) -> bool:
+        """A successful install, reused while the digest matches."""
+        return self._shared.installed
 
     @property
     def python(self) -> str:
@@ -523,8 +538,9 @@ class PythonBuildEnv:
         return str(site_packages(self.venv))
 
     def install(self, workdir: Path, *, timeout_s: float) -> tuple[int, str, str]:
-        with self._lock:
-            if self.installed:
+        shared = self._shared
+        with shared.lock:
+            if shared.installed:
                 self.ready = True
                 note = f"reused this run's build venv for manifest {self.digest or ''}\n"
                 return 0, note, ""
@@ -544,7 +560,7 @@ class PythonBuildEnv:
                 )
             finally:
                 shutil.rmtree(self.scratch, ignore_errors=True)
-            self.installed = rc == 0 and self.digest is not None
+            shared.installed = rc == 0 and self.digest is not None
             # A project-fault failure still lets the later gates judge the tree as it
             # is (as a build with no install would); an infra failure ERRORs them too.
             self.ready = rc == 0 or install_failure_is_project(out + err)
@@ -577,7 +593,7 @@ class PythonEnvCache:
 
     def __init__(self) -> None:
         self._root: Path | None = None
-        self._envs: dict[str, PythonBuildEnv] = {}
+        self._envs: dict[str, _SharedInstall] = {}
         self._lock = threading.Lock()
         self._cleanup: weakref.finalize[..., PythonEnvCache] | None = None
 
@@ -586,12 +602,8 @@ class PythonEnvCache:
             if self._root is None:
                 self._root = Path(tempfile.mkdtemp(prefix="foundry-gate-pyenvs-"))
                 self._cleanup = weakref.finalize(self, shutil.rmtree, str(self._root), True)
-            env = self._envs.get(digest)
-            if env is None:
-                env = PythonBuildEnv(self._root / digest[:32], requirements, digest)
-                self._envs[digest] = env
-            env.ready = False
-            return env
+            shared = self._envs.setdefault(digest, _SharedInstall())
+            return PythonBuildEnv(self._root / digest[:32], requirements, digest, shared)
 
     def close(self) -> None:
         if self._cleanup is not None:

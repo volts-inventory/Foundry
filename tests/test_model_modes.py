@@ -278,6 +278,13 @@ def test_a_local_sessions_sandbox_gets_no_cloud_credential(tmp_path: Path) -> No
         cloud_box.destroy()
 
 
+def _agent_turn(schema: Any) -> bool:
+    """A proxy-agent turn's action schema (with or without the `check` action)."""
+    action = schema.get("properties", {}).get("action") if isinstance(schema, dict) else None
+    return schema == ACTION_SCHEMA or (
+        isinstance(action, dict) and "check" in action.get("enum", ()))
+
+
 class FakeLocalServer:
     """An OpenAI-compatible local server stand-in: scripted planner/verdicts like
     the mock backend, and a proxy-agent loop that finishes on its first turn."""
@@ -290,7 +297,7 @@ class FakeLocalServer:
     def send(self, request: dict[str, Any]) -> ProviderResponse:
         self.requests.append(request)
         schema = request.get("output_config", {}).get("format", {}).get("schema")
-        if schema == ACTION_SCHEMA:
+        if _agent_turn(schema):
             return ProviderResponse(served_model=request["model"], request_id="r",
                                     text=json.dumps({"action": "done", "summary": "ok"}),
                                     usage=dict(USAGE), stop_reason="stop")
@@ -331,8 +338,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
         return str(r["messages"][0]["content"])
 
     action_calls = [r for r in server.requests
-                    if r.get("output_config", {}).get("format", {}).get("schema")
-                    == ACTION_SCHEMA]
+                    if _agent_turn(r.get("output_config", {}).get("format", {}).get("schema"))]
     assert action_calls
     assert all("TEST / QA ENGINEER" in prompt(r) for r in action_calls)
     assert not any("BACKEND ENGINEER" in prompt(r) for r in server.requests)

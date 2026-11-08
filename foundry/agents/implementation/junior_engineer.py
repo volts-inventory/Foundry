@@ -22,6 +22,7 @@ What these helpers are careful about (LEARNINGS L4/L5/L7, arch §2/§2b):
 
 from __future__ import annotations
 
+import contextlib
 import re
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -42,6 +43,7 @@ if TYPE_CHECKING:
 
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.gates.self_check import CheckBase, CheckSpec, SelfCheckSettings
     from foundry.graph.gate_wiring import BlobResolver, FailureCluster, _DiffOps
     from foundry.state.factory_state import FactoryState
 
@@ -77,6 +79,16 @@ _FIXER_RULES = (
     "scenario that \"was not executed\" has no step module bound to that exact file: "
     "point the step module's binding at it (pytest-bdd: scenarios(\"<path relative to "
     "the module>\")) and implement its steps. Fix one feature file group at a time.",
+)
+# The first two rules for a fixer session with the ``check`` tool.
+_FIXER_CHECK_RULES = (
+    "The failures below are the tail of each gate's output: call `check` to see them as "
+    "the gates report them on this tree (the build and the acceptance scenarios), or "
+    "re-run the failing command in `verify` for its whole output, before you edit.",
+    "After each fix call `check`, and keep going until it lists nothing as yours or you "
+    "run out of turns: done is refused while it does. `check` does not run the stack's "
+    "own test command: re-run a failing test named below from `verify` yourself. If one "
+    "cannot run here (missing tool, no network), say so in a TRIAGE line.",
 )
 
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
@@ -679,10 +691,12 @@ def _run_one_task(
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
+    check: CheckSpec | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
-    ``review`` then annotates the kept diff while the sandbox is alive.
+    ``review`` then annotates the kept diff while the sandbox is alive; ``check``
+    is the session's gate check (:mod:`foundry.gates.self_check`).
 
     A FRESH ``Sandbox`` per task (arch §2(d): no reuse), then the diff keyed by
     ``content_digest`` (L7) so a re-run re-derives the same key and the
@@ -709,7 +723,10 @@ def _run_one_task(
             rules=rules,
             verify=verify,
         )
-        result: AdapterResult = rt.adapter.run(packet, sandbox)
+        from foundry.gates.self_check import check_scope
+
+        with check_scope(check):
+            result: AdapterResult = rt.adapter.run(packet, sandbox)
         from foundry.agents.implementation.tickets import trim_to_write_scope
 
         # An empty scope still drops gate inputs (feature files, criteria).
@@ -824,6 +841,23 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
     return tuple(files)
 
 
+def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) -> CheckSpec:
+    """A fixer session's gate check: the scenarios a wave check judges, its own the
+    planned failure cluster's items (every failure when no cluster is planned)."""
+    from foundry.gates.self_check import CheckSpec
+    from foundry.graph.gate_wiring import wave_scenarios
+
+    cluster, _ = fix_target(state, resolve, _failed_gates(state))
+    items = cluster.items if cluster is not None else ()
+    return CheckSpec(
+        base=base, scope=wave_scenarios(state, resolve),
+        own_refs=(frozenset(i.partition(":")[2] for i in items if i.startswith("test:"))
+                  if cluster is not None else None),
+        own_build=cluster is None or any(i.startswith("build:") for i in items),
+        rules=dict(zip(_FIXER_RULES, _FIXER_CHECK_RULES, strict=False)),
+    )
+
+
 def make_fixer_node(
     rt: AgentRuntime,
     *,
@@ -833,6 +867,7 @@ def make_fixer_node(
     snapshot_store: str | None = None,
     turn_budget: int = _DEFAULT_TURN_BUDGET,
     cost_budget_microusd: int = _DEFAULT_COST_BUDGET_MICROUSD,
+    self_check: SelfCheckSettings | None = None,
 ) -> NodeFn:
     """One coding session that repairs the INTEGRATED tree after a failed gate.
 
@@ -841,7 +876,8 @@ def make_fixer_node(
     failure. The fixer instead seeds a single sandbox with the integrated tree, hands
     the adapter the latest failures behind a :func:`_fix_summary`, and emits one
     FeatureDiff whose seq is lifted past every existing diff, so integration applies
-    it on top (later-by-Seq wins)."""
+    it on top (later-by-Seq wins). ``self_check`` gives the session the gates as a
+    ``check`` tool, its own failures the planned cluster's."""
     if rt.adapter is None or rt.cas is None:
         raise ValueError("fixer requires rt.adapter and rt.cas (it rebuilds the integrated tree)")
 
@@ -926,23 +962,32 @@ def make_fixer_node(
             branch=f"task/{task_id}",
             seq=rt.seq(config, FIXER_NODE_ID, f"task:{task_id}"),
         )
-        writes = _run_one_task(
-            rt,
-            task,
-            state.get("pinned_constraints") or (),
-            config,
-            source_dir=source_dir,
-            snapshot_store=snapshot_store,
-            turn_budget=budget,
-            cost_budget_microusd=cost_budget_microusd,
-            prior_failures=failures,
-            persona=persona,
-            overlay=overlay,
-            rules=_FIXER_RULES,
-            verify=verify_commands(state.get("stack")),
-            review=lambda result, sandbox: note_fix_writes(
-                result, sandbox, task_id, focus=focus, contracts=contracts),
-        )
+        with contextlib.ExitStack() as base_scope:
+            base: CheckBase | None = None
+            if self_check is not None and self_check.enabled():
+                from foundry.gates.self_check import check_base
+
+                base = base_scope.enter_context(check_base(
+                    state, resolve=resolve, resolve_blob=resolve_blob, rt=rt,
+                    settings=self_check))
+            writes = _run_one_task(
+                rt,
+                task,
+                state.get("pinned_constraints") or (),
+                config,
+                source_dir=source_dir,
+                snapshot_store=snapshot_store,
+                turn_budget=budget,
+                cost_budget_microusd=cost_budget_microusd,
+                prior_failures=failures,
+                persona=persona,
+                overlay=overlay,
+                rules=_FIXER_RULES,
+                verify=verify_commands(state.get("stack")),
+                review=lambda result, sandbox: note_fix_writes(
+                    result, sandbox, task_id, focus=focus, contracts=contracts),
+                check=_fix_check(base, state, resolve) if base is not None else None,
+            )
         # Integration applies it on top of the diffs it repairs (none yet when every
         # ticket failed).
         writes["artifacts"] = [a.model_copy(update={"seq": lift_epoch(state, a.seq)})

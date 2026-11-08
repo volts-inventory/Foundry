@@ -54,13 +54,15 @@ ESCALATE_FALLBACK_TRIAGE = "escalate-fallback"
 # A local session that stopped early but whose partial work was kept for the wave
 # check: a failing check escalates it on its first failure instead of its second.
 STOPPED_TRIAGE = "stopped-early"
-# How a proxy-agent session reports that it ended without finishing.
-_STOP_MARKERS = ("stopped early:", "turn budget exhausted")
+# How a proxy-agent session reports that it ended without finishing (the last: it
+# spent its gate checks and its own work was still red, proxy_agent.CHECK_EXHAUSTED).
+_STOP_MARKERS = ("stopped early:", "turn budget exhausted", "check budget exhausted")
 
 
 def session_stop_reason(triage: Iterable[Any]) -> str | None:
-    """The adapter-report note saying a session hit its turn cap or was stopped by
-    the repeat / read-thrash detector, else None."""
+    """The adapter-report note saying a session hit its turn cap, was stopped by
+    the repeat / read-thrash detector, or ran out of gate checks still red, else
+    None."""
     for note in triage:
         text = str(getattr(note, "explanation", ""))
         if text.startswith(_STOP_MARKERS):

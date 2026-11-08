@@ -1263,30 +1263,37 @@ class UnpinnedSmokeGate:
         return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
 
 
+_GATE_TIMEOUT_S = 600.0
+
+
 def _build_gate(
     profile: VerificationProfile | None,
-    runner: TwoZoneGateRunner,
+    runner: TwoZoneGateRunner | None,
     pyenv: PythonBuildEnv | None = None,
     planned: Iterable[str] = (),
+    timeout_s: float = _GATE_TIMEOUT_S,
 ) -> GateImpl:
     """``planned``: the ticket files a wave check's tree may not hold yet, whose
-    modules the build's import check counts as the project's own."""
+    modules the build's import check counts as the project's own. No ``runner``:
+    an unsealed gate for an unattested run (an agent's in-session check)."""
     first_party = frozenset(
         PurePosixPath(p).name.split(".", 1)[0] for p in planned_paths(planned)
     )
+    seal_key = runner.seal_key if runner is not None else None
     if profile is None:
-        return BuildGate(seal_key=runner.seal_key, pyenv=pyenv, python=True,
-                         first_party=first_party)
+        return BuildGate(seal_key=seal_key, pyenv=pyenv, python=True,
+                         first_party=first_party, timeout_s=timeout_s)
     if profile.unavailable:
         return UnavailableGate("build", profile.unavailable)
     return BuildGate(
         cmd=profile.build_cmd,
         install_cmd=profile.install_cmd,
-        seal_key=runner.seal_key,
+        seal_key=seal_key,
         profile_name=profile.name,
         pyenv=pyenv,
         python=profile.python,
         first_party=first_party if profile.python else frozenset(),
+        timeout_s=timeout_s,
     )
 
 
@@ -1485,14 +1492,17 @@ def _build_test_smoke(
     return out
 
 
-def wave_scenarios(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str]:
+def wave_scenarios(
+    state: FactoryState, resolve: ArtifactResolver, also: Iterable[str] = ()
+) -> frozenset[str]:
     """The scenario refs a per-wave check can judge: those of criteria whose every
     carrier (the owning ticket and each ticket listing it in ``scenario_ids``, i.e.
-    its paired test ticket) is built. Anything still waiting on a ticket is left to
-    a later wave or the final gate."""
+    its paired test ticket) is built, counting the tickets ``also`` names as built
+    (a ticket's own session checks its scenarios). Anything still waiting on a
+    ticket is left to a later wave or the final gate."""
     from foundry.agents.implementation.tickets import built_task_ids, read_tickets
 
-    built = built_task_ids(state)
+    built = built_task_ids(state) | set(also)
     carriers: dict[str, set[str]] = {}
     for t in read_tickets(state, resolve):
         for cid in t.scenario_ids:
@@ -1506,9 +1516,10 @@ def wave_scenarios(state: FactoryState, resolve: ArtifactResolver) -> frozenset[
 
 def _wave_test_gate(
     profile: VerificationProfile | None,
-    runner: TwoZoneGateRunner,
+    runner: TwoZoneGateRunner | None,
     scope: frozenset[str],
     pyenv: PythonBuildEnv | None = None,
+    timeout_s: float = _GATE_TIMEOUT_S,
 ) -> TestGate | None:
     """The scoped Test gate for a wave check, or ``None`` when this stack's harness
     does not execute scenarios (a foreign test command with no ``bdd``)."""
@@ -1519,13 +1530,58 @@ def _wave_test_gate(
         return None
     return TestGate(
         cmd=profile.test_cmd if profile is not None else None,
-        seal_key=runner.seal_key,
+        seal_key=runner.seal_key if runner is not None else None,
         bdd_cmd=profile.bdd_cmd if profile is not None else None,
         stack_harness=profile is not None and profile.test_cmd is not None,
         profile_name=profile.name if profile is not None else "",
         scope=scope,
         pyenv=pyenv,
+        timeout_s=timeout_s,
     )
+
+
+def wave_stack(
+    state: FactoryState, files: Iterable[str], workdir: Path
+) -> tuple[StackDecision | None, list[tuple[str, str]]]:
+    """The stack a check of a partly built tree runs, and a (triage name, text) note
+    per step it scoped: a planned non-Python manifest not built yet skips the
+    install, build and typecheck; the build and typecheck skip planned targets no
+    ticket has built yet. A pinned profile, or no stack, runs unchanged."""
+    stack = state.get("stack")
+    notes: list[tuple[str, str]] = []
+    if stack is None or stack.profile:
+        return stack, notes
+    files = list(files)
+    # Python installs only what a built manifest declares; its build needs none.
+    missing = () if stack.language == "python" else unbuilt_manifests(files, workdir)
+    if missing:
+        # No manifest, nothing to install from; the build and the type checker
+        # need the dependencies the install would have fetched.
+        skip = ("install", "build", "typecheck")
+        dropped = [f"{k} `{getattr(stack, k)}`" for k in skip if getattr(stack, k)]
+        if dropped:
+            stack = stack.model_copy(update=dict.fromkeys(skip, ""))
+            notes.append((WAVE_MANIFEST_TRIAGE, (
+                f"this wave's check skips {', '.join(dropped)}: the planned "
+                f"manifest {', '.join(missing)} is not built yet; the final gate "
+                "runs every step")))
+    for step in ("build", "typecheck"):
+        full = getattr(stack, step)
+        if not full:
+            continue
+        scoped = wave_typecheck(full, planned_paths(files), workdir)
+        if scoped != full:
+            stack = stack.model_copy(update={step: scoped})
+            notes.append((WAVE_TYPECHECK_TRIAGE, (
+                f"this wave's {step} skips planned targets no ticket has built "
+                f"yet: `{scoped or '(skipped: none built yet)'}` instead of `{full}`")))
+    return stack, notes
+
+
+def planned_files(state: FactoryState, resolve: ArtifactResolver) -> list[str]:
+    """Every ticket's planned files, built or not."""
+    return [f for a in _of_kind(state, TICKET_KIND)
+            for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
 
 
 def run_build_gate(
@@ -1549,43 +1605,17 @@ def run_build_gate(
     verdicts (a later epoch) supersede every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
-    stack = state.get("stack")
-    files = [f for a in _of_kind(state, TICKET_KIND)
-             for f in _resolve_typed(a, resolve, Ticket, TICKET_KIND).files]
-    if stack is not None and not stack.profile:
-        notes: list[tuple[str, str]] = []
-        # Python installs only what a built manifest declares; its build needs none.
-        missing = () if stack.language == "python" else unbuilt_manifests(files, workdir)
-        if missing:
-            # No manifest, nothing to install from; the build and the type checker
-            # need the dependencies the install would have fetched.
-            skip = ("install", "build", "typecheck")
-            dropped = [f"{k} `{getattr(stack, k)}`" for k in skip if getattr(stack, k)]
-            if dropped:
-                stack = stack.model_copy(update=dict.fromkeys(skip, ""))
-                notes.append((WAVE_MANIFEST_TRIAGE, (
-                    f"this wave's check skips {', '.join(dropped)}: the planned "
-                    f"manifest {', '.join(missing)} is not built yet; the final gate "
-                    "runs every step")))
-        for step in ("build", "typecheck"):
-            full = getattr(stack, step)
-            if not full:
-                continue
-            scoped = wave_typecheck(full, planned_paths(files), workdir)
-            if scoped != full:
-                stack = stack.model_copy(update={step: scoped})
-                notes.append((WAVE_TYPECHECK_TRIAGE, (
-                    f"this wave's {step} skips planned targets no ticket has built "
-                    f"yet: `{scoped or '(skipped: none built yet)'}` instead of `{full}`")))
-        if notes:
-            # The scoped commands are what this verdict judges, so they key the digest.
-            state = {**state, "stack": stack}
-            run_against = tree_sha(workdir, toolchain_digest=_toolchain_digest(stack))
-            out["gate_triage"] = [GateTriage(
-                name=name, run_against=run_against, explanation=text[:2000],
-                produced_by=_BUILD_NODE,
-                seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
-            ) for name, text in notes]
+    files = planned_files(state, resolve)
+    stack, notes = wave_stack(state, files, workdir)
+    if notes:
+        # The scoped commands are what this verdict judges, so they key the digest.
+        state = {**state, "stack": stack}
+        run_against = tree_sha(workdir, toolchain_digest=_toolchain_digest(stack))
+        out["gate_triage"] = [GateTriage(
+            name=name, run_against=run_against, explanation=text[:2000],
+            produced_by=_BUILD_NODE,
+            seq=rt.seq(config, _BUILD_NODE, f"{name}:{run_against}"),
+        ) for name, text in notes]
     profile = gate_profile(state, profile)
     with _build_env(profile, workdir, rt) as pyenv:
         build = _run_gate(

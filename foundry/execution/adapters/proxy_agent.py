@@ -60,7 +60,9 @@ from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
+
+    from foundry.gates.self_check import SessionCheck
 
     # (messages, schema) -> (raw_text, parsed_json_or_None). In production a
     # closure over ModelProviderProxy.complete (the only credential holder).
@@ -110,6 +112,25 @@ ACTION_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
+# A session that can run the gates (``check``) offers it as one more action.
+_CHECK_SCHEMA: dict[str, Any] = {
+    **ACTION_SCHEMA,
+    "properties": {
+        **ACTION_SCHEMA["properties"],
+        "action": {"type": "string",
+                   "enum": [*ACTION_SCHEMA["properties"]["action"]["enum"], "check"]},
+    },
+}
+_CHECK_LINE = ('  {"action": "check"}   # run the gates on a gate-shaped copy of this tree '
+               "(build + your scenarios)\n")
+_CHECK_CLOSE = ("Write real, complete code (no placeholders). Call check after your edits "
+                "and fix what it reports as yours: done is refused while it is red.")
+_CHECK_EPILOGUE = (
+    _EPILOGUE[:_EPILOGUE.index('  {"action": "done"')] + _CHECK_LINE
+    + _EPILOGUE[_EPILOGUE.index('  {"action": "done"'):_EPILOGUE.index("Write real")]
+    + _CHECK_CLOSE
+)
+
 _MAX_CALLS_PER_TURN = 8
 
 _NATIVE_EPILOGUE = (
@@ -119,6 +140,14 @@ _NATIVE_EPILOGUE = (
     f"may call several tools in one turn (at most {_MAX_CALLS_PER_TURN}); they run "
     "in order. Write real, complete code (no placeholders). Run the build/tests and "
     "fix failures before calling done."
+)
+_NATIVE_CHECK_EPILOGUE = (
+    "You are an agentic engineer working in a disposable sandbox worktree. Work by "
+    "calling the provided tools: read_file, search, write_file (the full file), "
+    "delete_file, run (a command inside the sandbox), check (the gates themselves on "
+    "this tree), and done when finished. You "
+    f"may call several tools in one turn (at most {_MAX_CALLS_PER_TURN}); they run "
+    f"in order. {_CHECK_CLOSE}"
 )
 _NUDGE = "Call a tool to make progress, or call done when the task is finished."
 
@@ -147,6 +176,20 @@ TOOLS: tuple[dict[str, Any], ...] = (
     _tool("done", "Declare the task finished.", ("summary",), summary=_STR,
           triage={"type": "array", "items": _STR}),
 )
+_CHECK_TOOLS: tuple[dict[str, Any], ...] = (
+    *TOOLS[:-1],
+    _tool("check", "Run the gates (the build and your acceptance scenarios) on a copy of "
+          "this tree shaped as the gate sees it: offline, only declared dependencies. "
+          "Reports failures that are yours and ones that were failing before you started.",
+          ()),
+    TOOLS[-1],
+)
+# Refusals of a red done per session: a failure the session cannot fix by editing
+# is reported, not looped on.
+_CHECK_REFUSALS = 2
+# The adapter-report note of a session whose checks ran out while its own work was
+# still red (tiered.session_stop_reason counts it like the turn cap).
+CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 
 # The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
 # agent's sandbox does not, so a runner there wrote to "" and the agent never saw
@@ -235,6 +278,10 @@ class _Loop:
     # Distributions a `run` pip-installed into this sandbox, for the done check.
     installed: list[str] = field(default_factory=list)
     install_refused: bool = False
+    # The session's gate check (foundry.gates.self_check); None = no check here.
+    checker: SessionCheck | None = None
+    origin: dict[str, bytes] = field(default_factory=dict)  # the starting worktree
+    check_refusals: int = 0
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -299,12 +346,16 @@ class ProxyAgentAdapter:
         tool_fn = None if tier in self._json_tiers else self._tool_complete
         native = tool_fn is not None
         listing = _listing(before)
-        messages = _opening(packet, native=native, listing=listing)
+        checker, checked = _open_check(packet)
+        if checker is not None and checker.spec.rules:
+            packet = _with_rules(packet, checker.spec.rules)
+        messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
         st = _Loop(worktree, _tree_state(worktree),
                    files=tuple(str(f) for f in files) if isinstance(files, list) else None,
                    budget=max(1, packet.turn_budget),
-                   start=before if packet.prior_failures else None)
+                   start=before if packet.prior_failures else None,
+                   checker=checker, origin=before)
         turns = 0
         while turns < st.budget and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
@@ -321,11 +372,15 @@ class ProxyAgentAdapter:
                              f"{tier or '-'} ({exc}); using JSON actions")
                 self._json_tiers.add(tier)
                 native = False
-                messages = _opening(packet, native=False, listing=listing)
+                messages = _opening(packet, native=False, listing=listing, check=checked)
                 st.verbatim = []
                 turns -= 1
         if not st.stopped:
             st.triage.append("turn budget exhausted before 'done' — partial work recorded")
+        if st.checker is not None and st.checker.left <= 0 and (
+                last := st.checker.last) is not None and last.red:
+            st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last check: "
+                             + " | ".join(last.yours[:6])[:1500])
 
         after = walk_worktree(worktree)
         authored, deleted, skipped_binary = changed_files(before, after)
@@ -360,7 +415,8 @@ class ProxyAgentAdapter:
         )
 
     def _json_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
-        text, parsed = self._complete(messages, ACTION_SCHEMA)
+        schema = ACTION_SCHEMA if st.checker is None else _CHECK_SCHEMA
+        text, parsed = self._complete(messages, schema)
         act = parsed if isinstance(parsed, dict) else _lenient_action(text)
         messages.append({"role": "assistant", "content": text})
         if act is None:
@@ -382,7 +438,7 @@ class ProxyAgentAdapter:
         st: _Loop,
         sandbox: Sandbox,
     ) -> None:
-        text, calls = tool_fn(messages, TOOLS)
+        text, calls = tool_fn(messages, TOOLS if st.checker is None else _CHECK_TOOLS)
         if not calls:
             messages.append({"role": "assistant", "content": text or "(no reply)"})
             messages.append({"role": "user", "content": _NUDGE})
@@ -437,6 +493,8 @@ class ProxyAgentAdapter:
                 return refusal, None
             if refusal := _undeclared_done(st):
                 return refusal, None
+            if refusal := _red_done(st):
+                return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = True
@@ -473,6 +531,8 @@ class ProxyAgentAdapter:
         try:
             if action == "read_file":
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
+            elif action == "check":
+                observation = _check(st)
             else:
                 observation = self._execute(act, sandbox, worktree, st.files)
         except (ValueError, OSError) as exc:
@@ -708,11 +768,105 @@ def _step_hints(out: str, worktree: Path) -> str:
     return "".join(f"\nNOTE: {h}" for h in hints)
 
 
-def _opening(packet: TaskPacket, *, native: bool, listing: str = "") -> list[dict[str, Any]]:
-    epilogue = _NATIVE_EPILOGUE if native else _EPILOGUE
+def _opening(
+    packet: TaskPacket, *, native: bool, listing: str = "", check: str | None = None
+) -> list[dict[str, Any]]:
+    """The first message; ``check`` is the opening gate check's report (``None``:
+    the session has no ``check``)."""
+    if check is None:
+        epilogue = _NATIVE_EPILOGUE if native else _EPILOGUE
+    elif native:
+        epilogue = _NATIVE_CHECK_EPILOGUE
+    else:
+        epilogue = _CHECK_EPILOGUE
+    if check:
+        epilogue = f"{check}\n\n{epilogue}"
     if listing:
         epilogue = f"{listing}\n\n{epilogue}"
     return [{"role": "user", "content": assemble_prompt(packet, epilogue=epilogue)}]
+
+
+def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
+    """The session's gate check (from the engineering node's or the fixer's
+    :func:`~foundry.gates.self_check.check_scope`) and its opening report, run on
+    the starting tree; ``(None, None)`` when this session has none."""
+    from foundry.gates.self_check import SessionCheck, current_check, render
+
+    spec = current_check()
+    if spec is None:
+        return None, None
+    checker = SessionCheck(spec, label=str(packet.task.get("id", "")))
+    try:
+        verdict = checker.opening()
+    except Exception as exc:  # an aid, not a gate: a broken check leaves the session as before
+        progress.log(f"proxy-agent: no gate check for {packet.task.get('id')}: "
+                     f"{type(exc).__name__}: {exc}")
+        return None, None
+    return checker, render(verdict, left=checker.left, opening=True)
+
+
+def _with_rules(packet: TaskPacket, rewrites: Mapping[str, str]) -> TaskPacket:
+    """``packet`` with each rule ``rewrites`` names replaced (verify -> check)."""
+    rules = packet.task.get("rules")
+    if not isinstance(rules, list):
+        return packet
+    return packet.model_copy(update={"task": {
+        **packet.task, "rules": [rewrites.get(r, r) if isinstance(r, str) else r
+                                 for r in rules]}})
+
+
+def _changes(st: _Loop) -> tuple[dict[str, str], list[str]]:
+    authored, deleted, _ = changed_files(st.origin, walk_worktree(st.worktree))
+    return authored, deleted
+
+
+def _check(st: _Loop) -> str:
+    """The ``check`` action: the gates on the current tree, cached per tree."""
+    from foundry.gates.self_check import render
+
+    c = st.checker
+    if c is None:
+        return "ERROR: check is unavailable in this session; run the commands in `verify`"
+    files, deleted = _changes(st)
+    if (cached := c.cached(files, deleted)) is not None:
+        return render(cached, left=c.left, cached=True)
+    if c.left <= 0:
+        return ("ERROR: no checks left this session: run the commands in `verify` to test "
+                "further edits, then call done.")
+    try:
+        return render(c.check(files, deleted), left=c.left)
+    except Exception as exc:
+        return f"ERROR: the check could not run: {type(exc).__name__}: {exc}"
+
+
+def _red_done(st: _Loop) -> str | None:
+    """The refusal of a ``done`` while the gates fail on the session's own work, else
+    None. A tree no check has judged is checked now (a check left in the budget);
+    refused at most :data:`_CHECK_REFUSALS` times, and only while a turn remains."""
+    from foundry.gates.self_check import render
+
+    c = st.checker
+    if c is None or st.check_refusals >= _CHECK_REFUSALS or st.left < 1:
+        return None
+    files, deleted = _changes(st)
+    verdict = c.cached(files, deleted)
+    if verdict is None:
+        if c.left <= 0:
+            return None
+        try:
+            verdict = c.check(files, deleted)
+        except Exception as exc:
+            progress.log(f"proxy-agent: gate check failed at done: {type(exc).__name__}: {exc}")
+            return None
+    if not verdict.red:
+        return None
+    st.check_refusals += 1
+    last = st.check_refusals >= _CHECK_REFUSALS
+    return ("ERROR: not done — the gates fail on your work in this tree:\n"
+            + render(verdict, left=c.left)
+            + "\nFix what is listed as yours, then call check and done. "
+            + ("If it cannot be fixed by editing your files, call done again and name it "
+               "in triage." if last else ""))
 
 
 def _listing(tree: dict[str, bytes]) -> str:

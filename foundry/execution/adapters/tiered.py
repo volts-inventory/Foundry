@@ -23,6 +23,7 @@ for the cloud tier and is admitted through the work pool like any other session.
 
 from __future__ import annotations
 
+import contextlib
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any
 
@@ -124,7 +125,12 @@ class TieredAdapter:
     def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         tier = packet.task.get("tier")
         if self.is_local(str(tier) if tier else None):
-            with self._local_slot():
+            from foundry.gates.self_check import local_session
+
+            # The session's opening gate check runs before it holds the local slot.
+            prepared = getattr(self.local, "prepared", None)
+            with local_session(), (prepared(packet) if callable(prepared)
+                                   else contextlib.nullcontext()), self._local_slot():
                 result: AdapterResult = self.local.run(packet, sandbox)
             return result
         cloud_result: AdapterResult = self.cloud.run(packet, sandbox)

@@ -23,8 +23,12 @@ import foundry.gates.self_check as self_check
 from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.tickets import CHECK_RULE, verify_rules
 from foundry.execution.adapter_contract import TaskPacket
-from foundry.execution.adapters.proxy_agent import CHECK_EXHAUSTED, ProxyAgentAdapter
-from foundry.execution.adapters.tiered import session_stop_reason
+from foundry.execution.adapters.proxy_agent import (
+    CHECK_EXHAUSTED,
+    CHECK_UNVERIFIED,
+    ProxyAgentAdapter,
+)
+from foundry.execution.adapters.tiered import TieredAdapter, session_stop_reason
 from foundry.execution.sandbox import Sandbox
 from foundry.gates import sandbox as gate_sandbox
 from foundry.gates.pydeps import PythonEnvCache
@@ -38,10 +42,16 @@ from foundry.gates.self_check import (
     check_base,
     check_scope,
 )
-from foundry.graph.gate_wiring import CRITERION_KIND, FEATURE_DIFF_KIND
+from foundry.graph.gate_wiring import CRITERION_KIND, FEATURE_DIFF_KIND, TICKET_KIND
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateStatus
-from foundry.schemas.implementation import FeatureDiff, StackDecision, scenario_ref
+from foundry.schemas.implementation import (
+    FeatureDiff,
+    Specialty,
+    StackDecision,
+    Ticket,
+    scenario_ref,
+)
 from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.seq import Seq
 
@@ -66,12 +76,16 @@ def _criterion(cid: str, ticket: str, item: str = "milk") -> AcceptanceCriterion
 
 def _state(
     built: Mapping[str, str], criteria: tuple[AcceptanceCriterion, ...] = (),
-    stack: StackDecision | None = None,
+    stack: StackDecision | None = None, tickets: tuple[Ticket, ...] = (),
 ) -> tuple[dict[str, Any], Any, Any]:
     """A state whose integrated tree is ``built`` (one earlier ticket's diff) plus
-    the criteria's trusted feature files."""
+    the criteria's trusted feature files; ``tickets`` are the plan's."""
     artifacts: list[Artifact] = []
     by_uri: dict[str, Any] = {}
+    for t in tickets:
+        h = emit_artifact(t, TICKET_KIND, "planner", t.seq)
+        artifacts.append(h)
+        by_uri[h.uri] = t
     for c in criteria:
         h = emit_artifact(c, CRITERION_KIND, "planner", c.seq)
         artifacts.append(h)
@@ -94,9 +108,9 @@ def _state(
 def _spec(
     built: Mapping[str, str], criteria: tuple[AcceptanceCriterion, ...] = (), *,
     own: tuple[str, ...] = (), files: tuple[str, ...] = (),
-    stack: StackDecision | None = None,
+    stack: StackDecision | None = None, tickets: tuple[Ticket, ...] = (),
 ) -> Iterator[CheckSpec]:
-    state, resolve, blob = _state(built, criteria, stack)
+    state, resolve, blob = _state(built, criteria, stack, tickets)
     with check_base(state, resolve=resolve, resolve_blob=blob, rt=_Rt(),  # type: ignore[arg-type]
                     settings=SelfCheckSettings()) as base:
         yield CheckSpec(base=base,
@@ -388,6 +402,22 @@ def test_an_edit_after_the_last_check_is_not_reported_red(
     assert "ERROR: no checks left" in _observations(seen)[3]
     # No check left to judge the final tree: done is accepted, and nothing says red.
     assert session_stop_reason(result.triage) is None, result.triage
+    assert any(t.explanation.startswith(CHECK_UNVERIFIED) for t in result.triage)
+
+
+def test_a_refusal_with_no_check_left_does_not_ask_for_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, seen, _ = _run_loop(tmp_path, monkeypatch, [
+        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+        {"action": "check"},
+        {"action": "done", "summary": "a"},
+        {"action": "done", "summary": "b"},
+        {"action": "done", "summary": "c"},
+    ], budget=1)
+    refusal = _observations(seen)[2]
+    assert "ERROR: not done" in refusal and "No checks are left" in refusal
+    assert "call check" not in refusal
 
 
 def test_check_without_a_gate_context_is_unavailable(tmp_path: Path) -> None:
@@ -421,4 +451,180 @@ def test_concurrent_checkouts_of_one_manifest_keep_their_own_readiness(tmp_path:
     second = cache.checkout("d" * 64, ("flask",))
     assert first.ready and not second.ready
     assert first.venv == second.venv
+    cache.close()
+
+
+# ---- review round 2: baselines, attribution, unbuilt files, sharing ---------------
+
+
+def _fake_run(outcomes: list[tuple[GateOutcome, ...]], calls: list[Any]) -> Any:
+    it = iter(outcomes)
+
+    def _run(spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()) -> Any:
+        calls.append(dict(files))
+        return next(it)
+    return _run
+
+
+def _build(status: GateStatus, *lines: str) -> GateOutcome:
+    return GateOutcome("build", status, ("build command exited 1; last lines:", *lines)
+                       if status is GateStatus.FAIL else lines)
+
+
+def test_an_opening_error_takes_the_first_judging_result_as_its_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    monkeypatch.setattr(self_check, "run_check", _fake_run([
+        (GateOutcome("build", GateStatus.ERROR, ("pip: connection reset",)),),
+        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+        (_build(GateStatus.FAIL, "other.py:1: error: old", "other.py:9: error: new"),),
+    ], calls))
+    spec = CheckSpec(base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(),
+                     own_files=("app.py",))
+    session = SessionCheck(spec)
+    opening = session.opening()
+    assert opening.errors and not opening.red
+    first = session.check({"app.py": "a"}, ())
+    assert not first.red and first.pre_existing  # no baseline yet: its own baseline
+    second = session.check({"app.py": "b"}, ())
+    assert second.red and second.yours[-1] == "other.py:9: error: new", second
+
+
+def test_a_build_error_new_since_the_opening_is_the_sessions_even_in_another_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    monkeypatch.setattr(self_check, "run_check", _fake_run([
+        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+        (_build(GateStatus.FAIL, "other.py:1: error: old",
+                "caller.py:5: error: too many arguments"),),
+        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+    ], calls))
+    spec = CheckSpec(base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(),
+                     own_files=("app.py",))
+    session = SessionCheck(spec)
+    assert not session.opening().red
+    broke = session.check({"app.py": "a"}, ())
+    assert broke.red and "caller.py:5: error: too many arguments" in broke.yours
+    assert "other.py:1: error: old" not in broke.yours
+    assert not session.check({"app.py": "b"}, ()).red
+
+
+def test_sessions_with_one_scope_share_one_opening_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[Any] = []
+    monkeypatch.setattr(self_check, "run_check", _red_unless("OK", calls))
+    base = _fake_base(tmp_path)
+    for files in (("app.py",), ("b.py",)):
+        SessionCheck(CheckSpec(base=base, scope=frozenset(), own_refs=frozenset(),
+                               own_files=files)).opening()
+    SessionCheck(CheckSpec(base=base, scope=frozenset({"x"}), own_refs=frozenset())).opening()
+    assert len(calls) == 2
+
+
+def test_report_paths_are_stable_across_processes() -> None:
+    line = ("File \"/private/var/folders/x/T/foundry-gate-pyenvs-ab12cd34/0a/venv/lib/x.py\""
+            " and /tmp/foundry-check-base-zz99yy88/tree/app.py")
+    out = self_check._stable([line])[0]
+    assert "ab12cd34" not in out and "zz99yy88" not in out and "/private/var" not in out
+    assert "$TMP/foundry-gate-pyenvs-/0a/venv/lib/x.py" in out
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="no Go toolchain on this host")
+def test_a_build_error_on_a_sibling_tickets_unbuilt_package_does_not_block() -> None:
+    stack = StackDecision(language="go", build="go build ./...", test="go test ./...")
+    built = {"go.mod": "module example.com/notes\n\ngo 1.21\n",
+             "main.go": "package main\n\nfunc main() { run() }\n"}
+    tickets = (
+        Ticket(id="T-store", title="store", specialty=Specialty.BACKEND,
+               files=("store/store.go",), seq=_seq("planner", 1)),
+        Ticket(id="T-cmd", title="cmd", specialty=Specialty.BACKEND,
+               files=("cmd.go",), seq=_seq("planner", 2)),
+    )
+    cmd = ("package main\n\nimport \"example.com/notes/store\"\n\n"
+           "func run() { store.Open() }\n")
+    with _spec(built, stack=stack, files=("cmd.go",), tickets=tickets) as spec:
+        session = SessionCheck(spec)
+        session.opening()
+        waiting = session.check({"cmd.go": cmd}, ())
+        typo = session.check({"cmd.go": "package main\n\nfunc run() int { return \"x\" }\n"}, ())
+    assert not waiting.red, waiting
+    assert any("waits on a planned file" in line for line in waiting.pre_existing), waiting
+    assert typo.red and any("cmd.go" in line for line in typo.yours), typo
+
+
+def test_the_opening_check_runs_before_the_local_slot_is_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order: list[str] = []
+    calls: list[Any] = []
+    fake = _red_unless("", calls)  # always green
+
+    def _run(*a: Any, **k: Any) -> Any:
+        order.append("check")
+        return fake(*a, **k)
+
+    monkeypatch.setattr(self_check, "run_check", _run)
+
+    @contextlib.contextmanager
+    def _slot() -> Iterator[None]:
+        order.append("slot")
+        yield
+
+    spec = CheckSpec(base=_fake_base(tmp_path / "base"), scope=frozenset(),
+                     own_refs=frozenset(), own_files=("app.py",))
+    seen: list[list[dict[str, Any]]] = []
+    local = ProxyAgentAdapter(_scripted([{"action": "done", "summary": "x"}], seen))
+    tiered = TieredAdapter(cloud=local, local=local, local_tiers={"T3"}, local_slot=_slot)
+    src = tmp_path / "src"
+    src.mkdir()
+    packet = _packet().model_copy(update={"task": {**_packet().task, "tier": "T3"}})
+    with Sandbox(src) as sb, check_scope(spec):
+        tiered.run(packet, sb)
+    assert order[:2] == ["check", "slot"]
+    assert "GATE CHECK ON THE STARTING TREE" in str(seen[0][0]["content"])
+
+
+def test_the_check_can_be_kept_to_local_sessions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "local")
+    assert not self_check.wanted()
+    with self_check.local_session():
+        assert self_check.wanted()
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "0")
+    with self_check.local_session():
+        assert not self_check.wanted()
+
+
+def test_concurrent_builds_reuse_a_failed_install_and_never_delete_a_held_venv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.gates.pydeps as pydeps
+
+    installs: list[str] = []
+    monkeypatch.setattr(pydeps, "build_python_env", lambda venv: venv.mkdir(parents=True))
+
+    def _pip(*_a: Any, **_k: Any) -> tuple[int, str, str]:
+        installs.append("pip")
+        return 1, "", "ERROR: No matching distribution found for nosuchpkg-xyz\n"
+
+    monkeypatch.setattr(pydeps, "ground_untrusted", _pip)
+    cache = PythonEnvCache()
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    first = cache.checkout("d" * 64, ("nosuchpkg-xyz",))
+    second = cache.checkout("d" * 64, ("nosuchpkg-xyz",))
+    assert first.install(wd, timeout_s=5)[0] == 1
+    (first.venv / "held").write_text("in use")
+    assert second.install(wd, timeout_s=5)[0] == 1
+    assert installs == ["pip"] and (first.venv / "held").exists()
+    first.release()
+    second.release()
+    # Nobody holds it any more: the next build of the manifest retries.
+    third = cache.checkout("d" * 64, ("nosuchpkg-xyz",))
+    third.install(wd, timeout_s=5)
+    assert installs == ["pip", "pip"]
     cache.close()

@@ -500,11 +500,21 @@ def manifest_digest(workdir: Path, requirements: tuple[str, ...]) -> str | None:
 
 
 class _SharedInstall:
-    """One manifest digest's install outcome, shared by the builds that check it out."""
+    """One manifest digest's venv and install outcome, shared by the builds that
+    check it out. ``holders`` counts the builds holding it now: a failed install is
+    re-run only once no other build holds the venv (re-running deletes it), so
+    concurrent builds reuse the failure instead, and sequential ones still retry."""
 
     def __init__(self) -> None:
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # one install at a time
         self.installed = False
+        self.failure: tuple[int, str, str] | None = None
+        self.holders = 0
+        self._count = threading.Lock()
+
+    def hold(self, n: int) -> None:
+        with self._count:
+            self.holders += n
 
 
 class PythonBuildEnv:
@@ -522,7 +532,15 @@ class PythonBuildEnv:
         # The install itself, shared by every build of one manifest digest; ``ready``
         # stays per build, so a concurrent build's checkout never resets it mid-gate.
         self._shared = shared or _SharedInstall()
+        self._shared.hold(1)
+        self._held = True
         self.ready = False  # set by this build's install step: may its gates run?
+
+    def release(self) -> None:
+        """This build is done with the venv (its gates have run)."""
+        if self._held:
+            self._held = False
+            self._shared.hold(-1)
 
     @property
     def installed(self) -> bool:
@@ -544,6 +562,12 @@ class PythonBuildEnv:
                 self.ready = True
                 note = f"reused this run's build venv for manifest {self.digest or ''}\n"
                 return 0, note, ""
+            if shared.failure is not None and shared.holders > 1:
+                # Another build still holds the venv the failed attempt left: re-running
+                # would delete it under that build's gates, and fail the same way.
+                rc, out, err = shared.failure
+                self.ready = install_failure_is_project(out + err)
+                return rc, out, err
             shutil.rmtree(self.venv, ignore_errors=True)  # an earlier failed attempt
             build_python_env(self.venv)
             shutil.copytree(workdir, self.scratch, symlinks=True)
@@ -561,6 +585,7 @@ class PythonBuildEnv:
             finally:
                 shutil.rmtree(self.scratch, ignore_errors=True)
             shared.installed = rc == 0 and self.digest is not None
+            shared.failure = None if rc == 0 else (rc, out, err)
             # A project-fault failure still lets the later gates judge the tree as it
             # is (as a build with no install would); an infra failure ERRORs them too.
             self.ready = rc == 0 or install_failure_is_project(out + err)
@@ -623,7 +648,11 @@ def python_build_env(
         return
     digest = manifest_digest(workdir, requirements) if cache is not None else None
     if cache is not None and digest is not None:
-        yield cache.checkout(digest, requirements)
+        env = cache.checkout(digest, requirements)
+        try:
+            yield env
+        finally:
+            env.release()
         return
     with tempfile.TemporaryDirectory(prefix="foundry-gate-pyenv-") as root:
         yield PythonBuildEnv(Path(root), requirements)

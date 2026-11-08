@@ -1275,14 +1275,16 @@ def _build_gate(
 ) -> GateImpl:
     """``planned``: the ticket files a wave check's tree may not hold yet, whose
     modules the build's import check counts as the project's own. No ``runner``:
-    an unsealed gate for an unattested run (an agent's in-session check)."""
+    an unsealed gate for an unattested run (an agent's in-session check).
+    ``timeout_s`` bounds the build step; the install keeps the gate's own bound."""
     first_party = frozenset(
         PurePosixPath(p).name.split(".", 1)[0] for p in planned_paths(planned)
     )
     seal_key = runner.seal_key if runner is not None else None
     if profile is None:
         return BuildGate(seal_key=seal_key, pyenv=pyenv, python=True,
-                         first_party=first_party, timeout_s=timeout_s)
+                         first_party=first_party, timeout_s=timeout_s,
+                         install_timeout_s=_GATE_TIMEOUT_S)
     if profile.unavailable:
         return UnavailableGate("build", profile.unavailable)
     return BuildGate(
@@ -1294,6 +1296,7 @@ def _build_gate(
         python=profile.python,
         first_party=first_party if profile.python else frozenset(),
         timeout_s=timeout_s,
+        install_timeout_s=_GATE_TIMEOUT_S,
     )
 
 

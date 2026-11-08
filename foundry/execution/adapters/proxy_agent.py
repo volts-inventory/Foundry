@@ -31,6 +31,7 @@ then on; other tiers keep their tools.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -41,6 +42,7 @@ import subprocess
 import sys
 import tomllib
 import warnings
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -60,7 +62,7 @@ from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
 
     from foundry.gates.self_check import SessionCheck
 
@@ -189,7 +191,12 @@ _CHECK_TOOLS: tuple[dict[str, Any], ...] = (
 _CHECK_REFUSALS = 2
 # The adapter-report note of a session whose checks ran out while its own work was
 # still red (tiered.session_stop_reason counts it like the turn cap).
+# (id of the packet, its opened check) from :meth:`ProxyAgentAdapter.prepared`.
+_OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] = ContextVar(
+    "foundry_opened_check", default=None)
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
+# The note of a session whose final tree no check judged (its budget was spent).
+CHECK_UNVERIFIED = "unverified"
 
 # The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
 # agent's sandbox does not, so a runner there wrote to "" and the agent never saw
@@ -339,6 +346,17 @@ class ProxyAgentAdapter:
         with packet_tier_scope(packet):  # the completion closure picks the packet's model tier
             return self._run(packet, sandbox)
 
+    @contextlib.contextmanager
+    def prepared(self, packet: TaskPacket) -> Iterator[None]:
+        """Run ``packet``'s opening gate check now, for the :meth:`run` inside: the
+        tiered adapter enters this before it takes the local model's slot, so the
+        model is not held idle while the gates run."""
+        token = _OPENED.set((id(packet), _open_check(packet)))
+        try:
+            yield
+        finally:
+            _OPENED.reset(token)
+
     def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
@@ -346,7 +364,9 @@ class ProxyAgentAdapter:
         tool_fn = None if tier in self._json_tiers else self._tool_complete
         native = tool_fn is not None
         listing = _listing(before)
-        checker, checked = _open_check(packet)
+        opened = _OPENED.get()
+        checker, checked = (opened[1] if opened is not None and opened[0] == id(packet)
+                            else _open_check(packet))
         if checker is not None and checker.spec.rules:
             packet = _with_rules(packet, checker.spec.rules)
         messages = _opening(packet, native=native, listing=listing, check=checked)
@@ -382,6 +402,10 @@ class ProxyAgentAdapter:
             # Red on the final tree itself: an edit after the last check is unjudged.
             st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last check: "
                              + " | ".join(last.yours[:6])[:1500])
+        elif st.checker is not None and st.checker.cached(*_changes(st)) is None:
+            # Not a stop: the wave check judges the tree as for any session.
+            st.triage.append(f"{CHECK_UNVERIFIED}: the session's last edits were never "
+                             "checked (no check left to run on them)")
 
         after = walk_worktree(worktree)
         authored, deleted, skipped_binary = changed_files(before, after)
@@ -791,10 +815,10 @@ def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
     """The session's gate check (from the engineering node's or the fixer's
     :func:`~foundry.gates.self_check.check_scope`) and its opening report, run on
     the starting tree; ``(None, None)`` when this session has none."""
-    from foundry.gates.self_check import SessionCheck, current_check, render
+    from foundry.gates.self_check import SessionCheck, current_check, render, wanted
 
     spec = current_check()
-    if spec is None:
+    if spec is None or not wanted():
         return None, None
     checker = SessionCheck(spec, label=str(packet.task.get("id", "")))
     try:
@@ -865,7 +889,8 @@ def _red_done(st: _Loop) -> str | None:
     last = st.check_refusals >= _CHECK_REFUSALS
     return ("ERROR: not done — the gates fail on your work in this tree:\n"
             + render(verdict, left=c.left)
-            + "\nFix what is listed as yours, then call check and done. "
+            + ("\nFix what is listed as yours, then call check and done. " if c.left > 0
+               else "\nNo checks are left: fix what is listed as yours, then call done. ")
             + ("If it cannot be fixed by editing your files, call done again and name it "
                "in triage." if last else ""))
 

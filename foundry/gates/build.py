@@ -193,6 +193,7 @@ class BuildGate:
         *,
         install_cmd: str | None = None,
         timeout_s: float = 600.0,
+        install_timeout_s: float | None = None,
         seal_key: bytes | None = None,
         profile_name: str = "",
         pyenv: PythonBuildEnv | None = None,
@@ -207,6 +208,9 @@ class BuildGate:
         self._python = python
         self._first_party = first_party
         self._timeout_s = timeout_s
+        # The networked install keeps the gate's bound when the steps after it are
+        # bounded tighter (an agent's in-session check).
+        self._install_timeout_s = install_timeout_s or timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # Class-2 reuse-key bindings (§1f). Build has no held-out mutant
         # machinery; the ids are still bound so the key shape is uniform.
@@ -231,7 +235,7 @@ class BuildGate:
         out = err = ""
         if self._pyenv is not None:
             structured["pip_install"] = list(self._pyenv.requirements)
-            rc, out, err = self._pyenv.install(workdir, timeout_s=self._timeout_s)
+            rc, out, err = self._pyenv.install(workdir, timeout_s=self._install_timeout_s)
             codes = (rc,)
             if rc != 0:
                 return observe(
@@ -251,7 +255,7 @@ class BuildGate:
                 ("/bin/sh", "-c", self.install_cmd),
                 workdir,
                 network=True,
-                timeout_s=self._timeout_s,
+                timeout_s=self._install_timeout_s,
             )
             codes = (rc,)
             if rc != 0:

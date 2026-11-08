@@ -14,7 +14,11 @@ mid-work.
 A result is split for the session: failures that are its own (its scenarios, its
 files, anything it broke) and pre-existing ones (red on the tree it started from).
 The engineering node and the fixer pass a :class:`CheckSpec` per session through
-:func:`check_scope`; the proxy-agent loop reads it with :func:`current_check`.
+:func:`check_scope`; the proxy-agent loop reads it with :func:`current_check`. Every
+proxy-agent session gets it — the local tiers, and the cloud API backends
+(``--adapter proxy-agent``) too — unless ``FOUNDRY_SELF_CHECK`` says otherwise:
+``0``/``off`` turns it off, ``local`` keeps it to the local tiers' sessions (the
+tiered adapter marks those, :func:`local_session`); unset or anything else is on.
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
 from foundry import progress
@@ -64,8 +68,9 @@ CHECK_BUDGET = 8
 # Per gate step (the install, the build, the scoped scenarios): a local check is
 # seconds to a minute; a hung one must not eat the session.
 CHECK_TIMEOUT_S = 180.0
-# "0" turns the in-session check off (an A/B on the bench).
+# "0"/"off": no check anywhere; "local": local-tier sessions only (an A/B on the bench).
 DISABLE_ENV = "FOUNDRY_SELF_CHECK"
+_OFF = frozenset({"0", "off", "false", "no"})
 _SECTION_CAP = 3_000
 
 
@@ -80,13 +85,41 @@ class SelfCheckSettings:
 
     @staticmethod
     def enabled() -> bool:
-        return os.environ.get(DISABLE_ENV, "").strip() != "0"
+        return _mode() not in _OFF
+
+
+def _mode() -> str:
+    return os.environ.get(DISABLE_ENV, "").strip().lower()
+
+
+_LOCAL: ContextVar[bool] = ContextVar("foundry_local_session", default=False)
+
+
+@contextlib.contextmanager
+def local_session() -> Iterator[None]:
+    """Mark the session run inside as a local-tier one (the tiered adapter)."""
+    token = _LOCAL.set(True)
+    try:
+        yield
+    finally:
+        _LOCAL.reset(token)
+
+
+def wanted() -> bool:
+    """Does the session running now get the check (``FOUNDRY_SELF_CHECK``)?"""
+    mode = _mode()
+    if mode in _OFF:
+        return False
+    return _LOCAL.get() if mode == "local" else True
 
 
 class CheckBase:
-    """The integrated tree one wave's (or one fix pass's) sessions check against
-    (gate inputs included, manifest not yet scaffolded), materialized on the first
-    check, so a wave whose sessions never check never builds it."""
+    """The integrated tree one wave's (or one fix pass's) sessions check against:
+    the materialized tree before any session's changes (gate inputs included, the
+    manifest not scaffolded — each check scaffolds its own copy). Built lazily by
+    the first session that checks (its opening check), so a wave whose adapter never
+    checks (claude-code, stub) never builds it; the opening check's gate run is
+    shared by every session with the same scenario scope."""
 
     def __init__(
         self,
@@ -106,6 +139,8 @@ class CheckBase:
         self._resolve_blob = resolve_blob
         self._lock = threading.Lock()
         self._built: tuple[Path, tuple[str, ...]] | None = None
+        self._openings: dict[frozenset[str], tuple[GateOutcome, ...]] = {}
+        self._opening_locks: dict[frozenset[str], threading.Lock] = {}
 
     def tree(self) -> tuple[Path, tuple[str, ...]]:
         """(the materialized tree, every ticket's planned files). Raises
@@ -121,6 +156,17 @@ class CheckBase:
                                     resolve_blob=self._resolve_blob, scaffold_manifest=False)
                 self._built = (root, tuple(planned_files(self.state, self._resolve)))
             return self._built
+
+    def opening(self, spec: CheckSpec) -> tuple[GateOutcome, ...]:
+        """The gates on the unchanged tree for ``spec``'s scope, run once per scope.
+        The unbuilt files are the planned files still absent, the session's own
+        included: each session judges which of them are its own."""
+        with self._lock:
+            lock = self._opening_locks.setdefault(spec.scope, threading.Lock())
+        with lock:
+            if spec.scope not in self._openings:
+                self._openings[spec.scope] = run_check(spec, {}, ())
+            return self._openings[spec.scope]
 
 
 @contextlib.contextmanager
@@ -178,21 +224,27 @@ class GateOutcome:
     status: GateStatus
     findings: tuple[str, ...]
     scenarios: Mapping[str, str] = field(default_factory=dict)  # ref -> outcome
+    # The planned files the checked tree does not hold yet (later or sibling tickets').
+    unbuilt: tuple[str, ...] = ()
 
 
-def _unattested(gate: GateImpl, workdir: Path) -> GateOutcome:
+def _unattested(
+    gate: GateImpl, workdir: Path, unbuilt: tuple[str, ...] = (), base: Path | None = None
+) -> GateOutcome:
     """The gate's zone-A grounding and zone-B decision, as the runner calls them,
     minus the seal, the signature and the latch. An exception is an ERROR. The
-    findings name the copy's random temp path as ``.``."""
+    findings name the copy (and the base it was copied from) as ``.``."""
     out = _outcome(gate, workdir)
-    roots = sorted({str(workdir), str(workdir.resolve())}, key=len, reverse=True)
+    dirs = [d for d in (workdir, base) if d is not None]
+    roots = sorted({str(r) for d in dirs for r in (d, d.resolve())}, key=len, reverse=True)
 
     def rel(line: str) -> str:
         for root in roots:
             line = line.replace(root + "/", "./").replace(root, ".")
         return line
 
-    return GateOutcome(out.name, out.status, tuple(rel(f) for f in out.findings), out.scenarios)
+    return GateOutcome(out.name, out.status, tuple(rel(f) for f in out.findings),
+                       out.scenarios, unbuilt)
 
 
 def _outcome(gate: GateImpl, workdir: Path) -> GateOutcome:
@@ -228,6 +280,7 @@ def run_check(
         _scaffold_manifest,
         _wave_test_gate,
         gate_profile,
+        planned_paths,
         wave_stack,
     )
 
@@ -248,6 +301,8 @@ def run_check(
         stack, _ = wave_stack(base.state, planned, work)
         profile = gate_profile({**base.state, "stack": stack}, base.settings.profile)
         timeout = base.settings.timeout_s
+        unbuilt = tuple(sorted(p for p in planned_paths(planned)
+                               if not _contained_target(work, p).exists()))
         with _build_env(profile, work, base.rt) as pyenv:
             gates: list[GateImpl] = [
                 _build_gate(profile, None, pyenv, planned=planned, timeout_s=timeout)]
@@ -255,7 +310,7 @@ def run_check(
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)
                 if test is not None:
                     gates.append(test)
-            return tuple(_unattested(g, work) for g in gates)
+            return tuple(_unattested(g, work, unbuilt, root) for g in gates)
 
 
 @dataclass(frozen=True)
@@ -279,33 +334,104 @@ class CheckVerdict:
         return not self.yours and not self.errors
 
 
-def _red_refs(gates: Iterable[GateOutcome]) -> set[str]:
-    return {r for g in gates if g.name == "test" and g.status is GateStatus.FAIL
-            for r, o in g.scenarios.items() if o != "passed"}
+def _red_refs(gate: GateOutcome | None) -> set[str]:
+    if gate is None or gate.name != "test" or gate.status is not GateStatus.FAIL:
+        return set()
+    return {r for r, o in gate.scenarios.items() if o != "passed"}
+
+
+def _path_rx(paths: Iterable[str]) -> re.Pattern[str] | None:
+    alts = [re.escape(f.rstrip("/")) for f in paths if f]
+    if not alts:
+        return None
+    return re.compile(r"(?<![\w.-])(?:\./)?(?:" + "|".join(sorted(alts, key=len, reverse=True))
+                      + r")(?![\w-])")
 
 
 def _mentions(lines: Iterable[str], files: Iterable[str]) -> bool:
-    paths = [f.rstrip("/") for f in files if f]
-    if not paths:
-        return False
-    rx = re.compile(r"(?<![\w.-])(?:\./)?(?:" + "|".join(map(re.escape, paths)) + r")(?![\w-])")
-    return any(rx.search(line) for line in lines)
+    rx = _path_rx(files)
+    return rx is not None and any(rx.search(line) for line in lines)
+
+
+def _unbuilt_rx(unbuilt: Iterable[str]) -> re.Pattern[str] | None:
+    """A line naming, or importing, a planned file no ticket has built yet: its
+    path, its module (``app.models``, ``./models``) or its package directory
+    (``example.com/notes/store``)."""
+    alts: set[str] = set()
+    for p in unbuilt:
+        pp = PurePosixPath(p)
+        stem = pp.with_suffix("").as_posix()
+        alts.add(r"(?<![\w.-])(?:\./)?" + re.escape(p) + r"(?![\w-])")
+        alts.add(r"(?<![\w.-])(?:\./)?" + re.escape(stem) + r"(?![\w./-])")
+        alts.add(r"/" + re.escape(pp.stem) + r"['\"]")
+        if pp.suffix == ".py":
+            alts.add(r"(?<![\w.])" + re.escape(stem.replace("/", ".")) + r"(?![\w.])")
+        if pp.parent.as_posix() not in (".", ""):
+            alts.add(r"/" + re.escape(pp.parent.as_posix()) + r"(?![\w./-])")
+    return re.compile("|".join(sorted(alts))) if alts else None
+
+
+def _sourced(line: str) -> bool:
+    from foundry.graph.gate_wiring import _PY_FRAME, _SOURCE_LINE
+
+    return bool(_SOURCE_LINE.search(line) or _PY_FRAME.search(line))
+
+
+def _norm(line: str) -> str:
+    from foundry.graph.gate_wiring import _VOLATILE
+
+    return _VOLATILE.sub("#", line).strip()
+
+
+def _split_build(
+    spec: CheckSpec, g: GateOutcome, start: GateOutcome
+) -> tuple[list[str], list[str]]:
+    """(own, other) lines of a FAILed build. A line is the session's when it names
+    one of its files, or is new since ``start`` (per normalized line: a broken
+    caller in another file is new too). A line naming or importing a planned file
+    not built yet waits on that ticket and is never the session's to fix; neither
+    is a line already failing at ``start`` that names other files."""
+    everything = spec.own_refs is None or spec.own_build
+    own_files = spec.own_files
+    unbuilt = [p for p in g.unbuilt
+               if not any(p == f or (f.endswith("/") and p.startswith(f)) for f in own_files)]
+    waits = _unbuilt_rx(unbuilt)
+    was = {_norm(x) for x in start.findings} if start.status is GateStatus.FAIL else set()
+    head, body = (g.findings[0], g.findings[1:]) if g.findings else ("", ())
+    own: list[str] = []
+    other: list[str] = []
+    context: list[str] = []
+    for line in body:
+        if waits is not None and waits.search(line):
+            other.append(f"(waits on a planned file not built yet) {line}")
+        elif everything or _mentions([line], own_files) or (
+                _norm(line) not in was and (not was or _sourced(line))):
+            own.append(line)
+        elif _sourced(line):
+            other.append(line)
+        else:
+            context.append(line)
+    (own if own else other).extend(context)
+    if not body and head:
+        own_head = everything or not was or _mentions([head], own_files)
+        return ([head], []) if own_head else ([], [head])
+    return ([head, *own] if own and head else own), ([head, *other] if other and head else other)
 
 
 def judge(
     spec: CheckSpec,
     gates: tuple[GateOutcome, ...],
-    start: tuple[GateOutcome, ...] | None = None,
+    start: Mapping[str, GateOutcome] | None = None,
     seconds: float = 0.0,
 ) -> CheckVerdict:
-    """Split ``gates`` against ``start`` (the session's opening check; ``None``:
-    this IS the opening check). A failure is the session's own when it names one of
-    its scenarios or files, or was not failing on the starting tree."""
+    """Split ``gates`` against ``start`` (each gate's baseline: its first result that
+    judged the tree; a gate with none yet is its own baseline, as in the opening
+    check). A failure is the session's own when it names one of its scenarios or
+    files, or was not failing at its baseline. A gate ERROR blocks nothing."""
     from foundry.graph.gate_wiring import failing_ids
 
-    before = gates if start is None else start
-    start_build = next((g for g in before if g.name == "build"), None)
-    start_red = _red_refs(before)
+    base = {g.name: g for g in gates}
+    base.update(start or {})
     everything = spec.own_refs is None
     yours: list[str] = []
     pre: list[str] = []
@@ -321,21 +447,24 @@ def judge(
             continue
         if g.status is not GateStatus.FAIL:
             continue
+        before = base[g.name]
         head = f"[{g.name} gate FAILED]"
         if g.name != "test":
-            was_red = start_build is not None and start_build.status is GateStatus.FAIL
-            own = (everything or spec.own_build or not was_red
-                   or _mentions(g.findings, spec.own_files))
-            (yours if own else pre).extend((head, *g.findings))
+            own, other = _split_build(spec, g, before)
+            if own:
+                yours += [head, *own]
+            if other:
+                pre += [head, *other]
             continue
+        start_red = _red_refs(before)
         red = {r for r, o in g.scenarios.items() if o != "passed"}
         mine = {r for r in red
                 if everything or r in (spec.own_refs or ()) or r not in start_red}
         theirs = red - mine
-        if not red and any(t.name == "test" and t.status is GateStatus.FAIL for t in before) \
-                and not everything and not _mentions(g.findings, spec.own_files):
+        if not red and before.status is GateStatus.FAIL and not everything \
+                and not _mentions(g.findings, spec.own_files):
             # Red with no scenario to blame (a module failing to collect) and red at
-            # the start too: not the session's unless it names the session's files.
+            # the baseline too: not the session's unless it names the session's files.
             pre += [head, *g.findings]
             continue
         if not theirs:
@@ -355,14 +484,19 @@ def judge(
             yours += [head, *own_lines]
         if pre_lines:
             pre += [head, *pre_lines]
-    # Run-varying bits (timings, addresses) out: the report is part of the next model
-    # request, which the run's call cache keys on byte for byte.
+    return CheckVerdict(_stable(yours), _stable(pre), _stable(errors), tuple(checked), seconds)
+
+
+# A Foundry temp dir (a gate venv cache, a check base or copy): random per process.
+_TMP_PATH = re.compile(r"(?:/[^\s'\"():]*)?/(foundry-[a-z-]+?-)[a-z0-9_]{8}\b")
+
+
+def _stable(lines: list[str]) -> tuple[str, ...]:
+    """Run-varying bits (timings, addresses, temp dirs) out: the report is part of the
+    next model request, which the run's call cache keys on byte for byte."""
     from foundry.graph.gate_wiring import _VOLATILE
 
-    def stable(lines: list[str]) -> tuple[str, ...]:
-        return tuple(_VOLATILE.sub("#", line) for line in lines)
-
-    return CheckVerdict(stable(yours), stable(pre), stable(errors), tuple(checked), seconds)
+    return tuple(_TMP_PATH.sub(r"$TMP/\1", _VOLATILE.sub("#", line)) for line in lines)
 
 
 def _section(title: str, lines: tuple[str, ...], cap: int) -> str:
@@ -415,7 +549,8 @@ class SessionCheck:
         self.label = label
         self.left = spec.base.settings.budget if budget is None else budget
         self.last: CheckVerdict | None = None
-        self._start: tuple[GateOutcome, ...] | None = None
+        # Gate name -> its first result that judged the tree (PASS or FAIL).
+        self._start: dict[str, GateOutcome] = {}
         self._cache: dict[str, CheckVerdict] = {}
 
     def _scoped(
@@ -428,12 +563,16 @@ class SessionCheck:
         gone = sorted(p for p in deleted if in_write_scope(p, own))
         return kept, gone, content_digest({"files": kept, "deleted": gone})
 
-    def _run(self, files: dict[str, str], deleted: list[str], key: str) -> CheckVerdict:
+    def _run(
+        self, files: dict[str, str], deleted: list[str], key: str, *, opening: bool = False
+    ) -> CheckVerdict:
         t0 = time.monotonic()
-        gates = run_check(self.spec, files, deleted)
-        if self._start is None:
-            self._start = gates
+        gates = (self.spec.base.opening(self.spec) if opening
+                 else run_check(self.spec, files, deleted))
         verdict = judge(self.spec, gates, self._start, time.monotonic() - t0)
+        for g in gates:
+            if g.status in (GateStatus.PASS, GateStatus.FAIL):
+                self._start.setdefault(g.name, g)
         self._cache[key] = verdict
         self.last = verdict
         status = "red" if verdict.red else "green" if verdict.green else "error"
@@ -445,7 +584,7 @@ class SessionCheck:
     def opening(self) -> CheckVerdict:
         """The check of the starting tree (no changes); not counted."""
         files, deleted, key = self._scoped({}, ())
-        return self._run(files, deleted, key)
+        return self._run(files, deleted, key, opening=True)
 
     def cached(self, files: Mapping[str, str], deleted: Iterable[str]) -> CheckVerdict | None:
         verdict = self._cache.get(self._scoped(files, deleted)[2])

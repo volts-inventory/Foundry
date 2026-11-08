@@ -95,12 +95,14 @@ def test_leads_one_per_distinct_owner() -> None:
 
 
 def test_leads_by_area_groups_owners() -> None:
-    om = _map({
-        "data/d.py": "warehouse",
-        "web/a.tsx": "ui",
-        "web/b.tsx": "ui",
-        "api/c.py": "svc",
-    })
+    om = _map(
+        {
+            "data/d.py": "warehouse",
+            "web/a.tsx": "ui",
+            "web/b.tsx": "ui",
+            "api/c.py": "svc",
+        }
+    )
     by_area = om.leads_by_area()
     assert by_area == {"frontend": ("ui",), "backend": ("svc",), "data": ("warehouse",)}
     assert list(by_area) == [a for a in CANONICAL_AREAS if a in by_area]  # canonical order

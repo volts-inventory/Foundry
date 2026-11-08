@@ -64,6 +64,39 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
     assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
 
 
+def test_each_action_reports_one_activity_line(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+
+    def listener(line: str) -> None:
+        seen.append(line)
+        raise RuntimeError("a broken listener must not break the session")
+
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "read_file", "path": "mod.py"},
+                {"action": "run", "cmd": "python -c 'import mod'"},
+                {"action": "search", "pattern": "X ="},
+                {"action": "done", "summary": "built mod"},
+            ]
+        ),
+        activity_cb=listener,
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert result.turns_used == 5
+    assert seen == [
+        "writing mod.py",
+        "reading mod.py",
+        "running python -c 'import mod'",
+        "searching for X =",
+        "done: built mod",
+    ]
+
+
 def test_observations_feed_back(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
@@ -106,7 +139,8 @@ def test_turn_budget_bounds_the_loop(tmp_path: Path) -> None:
 
 def _repair_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
     return make_packet(worktree, turn_budget).model_copy(
-        update={"prior_failures": ("[build gate FAILED]", "app.py:1: error: bad")})
+        update={"prior_failures": ("[build gate FAILED]", "app.py:1: error: bad")}
+    )
 
 
 def test_a_repair_sessions_first_done_without_an_edit_is_refused(tmp_path: Path) -> None:
@@ -116,13 +150,21 @@ def test_a_repair_sessions_first_done_without_an_edit_is_refused(tmp_path: Path)
     src.mkdir()
     (src / "app.py").write_text("x = (\n")
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording([
-        {"action": "read_file", "path": "app.py"},
-        {"action": "done", "summary": "Let me fix these one at a time",
-         "triage": ["Need to fix app.py"]},
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "done", "summary": "fixed app.py"},
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "read_file", "path": "app.py"},
+                {
+                    "action": "done",
+                    "summary": "Let me fix these one at a time",
+                    "triage": ["Need to fix app.py"],
+                },
+                {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+                {"action": "done", "summary": "fixed app.py"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         result = adapter.run(_repair_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -341,8 +383,9 @@ def test_a_write_without_a_path_says_the_path_is_missing(tmp_path: Path) -> None
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording(
-        [{"action": "write_file", "content": "x = 1\n"}, {"action": "done"}], seen))
+    adapter = ProxyAgentAdapter(
+        recording([{"action": "write_file", "content": "x = 1\n"}, {"action": "done"}], seen)
+    )
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree), sb)
     (obs,) = observations(seen[-1])
@@ -357,15 +400,24 @@ def test_a_session_run_that_misses_a_step_argument_gets_the_gates_why(tmp_path: 
     (src / "features").mkdir(parents=True)
     (src / "tests").mkdir()
     (src / "features" / "T1.feature").write_text(
-        "Feature: T1\n  Scenario: A\n    Given a note\n    When it is read\n")
+        "Feature: T1\n  Scenario: A\n    Given a note\n    When it is read\n"
+    )
     (src / "tests" / "test_t1.py").write_text(
         'scenarios("../features/T1.feature")\n\n'
         '@given("a note", target_fixture="note_a")\ndef _a():\n    return 1\n\n'
-        '@given("a note", target_fixture="note_b")\ndef _b():\n    return 2\n')
+        '@given("a note", target_fixture="note_b")\ndef _b():\n    return 2\n'
+    )
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording(
-        [{"action": "run", "cmd": "echo \"E  fixture 'note_a' not found\""},
-         {"action": "run", "cmd": "echo fine"}, {"action": "done"}], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": "echo \"E  fixture 'note_a' not found\""},
+                {"action": "run", "cmd": "echo fine"},
+                {"action": "done"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree), sb)
     hit, plain = observations(seen[-1])
@@ -378,20 +430,31 @@ def test_a_failing_session_run_names_a_step_text_defined_twice(tmp_path: Path) -
     (src / "features").mkdir(parents=True)
     (src / "tests").mkdir()
     (src / "features" / "T1.feature").write_text(
-        "Feature: T1\n  Scenario: A\n    Given a user\n    Then the user is returned\n")
+        "Feature: T1\n  Scenario: A\n    Given a user\n    Then the user is returned\n"
+    )
     (src / "tests" / "test_t1.py").write_text(
         'scenarios("../features/T1.feature")\n\n'
         '@then("the user is returned")\ndef _a(context):\n    assert context.user\n\n'
-        '@then("the user is returned")\ndef _b(context):\n    assert context.login\n')
+        '@then("the user is returned")\ndef _b(context):\n    assert context.login\n'
+    )
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording(
-        [{"action": "run", "cmd": "echo 'FAILED tests/test_t1.py::test_a'"},
-         {"action": "run", "cmd": "echo fine"}, {"action": "done"}], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": "echo 'FAILED tests/test_t1.py::test_a'"},
+                {"action": "run", "cmd": "echo fine"},
+                {"action": "done"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree), sb)
     hit, plain = observations(seen[-1])
-    assert ('\nNOTE: `@then("the user is returned")` is defined 2 times in tests/test_t1.py '
-            "(lines 3, 7)") in hit
+    assert (
+        '\nNOTE: `@then("the user is returned")` is defined 2 times in tests/test_t1.py '
+        "(lines 3, 7)"
+    ) in hit
     assert "NOTE:" not in plain
 
 
@@ -462,16 +525,23 @@ def write_session(
     adapter = ProxyAgentAdapter(recording([*writes, {"action": "done"}], seen))
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree, turn_budget=len(writes) + 1), sb)
-        tree = {p.relative_to(sb.worktree).as_posix(): p.read_text()
-                for p in sb.worktree.rglob("*") if p.is_file()}
+        tree = {
+            p.relative_to(sb.worktree).as_posix(): p.read_text()
+            for p in sb.worktree.rglob("*")
+            if p.is_file()
+        }
     return observations(seen[-1]), tree
 
 
 def test_rejected_python_write_keeps_old_content_and_drops_new_file(tmp_path: Path) -> None:
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "old.py", "content": "x = 1\ndef f(:\n    pass\n"},
-        {"action": "write_file", "path": "pkg/new.py", "content": "if True\n"},
-    ], seed={"old.py": "X = 0\n"})
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {"action": "write_file", "path": "old.py", "content": "x = 1\ndef f(:\n    pass\n"},
+            {"action": "write_file", "path": "pkg/new.py", "content": "if True\n"},
+        ],
+        seed={"old.py": "X = 0\n"},
+    )
     old, new = obs
     assert "ERROR: write rejected — old.py has a Python syntax error at line 2" in old
     assert "previous content is kept" in old and "    2 | def f(:" in old and "^" in old
@@ -480,12 +550,15 @@ def test_rejected_python_write_keeps_old_content_and_drops_new_file(tmp_path: Pa
 
 
 def test_rejected_json_and_toml_writes(tmp_path: Path) -> None:
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "a.json", "content": '{"a": 1,\n "b": }\n'},
-        {"action": "write_file", "path": "pyproject.toml", "content": "[project\nname = 1\n"},
-        {"action": "write_file", "path": "tsconfig.json", "content": "{ // jsonc\n}\n"},
-        {"action": "write_file", "path": "ok.json", "content": '{"a": [1]}'},
-    ])
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {"action": "write_file", "path": "a.json", "content": '{"a": 1,\n "b": }\n'},
+            {"action": "write_file", "path": "pyproject.toml", "content": "[project\nname = 1\n"},
+            {"action": "write_file", "path": "tsconfig.json", "content": "{ // jsonc\n}\n"},
+            {"action": "write_file", "path": "ok.json", "content": '{"a": [1]}'},
+        ],
+    )
     bad_json, bad_toml, jsonc, ok = obs
     assert "invalid JSON at line 2, column 7" in bad_json and '    2 |  "b": }' in bad_json
     assert "invalid TOML at line 1" in bad_toml and "not created" in bad_toml
@@ -494,48 +567,69 @@ def test_rejected_json_and_toml_writes(tmp_path: Path) -> None:
 
 
 def test_rejected_yaml_write_but_custom_tags_and_templates_pass(tmp_path: Path) -> None:
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "a.yaml", "content": "a: [1, 2\nb: 3\n"},
-        {"action": "write_file", "path": "cf.yml", "content": "Value: !Ref Bucket\n"},
-        {"action": "write_file", "path": "t.yaml", "content": "a: {{ .Values.x }\n"},
-    ])
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {"action": "write_file", "path": "a.yaml", "content": "a: [1, 2\nb: 3\n"},
+            {"action": "write_file", "path": "cf.yml", "content": "Value: !Ref Bucket\n"},
+            {"action": "write_file", "path": "t.yaml", "content": "a: {{ .Values.x }\n"},
+        ],
+    )
     assert "invalid YAML at line 2" in obs[0]
     assert set(tree) == {"cf.yml", "t.yaml"}
 
 
 def test_rejected_feature_write(tmp_path: Path) -> None:
     good = "Feature: cart\n  Scenario: add\n    Given an empty cart\n"
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "cart.feature",
-         "content": ("Feature: cart\n  Scenario: add\n    Given x\n"
-                     "  Examples:\n  | a |\n  stray text\n")},
-        {"action": "write_file", "path": "cart.feature", "content": good},
-    ])
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {
+                "action": "write_file",
+                "path": "cart.feature",
+                "content": (
+                    "Feature: cart\n  Scenario: add\n    Given x\n"
+                    "  Examples:\n  | a |\n  stray text\n"
+                ),
+            },
+            {"action": "write_file", "path": "cart.feature", "content": good},
+        ],
+    )
     assert "malformed Gherkin at line 6" in obs[0] and "stray text" in obs[0]
     assert obs[1].startswith("OBSERVATION:\nwrote cart.feature")
     assert tree == {"cart.feature": good}
 
 
-@pytest.mark.skipif(not (shutil.which("gofmt") and shutil.which("node")),
-                    reason="needs gofmt and node")
+@pytest.mark.skipif(
+    not (shutil.which("gofmt") and shutil.which("node")), reason="needs gofmt and node"
+)
 def test_rejected_go_and_module_js_writes(tmp_path: Path) -> None:
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "main.go", "content": "package main\nfunc main() {\n"},
-        {"action": "write_file", "path": "a.mjs", "content": "export const a = ;\n"},
-        {"action": "write_file", "path": "ok.mjs", "content": 'import x from "y";\n'},
-        {"action": "write_file", "path": "app.js", "content": "const a = <div/>;\n"},
-    ])
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {"action": "write_file", "path": "main.go", "content": "package main\nfunc main() {\n"},
+            {"action": "write_file", "path": "a.mjs", "content": "export const a = ;\n"},
+            {"action": "write_file", "path": "ok.mjs", "content": 'import x from "y";\n'},
+            {"action": "write_file", "path": "app.js", "content": "const a = <div/>;\n"},
+        ],
+    )
     assert "Go syntax error at line 2, column 15" in obs[0]
     assert "JavaScript syntax error at line 1" in obs[1] and "SyntaxError" in obs[1]
     assert set(tree) == {"ok.mjs", "app.js"}
 
 
 def test_accepted_write_is_unchanged_and_gets_mypy_advice(tmp_path: Path) -> None:
-    obs, tree = write_session(tmp_path, [
-        {"action": "write_file", "path": "ok.py", "content": "x = 1\n"},
-        {"action": "write_file", "path": "typed.py",
-         "content": "def f(x: int) -> str:\n    return x\n"},
-    ])
+    obs, tree = write_session(
+        tmp_path,
+        [
+            {"action": "write_file", "path": "ok.py", "content": "x = 1\n"},
+            {
+                "action": "write_file",
+                "path": "typed.py",
+                "content": "def f(x: int) -> str:\n    return x\n",
+            },
+        ],
+    )
     assert obs[0] == "OBSERVATION:\nwrote ok.py (6 chars)"
     assert "wrote typed.py" in obs[1] and "ADVISORY (mypy" in obs[1]
     assert "typed.py:2: error: Incompatible return value type" in obs[1]
@@ -760,8 +854,9 @@ def tool_turns(turns: list[Any], seen: list[list[dict[str, Any]]]):
         if isinstance(turn, str):
             return turn, ()
         n = len(seen)
-        return "", [{"id": f"t{n}-{i}", "name": name, "input": args}
-                    for i, (name, args) in enumerate(turn)]
+        return "", [
+            {"id": f"t{n}-{i}", "name": name, "input": args} for i, (name, args) in enumerate(turn)
+        ]
 
     return _tools
 
@@ -780,13 +875,21 @@ def test_native_tool_calls_in_one_turn_run_in_order_as_tool_results(tmp_path: Pa
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        [("write_file", {"path": "a.txt", "content": "first\n"}),
-         ("read_file", {"path": "a.txt"}),
-         ("write_file", {"path": "a.txt", "content": "second\n"}),
-         ("run", {"cmd": "cat a.txt"})],
-        [("done", {"summary": "built", "triage": ["no docs"]})],
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [
+                    ("write_file", {"path": "a.txt", "content": "first\n"}),
+                    ("read_file", {"path": "a.txt"}),
+                    ("write_file", {"path": "a.txt", "content": "second\n"}),
+                    ("run", {"cmd": "cat a.txt"}),
+                ],
+                [("done", {"summary": "built", "triage": ["no docs"]})],
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -807,13 +910,21 @@ def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        [("write_file", {"path": "../evil.py", "content": "x"}),
-         ("write_file", {"path": "bad.py", "content": "x = 1\ndef f(:\n"}),
-         ("read_file", {"path": "/etc/passwd"}),
-         ("search", {"pattern": "x", "path": ".."})],
-        [("done", {"summary": "ok"})],
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [
+                    ("write_file", {"path": "../evil.py", "content": "x"}),
+                    ("write_file", {"path": "bad.py", "content": "x = 1\ndef f(:\n"}),
+                    ("read_file", {"path": "/etc/passwd"}),
+                    ("search", {"pattern": "x", "path": ".."}),
+                ],
+                [("done", {"summary": "ok"})],
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -829,10 +940,16 @@ def test_native_tool_calls_per_turn_are_capped(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        [("write_file", {"path": f"f{i}.txt", "content": "x"}) for i in range(10)],
-        [("done", {"summary": "ok"})],
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [("write_file", {"path": f"f{i}.txt", "content": "x"}) for i in range(10)],
+                [("done", {"summary": "ok"})],
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -847,10 +964,16 @@ def test_native_plain_text_reply_is_a_nudge_turn(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        "I think I should write a file.",
-        [("done", {"summary": "ok"})],
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                "I think I should write a file.",
+                [("done", {"summary": "ok"})],
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
     assert result.turns_used == 2
@@ -862,9 +985,15 @@ def test_native_repeat_detector_counts_each_tool_call(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        [("run", {"cmd": "true"})] * 5,
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [("run", {"cmd": "true"})] * 5,
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
     assert result.turns_used == 1
@@ -875,14 +1004,21 @@ def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    turns: list[Any] = [[("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})]
-                        for i in range(5)]
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns(
-        [*turns, [("done", {"summary": "ok"})]], seen))
+    turns: list[Any] = [
+        [("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})] for i in range(5)
+    ]
+    adapter = ProxyAgentAdapter(
+        no_json, tool_complete_fn=tool_turns([*turns, [("done", {"summary": "ok"})]], seen)
+    )
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
-    contents = [r["content"] for m in seen[-1] if isinstance(m["content"], list)
-                for r in m["content"] if r.get("type") == "tool_result"]
+    contents = [
+        r["content"]
+        for m in seen[-1]
+        if isinstance(m["content"], list)
+        for r in m["content"]
+        if r.get("type") == "tool_result"
+    ]
     assert len(contents) == 10
     assert contents[0] == "[output of run 'echo a-0' elided — re-run or re-read if needed]"
     assert all("elided" not in c for c in contents[-3:])
@@ -899,8 +1035,13 @@ def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: P
         raise ToolsUnsupported("no tool channel")
 
     prompts: list[str] = []
-    actions = iter([{"action": "write_file", "path": "m.py", "content": "X = 1\n"},
-                    {"action": "done", "summary": "ok"}] * 2)
+    actions = iter(
+        [
+            {"action": "write_file", "path": "m.py", "content": "X = 1\n"},
+            {"action": "done", "summary": "ok"},
+        ]
+        * 2
+    )
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
         prompts.append(messages[0]["content"])
@@ -921,8 +1062,13 @@ def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: P
 
 def tier_packet(worktree: Path, tier: str) -> TaskPacket:
     return TaskPacket(
-        task={"id": f"t-{tier}", "title": "t", "branch": "task/t", "criterion_ids": [],
-              "tier": tier},
+        task={
+            "id": f"t-{tier}",
+            "title": "t",
+            "branch": "task/t",
+            "criterion_ids": [],
+            "tier": tier,
+        },
         worktree_path=str(worktree),
         turn_budget=6,
         cost_budget_microusd=1_000_000,
@@ -976,8 +1122,9 @@ def test_a_concurrent_fallback_leaves_a_running_native_session_alone(tmp_path: P
         b_calls += 1
         if b_calls == 1:
             b_started.set()
-            return "", [{"id": "w", "name": "write_file",
-                         "input": {"path": "b.txt", "content": "b"}}]
+            return "", [
+                {"id": "w", "name": "write_file", "input": {"path": "b.txt", "content": "b"}}
+            ]
         assert a_fell_back.wait(10)  # A's fallback lands mid-session for B
         return "", [{"id": "d", "name": "done", "input": {"summary": "native"}}]
 
@@ -1013,11 +1160,13 @@ def test_a_bdd_run_gets_a_report_path_and_a_note_when_it_writes_none(tmp_path: P
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    actions = iter([
-        {"action": "run", "cmd": 'echo cucumber > "$FOUNDRY_BDD_REPORT"'},
-        {"action": "run", "cmd": "echo cucumber"},
-        {"action": "done", "summary": "ok"},
-    ])
+    actions = iter(
+        [
+            {"action": "run", "cmd": 'echo cucumber > "$FOUNDRY_BDD_REPORT"'},
+            {"action": "run", "cmd": "echo cucumber"},
+            {"action": "done", "summary": "ok"},
+        ]
+    )
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
         seen.append(list(messages))
@@ -1047,23 +1196,32 @@ def test_a_write_outside_the_tickets_files_is_refused_in_the_loop(tmp_path: Path
     src = tmp_path / "src"
     src.mkdir()
     seen: list[str] = []
-    actions = iter([
-        {"action": "write_file", "path": "contract.py", "content": "X = 1\n"},
-        {"action": "delete_file", "path": "features/a.feature"},
-        {"action": "write_file", "path": "./contracts.py", "content": "X = 1\n"},
-        {"action": "write_file", "path": "lib/db.py", "content": "Y = 2\n"},
-        {"action": "done", "summary": "ok"},
-    ])
+    actions = iter(
+        [
+            {"action": "write_file", "path": "contract.py", "content": "X = 1\n"},
+            {"action": "delete_file", "path": "features/a.feature"},
+            {"action": "write_file", "path": "./contracts.py", "content": "X = 1\n"},
+            {"action": "write_file", "path": "lib/db.py", "content": "Y = 2\n"},
+            {"action": "done", "summary": "ok"},
+        ]
+    )
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
         seen.append(str(messages[-1]["content"]))
         act = next(actions)
         return json.dumps(act), act
 
-    packet = make_packet(tmp_path).model_copy(update={"task": {
-        "id": "t-1", "title": "t-1", "branch": "task/t-1", "criterion_ids": [],
-        "files": ["contracts.py", "lib/"],
-    }})
+    packet = make_packet(tmp_path).model_copy(
+        update={
+            "task": {
+                "id": "t-1",
+                "title": "t-1",
+                "branch": "task/t-1",
+                "criterion_ids": [],
+                "files": ["contracts.py", "lib/"],
+            }
+        }
+    )
     with Sandbox(src) as sb:
         result = ProxyAgentAdapter(_complete).run(packet, sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -1077,10 +1235,14 @@ def test_a_write_outside_the_tickets_files_is_refused_in_the_loop(tmp_path: Path
 def test_a_packet_without_files_writes_anywhere(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    adapter = ProxyAgentAdapter(scripted([
-        {"action": "write_file", "path": "anything.py", "content": "Z = 3\n"},
-        {"action": "done", "summary": "ok"},
-    ]))
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "write_file", "path": "anything.py", "content": "Z = 3\n"},
+                {"action": "done", "summary": "ok"},
+            ]
+        )
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
         body = json.loads(sb.get_blob(result.diff_uri))
@@ -1156,8 +1318,9 @@ def test_native_tool_results_carry_the_countdown(tmp_path: Path) -> None:
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
     turns = [[("run", {"cmd": f"echo {i}"}), ("run", {"cmd": f"echo x{i}"})] for i in range(11)]
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns(
-        [*turns, [("done", {"summary": "ok"})]], seen))
+    adapter = ProxyAgentAdapter(
+        no_json, tool_complete_fn=tool_turns([*turns, [("done", {"summary": "ok"})]], seen)
+    )
     with Sandbox(src) as sb:
         adapter.run(make_packet(sb.worktree, turn_budget=12), sb)
     last = results_of(seen[11])
@@ -1181,13 +1344,21 @@ def test_an_undeclared_sandbox_install_is_noted_and_refuses_done_once(tmp_path: 
     src.mkdir()
     (src / "requirements.txt").write_text("flask\n")
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording([
-        {"action": "run", "cmd": _FAKE_PIP},
-        {"action": "run", "cmd": "pip() { echo ok; }; pip install -r requirements.txt -e ."},
-        {"action": "done", "summary": "built"},
-        {"action": "write_file", "path": "requirements.txt", "content": "flask\nbcrypt\n"},
-        {"action": "done", "summary": "declared bcrypt"},
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": _FAKE_PIP},
+                {
+                    "action": "run",
+                    "cmd": "pip() { echo ok; }; pip install -r requirements.txt -e .",
+                },
+                {"action": "done", "summary": "built"},
+                {"action": "write_file", "path": "requirements.txt", "content": "flask\nbcrypt\n"},
+                {"action": "done", "summary": "declared bcrypt"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         result = adapter.run(make_packet(sb.worktree), sb)
     assert result.turns_used == 5
@@ -1202,19 +1373,29 @@ def test_a_declared_or_insisted_install_ends_the_session(tmp_path: Path) -> None
     src.mkdir()
     (src / "requirements.txt").write_text("bcrypt==4.1.0\n")
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(recording([
-        {"action": "run", "cmd": _FAKE_PIP},
-        {"action": "done", "summary": "built"},
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": _FAKE_PIP},
+                {"action": "done", "summary": "built"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         assert adapter.run(make_packet(sb.worktree), sb).turns_used == 2
     assert "NOTE:" not in observations(seen[1])[0]
     (src / "requirements.txt").unlink()
-    adapter = ProxyAgentAdapter(recording([
-        {"action": "run", "cmd": _FAKE_PIP},
-        {"action": "done", "summary": "built"},
-        {"action": "done", "summary": "it is not imported"},
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": _FAKE_PIP},
+                {"action": "done", "summary": "built"},
+                {"action": "done", "summary": "it is not imported"},
+            ],
+            seen,
+        )
+    )
     with Sandbox(src) as sb:
         assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
 
@@ -1223,11 +1404,17 @@ def test_native_sessions_get_the_install_note_and_done_refusal(tmp_path: Path) -
     src = tmp_path / "src"
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
-    adapter = ProxyAgentAdapter(no_json, tool_complete_fn=tool_turns([
-        [("run", {"cmd": _FAKE_PIP})],
-        [("done", {"summary": "built"})],
-        [("done", {"summary": "built"})],
-    ], seen))
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [("run", {"cmd": _FAKE_PIP})],
+                [("done", {"summary": "built"})],
+                [("done", {"summary": "built"})],
+            ],
+            seen,
+        ),
+    )
     with Sandbox(src) as sb:
         assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
     assert f"NOTE: {_BCRYPT_NOTE}" in results_of(seen[1])[0]["content"]

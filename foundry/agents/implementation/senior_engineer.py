@@ -1,6 +1,6 @@
 """Shared implementation-layer identifiers.
 
-``NODE_ID`` is the seq namespace ticket tasks are minted under (``tickets.py``):
+``NODE_ID`` is the seq namespace ticket tasks are minted under (``tickets/``):
 changing it would change every ticket task's ``Seq`` and so its merge order on
 resume. The ``*_KIND`` tags are the ``Artifact.kind`` values the planner stamps
 on its SystemDesign / OwnershipMap handles.

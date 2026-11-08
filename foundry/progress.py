@@ -1,4 +1,5 @@
-"""Per-call progress lines on stderr when ``FOUNDRY_PROGRESS`` is on.
+"""Per-call progress lines: on stderr when ``FOUNDRY_PROGRESS`` is on, and to the
+run's :func:`sink` when one is installed (the Workshop's live view).
 
 A planner pass or an agent session can run for minutes inside one graph node, so
 node-level progress alone looks hung; each model call and agent session logs its
@@ -6,25 +7,54 @@ start and its end (duration, tokens, run total against the cap)."""
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextvars import ContextVar
 from typing import Any
+
+# A ContextVar so concurrent runs in one process each reach their own listener. The
+# graph's node threads (LangGraph), the work pool's workers and the planner's epic
+# pool each run in a copy of the submitting context, so the sink follows the run.
+_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("foundry_progress_sink", default=None)
+
+
+def env_flag(name: str) -> bool:
+    """An opt-in env switch: on unless unset, empty, 0, false or no."""
+    return os.environ.get(name, "").strip().lower() not in ("", "0", "false", "no")
 
 
 def enabled() -> bool:
-    return os.environ.get("FOUNDRY_PROGRESS", "").strip().lower() not in ("", "0", "false", "no")
+    return env_flag("FOUNDRY_PROGRESS")
 
 
-def log(message: str) -> None:
-    if enabled():
-        print(f"[{time.strftime('%H:%M:%S')}] {message}", file=sys.stderr, flush=True)
+@contextlib.contextmanager
+def sink(cb: Callable[[str], None]) -> Iterator[None]:
+    """Send every :func:`log` line in this context to ``cb`` for the duration."""
+    token = _SINK.set(cb)
+    try:
+        yield
+    finally:
+        _SINK.reset(token)
+
+
+def log(message: str, *, stderr: bool | None = None) -> None:
+    """``stderr``: print whatever ``FOUNDRY_PROGRESS`` says (None), always or never.
+    The sink gets the line either way; a failing sink never breaks the run."""
+    line = f"[{time.strftime('%H:%M:%S')}] {message}"
+    if enabled() if stderr is None else stderr:
+        print(line, file=sys.stderr, flush=True)
+    cb = _SINK.get()
+    if cb is not None:
+        with contextlib.suppress(Exception):
+            cb(line)
 
 
 def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter: Any) -> None:
     """``label`` done in Ns, with this call's weighted tokens and the run total."""
-    if not enabled():
+    if _SINK.get() is None and not enabled():
         return
     from foundry.proxy.token_meter import weighted_tokens
 

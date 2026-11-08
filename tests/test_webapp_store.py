@@ -14,10 +14,18 @@ from webapp.store import BuildStore
 
 def _rec(build_id: str, floor: int) -> dict:
     return {
-        "id": build_id, "floor": floor, "request": "build a thing", "mode": "assistant",
-        "backend": "mock", "adapter": "stub", "slots": 1, "status": "done",
-        "passed": True, "gates": {"build": {"status": "PASS"}},
-        "out_base": None, "created_at": "2026-06-30",
+        "id": build_id,
+        "floor": floor,
+        "request": "build a thing",
+        "mode": "assistant",
+        "backend": "mock",
+        "adapter": "stub",
+        "slots": 1,
+        "status": "done",
+        "passed": True,
+        "gates": {"build": {"status": "PASS"}},
+        "out_base": None,
+        "created_at": "2026-06-30",
     }
 
 

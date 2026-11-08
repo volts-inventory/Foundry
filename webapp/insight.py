@@ -71,8 +71,8 @@ def read_json_body(headers: Any, rfile: Any, limit: int | None = None) -> dict[s
         raise BodyError(400, "request body is not valid UTF-8") from None
     except json.JSONDecodeError as exc:
         raise BodyError(
-            400, f"invalid JSON in request body: {exc.msg} (line {exc.lineno}, "
-                 f"column {exc.colno})") from None
+            400, f"invalid JSON in request body: {exc.msg} (line {exc.lineno}, column {exc.colno})"
+        ) from None
     if obj is None:
         return {}
     if not isinstance(obj, dict):
@@ -98,12 +98,18 @@ def read_ledger(state_dir: str | Path, thread_id: str) -> tuple[int, float]:
         return 0, 0.0
 
 
-def meter_fields(used: int, cap: int | None, elapsed_s: float,
-                 time_cap_s: float | None = None) -> dict[str, Any]:
+def meter_fields(
+    used: int, cap: int | None, elapsed_s: float, time_cap_s: float | None = None
+) -> dict[str, Any]:
     """The meter as the browser reads it. ``at`` (epoch seconds) lets a client tick
     the clock forward from an event it replays later."""
-    return {"used": int(used), "cap": cap, "elapsed_s": round(float(elapsed_s), 1),
-            "time_cap_s": time_cap_s, "at": round(time.time(), 1)}
+    return {
+        "used": int(used),
+        "cap": cap,
+        "elapsed_s": round(float(elapsed_s), 1),
+        "time_cap_s": time_cap_s,
+        "at": round(time.time(), 1),
+    }
 
 
 class MeterWatch:
@@ -111,10 +117,15 @@ class MeterWatch:
     spend moves (at most one per ``min_gap`` seconds). Elapsed time is counted here
     too: the ledger only saves it when a call is charged."""
 
-    def __init__(self, state_dir: str | Path, thread_id: str,
-                 emit: Callable[[dict[str, Any]], None],
-                 caps: Callable[[], tuple[int | None, float | None]],
-                 interval: float = 2.0, min_gap: float = 5.0) -> None:
+    def __init__(
+        self,
+        state_dir: str | Path,
+        thread_id: str,
+        emit: Callable[[dict[str, Any]], None],
+        caps: Callable[[], tuple[int | None, float | None]],
+        interval: float = 2.0,
+        min_gap: float = 5.0,
+    ) -> None:
         self.state_dir, self.thread_id = state_dir, thread_id
         self.emit, self.caps = emit, caps
         self.interval, self.min_gap = interval, min_gap
@@ -132,8 +143,9 @@ class MeterWatch:
 
     def start(self) -> None:
         self.emit({"type": "meter", **self.snapshot()})
-        self._thread = threading.Thread(target=self._loop, daemon=True,
-                                        name=f"meter-{self.thread_id}")
+        self._thread = threading.Thread(
+            target=self._loop, daemon=True, name=f"meter-{self.thread_id}"
+        )
         self._thread.start()
 
     def _loop(self) -> None:
@@ -168,8 +180,9 @@ def start_meter(pid: str, watch: MeterWatch) -> None:
     watch.start()
 
 
-def finish_meter(pid: str, state_dir: str | Path, cap: int | None,
-                 time_cap_s: float | None = None) -> dict[str, Any]:
+def finish_meter(
+    pid: str, state_dir: str | Path, cap: int | None, time_cap_s: float | None = None
+) -> dict[str, Any]:
     """The build's final meter reading; stops its watcher if one is running, so no
     meter event can land after the floor's ``done``."""
     with _WATCH_LOCK:
@@ -228,8 +241,7 @@ class BuildQueue:
         """(pid, position) for every waiting floor whose position moved since it was
         last told — what to announce after someone joins or leaves the line."""
         with self._lock:
-            out = [(pid, i + 1) for i, pid in enumerate(self._ids)
-                   if self._told.get(pid) != i + 1]
+            out = [(pid, i + 1) for i, pid in enumerate(self._ids) if self._told.get(pid) != i + 1]
             for pid, pos in out:
                 self._told[pid] = pos
             return out
@@ -284,12 +296,22 @@ _MAX_NOTES = 6
 MAX_FIX_ATTEMPTS = 20
 
 # Triage notes that explain what the fixer and the ticket workers ran into.
-_FIX_NOTES = frozenset({"ticket-failed", "token-cap", "ticket-skipped", "fix-scope",
-                        "write-scope", "wave-overlay", "contract-change"})
+_FIX_NOTES = frozenset(
+    {
+        "ticket-failed",
+        "token-cap",
+        "ticket-skipped",
+        "fix-scope",
+        "write-scope",
+        "wave-overlay",
+        "contract-change",
+    }
+)
 
 
-def gate_rows(state: Mapping[str, Any] | None,
-              fallback: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+def gate_rows(
+    state: Mapping[str, Any] | None, fallback: Mapping[str, Mapping[str, Any]]
+) -> list[dict[str, Any]]:
     """The newest verdict per gate with its findings (truncated), from the durable
     state; the floor's streamed gate pills when there is no state to read."""
     newest: dict[str, Any] = {}
@@ -298,30 +320,47 @@ def gate_rows(state: Mapping[str, Any] | None,
         if name and (name not in newest or _attr(g, "seq") > _attr(newest[name], "seq")):
             newest[name] = g
     if not newest:
-        return [{"name": n, "status": _status(v.get("status")), "advisory": bool(v.get("advisory")),
-                 "findings": [], "more": 0} for n, v in fallback.items()]
+        return [
+            {
+                "name": n,
+                "status": _status(v.get("status")),
+                "advisory": bool(v.get("advisory")),
+                "findings": [],
+                "more": 0,
+            }
+            for n, v in fallback.items()
+        ]
     rows = []
     for name, g in newest.items():
         findings = [str(f) for f in (_attr(g, "findings") or ()) if str(f).strip()]
-        rows.append({
-            "name": name, "status": _status(_attr(g, "status")),
-            "advisory": bool(_attr(g, "advisory", False)),
-            "findings": [_clip(f, _FINDING_CHARS) for f in findings[:_MAX_FINDINGS]],
-            "more": max(0, len(findings) - _MAX_FINDINGS),
-        })
+        rows.append(
+            {
+                "name": name,
+                "status": _status(_attr(g, "status")),
+                "advisory": bool(_attr(g, "advisory", False)),
+                "findings": [_clip(f, _FINDING_CHARS) for f in findings[:_MAX_FINDINGS]],
+                "more": max(0, len(findings) - _MAX_FINDINGS),
+            }
+        )
     return rows
 
 
 def fix_notes(state: Mapping[str, Any] | None, failing: Iterable[str]) -> list[dict[str, str]]:
     """The newest triage notes about the failing gates and the fix work, oldest first."""
     names = set(failing) | _FIX_NOTES
-    notes = [t for t in (state or {}).get("gate_triage") or ()
-             if str(_attr(t, "name", "")) in names or "fix" in str(_attr(t, "produced_by", ""))]
+    notes = [
+        t
+        for t in (state or {}).get("gate_triage") or ()
+        if str(_attr(t, "name", "")) in names or "fix" in str(_attr(t, "produced_by", ""))
+    ]
     notes.sort(key=lambda t: _attr(t, "seq"))
     rows: dict[tuple[str, str], dict[str, str]] = {}
-    for t in notes:   # the same note repeated by each pass reads once, at its newest spot
-        row = {"name": str(_attr(t, "name", "")), "by": str(_attr(t, "produced_by", "")),
-               "text": _clip(_attr(t, "explanation", ""), _NOTE_CHARS)}
+    for t in notes:  # the same note repeated by each pass reads once, at its newest spot
+        row = {
+            "name": str(_attr(t, "name", "")),
+            "by": str(_attr(t, "produced_by", "")),
+            "text": _clip(_attr(t, "explanation", ""), _NOTE_CHARS),
+        }
         key = (row["name"], row["text"])
         rows.pop(key, None)
         rows[key] = row
@@ -357,11 +396,24 @@ def _first_line(reason: str) -> str:
     return "an unexpected error"
 
 
-def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attempts: int,
-                resumable: bool, state: Mapping[str, Any] | None,
-                gates: Mapping[str, Mapping[str, Any]], meter: Mapping[str, Any] | None,
-                draft_files: int, time_cap_s: float | None = None) -> dict[str, Any]:
+def halt_report(
+    *,
+    phase: str,
+    reason: str,
+    token_cap: int | None,
+    max_fix_attempts: int,
+    resumable: bool,
+    state: Mapping[str, Any] | None,
+    gates: Mapping[str, Mapping[str, Any]],
+    meter: Mapping[str, Any] | None,
+    draft_files: int,
+    time_cap_s: float | None = None,
+    draft_status: str = "",
+) -> dict[str, Any]:
     """Why a floor ended without shipping, in plain words, and what to do next.
+
+    ``draft_status`` is the run's DRAFT-STATUS.md (what was built, what is left),
+    passed through as-is for the panel to show.
 
     ``actions`` are what the panel's buttons do: ``resume`` posts ``body`` to the
     floor's resume route, ``retry`` opens the Retry-with form, ``files`` opens the
@@ -377,8 +429,9 @@ def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attem
     detail = ""
 
     def resume(label: str, body: Mapping[str, Any] | None = None, primary: bool = True) -> None:
-        actions.append({"kind": "resume", "label": label, "body": dict(body or {}),
-                        "primary": primary})
+        actions.append(
+            {"kind": "resume", "label": label, "body": dict(body or {}), "primary": primary}
+        )
 
     if phase in ("stopped", "paused"):
         verb = "paused" if phase == "paused" else "stopped"
@@ -389,56 +442,75 @@ def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attem
     elif phase == "token_cap":
         title = "Out of tokens"
         cap = token_cap or used
-        cause = (f"It used {used:,} of its {cap:,}-token cap and stopped at a clean checkpoint."
-                 if cap else "It reached its token cap and stopped at a clean checkpoint.")
+        cause = (
+            f"It used {used:,} of its {cap:,}-token cap and stopped at a clean checkpoint."
+            if cap
+            else "It reached its token cap and stopped at a clean checkpoint."
+        )
         new_cap = _nice_cap(max(cap * 2, used + cap, 10_000))
         nxt = "Raise the cap and resume — the tokens already spent carry over."
         resume(f"Raise the token cap to {new_cap:,} and resume", {"token_cap": new_cap})
         resume("Resume with no token cap", {"token_cap": 0}, primary=False)
     elif phase == "time_cap":
         title = "Out of time"
-        cause = (f"It ran for {_minutes(elapsed)} and reached its time cap, so it stopped "
-                 "at a clean checkpoint." if elapsed else
-                 "It reached its time cap and stopped at a clean checkpoint.")
+        cause = (
+            f"It ran for {_minutes(elapsed)} and reached its time cap, so it stopped "
+            "at a clean checkpoint."
+            if elapsed
+            else "It reached its time cap and stopped at a clean checkpoint."
+        )
         nxt = "The time spent carries over, so raise the cap past it and resume."
         detail = str(reason or "")
         cap_min = (time_cap_s or elapsed) / 60
         new_min = _nice_minutes(max(cap_min * 2, elapsed / 60 + max(cap_min, 15)))
-        resume(f"Raise the time cap to {new_min} minutes and resume",
-               {"time_cap_minutes": new_min})
+        resume(f"Raise the time cap to {new_min} minutes and resume", {"time_cap_minutes": new_min})
         resume("Resume with no time cap", {"time_cap_minutes": 0}, primary=False)
     elif phase == "error":
         title = "Build error"
         cause = f"The build stopped on an error: {_first_line(reason)}"
-        nxt = ("Resume from the last checkpoint; if the same error comes back, the "
-               "details below say where it came from.")
+        nxt = (
+            "Resume from the last checkpoint; if the same error comes back, the "
+            "details below say where it came from."
+        )
         detail = str(reason or "")
         resume("Resume from the last checkpoint")
     elif phase == "interrupted":
         title = "Interrupted"
         cause = "The server restarted while this build was running."
-        nxt = ("Resume continues from its last checkpoint." if resumable else
-               "It never reached a checkpoint, so it can't be resumed — start it again "
-               "as a new build.")
+        nxt = (
+            "Resume continues from its last checkpoint."
+            if resumable
+            else "It never reached a checkpoint, so it can't be resumed — start it again "
+            "as a new build."
+        )
         resume("Resume")
     else:
         title = "Held at the gate"
-        tried = (f" after {_plural(int(fixes), 'fix attempt')}" if isinstance(fixes, int)
-                 and not isinstance(fixes, bool) and fixes else "")
+        tried = (
+            f" after {_plural(int(fixes), 'fix attempt')}"
+            if isinstance(fixes, int) and not isinstance(fixes, bool) and fixes
+            else ""
+        )
         if failing_names:
             what = ", ".join(n.upper() for n in failing_names)
-            cause = (f"The {what} gate{'s' if len(failing_names) > 1 else ''} did not pass"
-                     f"{tried}, so nothing shipped.")
+            cause = (
+                f"The {what} gate{'s' if len(failing_names) > 1 else ''} did not pass"
+                f"{tried}, so nothing shipped."
+            )
         else:
             cause = f"A gate did not pass{tried}, so nothing shipped."
         more = min(MAX_FIX_ATTEMPTS, max_fix_attempts + 3)
         if more > max_fix_attempts:
-            nxt = ("Give the fixer more attempts: it resumes at the failing check with the "
-                   "findings below.")
+            nxt = (
+                "Give the fixer more attempts: it resumes at the failing check with the "
+                "findings below."
+            )
             resume(f"Resume with more fix attempts ({more})", {"max_fix_attempts": more})
         else:
-            nxt = ("The fix budget is already at its maximum — read the findings below, "
-                   "then retry or rephrase the request.")
+            nxt = (
+                "The fix budget is already at its maximum — read the findings below, "
+                "then retry or rephrase the request."
+            )
             resume("Resume", {})
     if not resumable:
         actions = []
@@ -447,16 +519,26 @@ def halt_report(*, phase: str, reason: str, token_cap: int | None, max_fix_attem
     else:
         actions.append({"kind": "retry", "label": "Retry with…", "primary": False})
     if draft_files:
-        actions.append({"kind": "files", "primary": False,
-                        "label": f"Open the draft ({_plural(draft_files, 'file')})"})
+        actions.append(
+            {
+                "kind": "files",
+                "primary": False,
+                "label": f"Open the draft ({_plural(draft_files, 'file')})",
+            }
+        )
     return {
-        "phase": phase, "title": title, "cause": cause, "next": nxt, "detail": detail,
-        "gates": failing, "passed_gates": [r["name"] for r in rows if r["status"] == "pass"],
-        "fixes": {"attempts": fixes if isinstance(fixes, int) else None,
-                  "limit": max_fix_attempts},
+        "phase": phase,
+        "title": title,
+        "cause": cause,
+        "next": nxt,
+        "detail": detail,
+        "gates": failing,
+        "passed_gates": [r["name"] for r in rows if r["status"] == "pass"],
+        "fixes": {"attempts": fixes if isinstance(fixes, int) else None, "limit": max_fix_attempts},
         "notes": fix_notes(state, failing_names),
         "meter": dict(meter) if meter else None,
         "draft_files": draft_files,
+        "draft_status": draft_status,
         "resumable": resumable,
         "actions": actions,
     }
@@ -492,38 +574,52 @@ def tickets_from_log(log: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]:
             row["title"] = str(e.get("title") or row["title"])
         elif t == "task":
             tid = str(e.get("ticket_id", ""))
-            row = rows.setdefault(tid, {"id": tid, "title": str(e.get("title", "")),
-                                        "status": "planned"})
-            row["status"] = {"start": "in progress", "done": "done",
-                             "failed": "failed"}.get(str(e.get("phase")), row["status"])
+            row = rows.setdefault(
+                tid, {"id": tid, "title": str(e.get("title", "")), "status": "planned"}
+            )
+            row["status"] = {"start": "in progress", "done": "done", "failed": "failed"}.get(
+                str(e.get("phase")), row["status"]
+            )
     return [r for r in rows.values() if r["id"]]
 
 
 _STEPS = (("install", "Install"), ("build", "Build"), ("run", "Run"), ("test", "Test"))
 
 
-def run_card(*, manifest: Mapping[str, Any] | None, stack: Any,
-             tickets: list[dict[str, str]], meter: Mapping[str, Any] | None) -> dict[str, Any]:
+def run_card(
+    *,
+    manifest: Mapping[str, Any] | None,
+    stack: Any,
+    tickets: list[dict[str, str]],
+    meter: Mapping[str, Any] | None,
+) -> dict[str, Any]:
     """How to run what shipped, and what it took to build it."""
     st: Mapping[str, Any] = (manifest or {}).get("stack") or {}
     if not st and stack is not None:
-        st = {k: str(v) for k, v in (stack.model_dump() if hasattr(stack, "model_dump")
-                                     else dict(stack)).items() if v}
+        st = {
+            k: str(v)
+            for k, v in (
+                stack.model_dump() if hasattr(stack, "model_dump") else dict(stack)
+            ).items()
+            if v
+        }
     steps = [{"label": label, "cmd": str(st[key])} for key, label in _STEPS if st.get(key)]
     usage: Mapping[str, Any] = (manifest or {}).get("model_usage") or {}
     tokens_in = int(usage.get("total_tokens_in", 0)) + int(usage.get("agent_tokens_in", 0))
     tokens_out = int(usage.get("total_tokens_out", 0)) + int(usage.get("agent_tokens_out", 0))
     return {
         "source": "manifest" if manifest else ("state" if st else "none"),
-        "stack": " · ".join(str(st[k]) for k in ("language", "framework", "package_manager")
-                            if st.get(k)),
+        "stack": " · ".join(
+            str(st[k]) for k in ("language", "framework", "package_manager") if st.get(k)
+        ),
         "steps": steps,
         "models": {str(k): list(v) for k, v in (usage.get("models_by_tier") or {}).items()},
         "served_models": list(usage.get("served_models") or ()),
         "calls": int(usage.get("model_calls", 0)),
         "sessions": int(usage.get("agent_sessions", 0)),
         "tokens": {
-            "in": tokens_in, "out": tokens_out,
+            "in": tokens_in,
+            "out": tokens_out,
             "cache_read": int(usage.get("total_cache_read_tokens", 0))
             + int(usage.get("agent_cache_read_tokens", 0)),
             "cache_write": int(usage.get("total_cache_creation_tokens", 0))
@@ -531,8 +627,10 @@ def run_card(*, manifest: Mapping[str, Any] | None, stack: Any,
         },
         "cost_usd": round(int((manifest or {}).get("estimated_cost_microusd") or 0) / 1e6, 4),
         "tickets": tickets,
-        "gates": [{"name": str(g.get("name")), "status": str(g.get("status"))}
-                  for g in (manifest or {}).get("gates") or ()],
+        "gates": [
+            {"name": str(g.get("name")), "status": str(g.get("status"))}
+            for g in (manifest or {}).get("gates") or ()
+        ],
         "meter": dict(meter) if meter else None,
         "generated_at": str((manifest or {}).get("generated_at") or ""),
     }

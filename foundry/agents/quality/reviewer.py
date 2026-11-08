@@ -43,7 +43,9 @@ _DETERMINISM_NOTE = (
 
 
 def make_reviewer_node(
-    rt: AgentRuntime, *, resolve: ArtifactResolver | None,
+    rt: AgentRuntime,
+    *,
+    resolve: ArtifactResolver | None,
     resolve_blob: BlobResolver | None = None,
 ) -> NodeFn:
     """Build the quality ``reviewer`` node: one judge call + derived test records.
@@ -56,8 +58,14 @@ def make_reviewer_node(
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         criteria = read_criteria(state, resolve)
         result, note = review(
-            rt, state, config, node_id=_NODE_ID, role="Reviewer", criteria=criteria,
-            resolve=resolve, resolve_blob=resolve_blob,
+            rt,
+            state,
+            config,
+            node_id=_NODE_ID,
+            role="Reviewer",
+            criteria=criteria,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
         )
         verdict = result.gate_result
         request_id = result.completion.request_id

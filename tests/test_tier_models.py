@@ -32,7 +32,7 @@ def test_env_override_overlays_a_single_tier(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("FOUNDRY_MODEL_T2", raising=False)
     monkeypatch.delenv("FOUNDRY_MODEL_T3", raising=False)
     m = _tier_models("claude-cli")
-    assert m["T1"] == "claude-opus-4-8-20990101"        # overridden
+    assert m["T1"] == "claude-opus-4-8-20990101"  # overridden
     assert m["T2"] == _default_tier_models("claude-cli")["T2"]  # default kept
 
 

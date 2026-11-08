@@ -104,6 +104,4 @@ def make_checkpointer(db_path: str | Path = ":memory:") -> FoundryCheckpointer:
     backend = os.environ.get("FOUNDRY_CHECKPOINTER", "sqlite").strip().lower()
     if backend in ("", "sqlite"):
         return FoundryCheckpointer(db_path)
-    raise ValueError(
-        f"unknown FOUNDRY_CHECKPOINTER {backend!r} (only 'sqlite' is supported)"
-    )
+    raise ValueError(f"unknown FOUNDRY_CHECKPOINTER {backend!r} (only 'sqlite' is supported)")

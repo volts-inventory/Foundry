@@ -26,8 +26,7 @@ _SEQ = Seq("run", 1, 1, "planner", 0)
 
 
 def _ticket(tid: str, files: tuple[str, ...], **kw: object) -> Ticket:
-    return Ticket(id=tid, title=tid, specialty=Specialty.BACKEND, files=files, seq=_SEQ,
-                  **kw)  # type: ignore[arg-type]
+    return Ticket(id=tid, title=tid, specialty=Specialty.BACKEND, files=files, seq=_SEQ, **kw)  # type: ignore[arg-type]
 
 
 # ---- agents never write feature files ------------------------------------------
@@ -40,8 +39,13 @@ def test_no_ticket_may_write_a_feature_file_anywhere() -> None:
 
 
 def test_the_planner_drops_feature_files_from_ticket_scopes() -> None:
-    raw = [{"id": "T1", "specialty": "test",
-            "files": ["tests/features/store.feature", "tests/steps/test_store.py"]}]
+    raw = [
+        {
+            "id": "T1",
+            "specialty": "test",
+            "files": ["tests/features/store.feature", "tests/steps/test_store.py"],
+        }
+    ]
     tickets, _, concerns = _build_tickets(raw, _SEQ, _SEQ, set())
     assert tickets[0].files == ("tests/steps/test_store.py",)
     assert any("tests/features/store.feature" in c for c in concerns)
@@ -51,14 +55,20 @@ def test_the_planner_drops_feature_files_from_ticket_scopes() -> None:
 
 
 def test_cucumber_tickets_run_their_scenarios_through_the_bdd_command() -> None:
-    stack = StackDecision(language="typescript", test="npm test",
-                          bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT")
-    rules = " ".join(scenario_rules(("features/steps/t1.steps.ts",),
-                                    {"features/T1.feature": ["AC-1"]}, stack))
+    stack = StackDecision(
+        language="typescript",
+        test="npm test",
+        bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT",
+    )
+    rules = " ".join(
+        scenario_rules(("features/steps/t1.steps.ts",), {"features/T1.feature": ["AC-1"]}, stack)
+    )
     assert "features/T1.feature (Scenario: AC-1)" in rules
     assert "npx cucumber-js" in rules and "undefined or skipped step" in rules
-    assert scenario_verify(("features/steps/t1.steps.ts",), {"features/T1.feature": ["AC-1"]},
-                           stack) == {}
+    assert (
+        scenario_verify(("features/steps/t1.steps.ts",), {"features/T1.feature": ["AC-1"]}, stack)
+        == {}
+    )
 
 
 def test_a_test_ticket_is_never_told_a_paired_test_ticket_binds_its_scenarios() -> None:
@@ -78,15 +88,18 @@ def test_each_feature_file_is_bound_from_exactly_one_step_module() -> None:
     scenarios = {"features/T1.feature": ["AC-1"], "features/T2.feature": ["AC-2"]}
     files = ("tests/test_routes.py", "tests/test_t1.py", "tests/test_helpers.py")
     rules = " ".join(scenario_rules(files, scenarios, python, test=True, ticket_id="T1"))
-    assert ('in tests/test_t1.py ONLY, the path relative to it: '
-            'scenarios("../features/T1.feature") scenarios("../features/T2.feature")') in rules
+    assert (
+        "in tests/test_t1.py ONLY, the path relative to it: "
+        'scenarios("../features/T1.feature") scenarios("../features/T2.feature")'
+    ) in rules
     assert "tests/test_routes.py, tests/test_helpers.py must not call scenarios()" in rules
     verify = scenario_verify(files, scenarios, python, "T1")["scenarios"]
     assert verify.endswith("pytest -rA tests/test_t1.py")
     assert "test_routes.py" not in verify
     # Without a ticket-named module, the first one that is not a helper.
-    first = scenario_verify(("tests/test_helpers.py", "tests/test_a.py", "tests/test_b.py"),
-                            scenarios, python)["scenarios"]
+    first = scenario_verify(
+        ("tests/test_helpers.py", "tests/test_a.py", "tests/test_b.py"), scenarios, python
+    )["scenarios"]
     assert first.endswith("-rA tests/test_a.py")
 
 
@@ -115,8 +128,9 @@ def test_a_scoped_gate_runs_a_step_module_under_the_features_dir(tmp_path: Path)
     root = _project(tmp_path, None)
     steps = root / "features" / "step_definitions" / "test_t1_steps.py"
     steps.parent.mkdir()
-    steps.write_text(_STEPS.replace("{expected}", "n").replace(
-        "../features/T1.feature", "../T1.feature"))
+    steps.write_text(
+        _STEPS.replace("{expected}", "n").replace("../features/T1.feature", "../T1.feature")
+    )
     gate = TestGate(scope=frozenset({"features/T1.feature::AC-1"}))
     obs = gate.execute(root)
     assert "features/step_definitions/test_t1_steps.py" in obs.structured["cmd"]
@@ -151,8 +165,11 @@ def test_a_binding_module_that_fails_to_import_is_named_not_rebound(
         assert "tests/test_t1.py binds it, but pytest failed to import that module" in ac1
         assert "binding is already in place" in ac1
         assert "bind that exact gate-owned file" not in ac1
-        assert any("imports `bcrypt_not_installed_here` but its declared dependencies "
-                   "do not include it" in f for f in obs.findings), obs.findings
+        assert any(
+            "imports `bcrypt_not_installed_here` but its declared dependencies "
+            "do not include it" in f
+            for f in obs.findings
+        ), obs.findings
 
 
 def test_a_binding_in_conftest_is_named_as_never_collected(tmp_path: Path) -> None:
@@ -249,9 +266,12 @@ def test_no_collected_test_module_fails_with_a_hint(tmp_path: Path) -> None:
     obs = gate.execute(root)
     assert obs.exit_codes == (5,)
     assert gate.decide(obs) is GateStatus.FAIL
-    assert any(f.startswith("no test modules collected: add tests/test_<name>.py")
-               and "feature files" in f and "test command exited 5" in f
-               for f in obs.findings), obs.findings
+    assert any(
+        f.startswith("no test modules collected: add tests/test_<name>.py")
+        and "feature files" in f
+        and "test command exited 5" in f
+        for f in obs.findings
+    ), obs.findings
 
 
 def test_a_scoped_scenario_absent_from_the_features_fails_closed(tmp_path: Path) -> None:
@@ -264,8 +284,9 @@ def test_a_scoped_scenario_absent_from_the_features_fails_closed(tmp_path: Path)
 def test_the_scope_is_part_of_the_reuse_key() -> None:
     a = TestGate(scope=frozenset({"features/T1.feature::AC-1"}))
     b = TestGate(scope=frozenset({"features/T1.feature::AC-2"}))
-    assert len({a.scanner_rule_version, b.scanner_rule_version,
-                TestGate().scanner_rule_version}) == 3
+    assert (
+        len({a.scanner_rule_version, b.scanner_rule_version, TestGate().scanner_rule_version}) == 3
+    )
 
 
 # ---- the fixer sees failures grouped by feature file ---------------------------
@@ -274,21 +295,25 @@ def test_the_scope_is_part_of_the_reuse_key() -> None:
 def test_bdd_failures_are_grouped_by_feature_file_and_owning_tickets() -> None:
     why = "was not executed — bind it"
     failures = [
-        "[build gate FAILED]", "build command exited 1",
+        "[build gate FAILED]",
+        "build command exited 1",
         "[test gate FAILED]",
-        *(f"BDD criterion E1-AC0{i}: scenario features/E1-T02.feature::E1-AC0{i} {why}"
-          for i in (2, 3)),
+        *(
+            f"BDD criterion E1-AC0{i}: scenario features/E1-T02.feature::E1-AC0{i} {why}"
+            for i in (2, 3)
+        ),
         f"BDD criterion E2-AC01: scenario features/E2-T01.feature::E2-AC01 {why}",
         "FAILED tests/test_x.py::test_y",
     ]
     tickets = [
         _ticket("E1-T02", ("ft/validation.py",), scenario_ids=("E1-AC02", "E1-AC03")),
-        _ticket("E1-T08", ("tests/steps/test_validation.py",),
-                scenario_ids=("E1-AC02", "E1-AC03")),
+        _ticket("E1-T08", ("tests/steps/test_validation.py",), scenario_ids=("E1-AC02", "E1-AC03")),
     ]
     out = group_failures_by_ticket(failures, tickets)
     assert out == (
-        "[build gate FAILED]", "build command exited 1", "[test gate FAILED]",
+        "[build gate FAILED]",
+        "build command exited 1",
+        "[test gate FAILED]",
         "[BDD failures by feature file: 2 group(s)]",
         f"[features/E1-T02.feature] scenarios E1-AC02, E1-AC03 {why} — ticket(s): "
         "E1-T02 (ft/validation.py), E1-T08 (tests/steps/test_validation.py)",
@@ -302,15 +327,20 @@ def test_bdd_failures_are_grouped_by_feature_file_and_owning_tickets() -> None:
 
 
 def test_stack_files_are_the_scripts_the_commands_run() -> None:
-    stack = StackDecision(language="python", test="python3 -m pytest -q",
-                          run="python3 ./smoke.py --ticks 3 && sh scripts/check.sh")
+    stack = StackDecision(
+        language="python",
+        test="python3 -m pytest -q",
+        run="python3 ./smoke.py --ticks 3 && sh scripts/check.sh",
+    )
     assert stack_files(stack) == ("smoke.py", "scripts/check.sh")
 
 
 def test_an_unowned_run_script_goes_to_the_entrypoint_ticket() -> None:
     stack = StackDecision(language="python", run="python3 smoke.py")
-    tickets = [_ticket("T1", ("app/__init__.py", "app/core.py")),
-               _ticket("T2", ("app/main.py",), entrypoint=True)]
+    tickets = [
+        _ticket("T1", ("app/__init__.py", "app/core.py")),
+        _ticket("T2", ("app/main.py",), entrypoint=True),
+    ]
     out, concerns, findings = _own_stack_files(tickets, stack)
     assert out[1].files == ("app/main.py", "smoke.py") and "smoke.py" in out[1].description
     assert out[0] == tickets[0] and concerns and findings == ()
@@ -330,11 +360,16 @@ def test_unowned_python_package_markers_get_an_owner() -> None:
     # The finance-tracker trial: no ticket wrote finance/__init__.py, so mypy saw
     # finance/contracts.py as both `contracts` and `finance.contracts`.
     stack = StackDecision(language="python")
-    tickets = [_ticket("contracts", ("finance/contracts.py",)),
-               _ticket("T1", ("finance/store/db.py", "tests/steps/test_db.py"))]
+    tickets = [
+        _ticket("contracts", ("finance/contracts.py",)),
+        _ticket("T1", ("finance/store/db.py", "tests/steps/test_db.py")),
+    ]
     out, concerns, _ = _own_stack_files(tickets, stack)
-    assert out[0].files == ("finance/contracts.py", "finance/__init__.py",
-                            "finance/store/__init__.py")
+    assert out[0].files == (
+        "finance/contracts.py",
+        "finance/__init__.py",
+        "finance/store/__init__.py",
+    )
     assert out[1] == tickets[1] and concerns
     # Without a contracts ticket the first ticket writing there owns it; owned
     # markers and non-Python stacks are left alone.
@@ -351,10 +386,12 @@ def test_a_module_a_planned_package_would_shadow_becomes_the_package() -> None:
     # ticket got an empty models/__init__.py in wave 0 — `from models import Base`
     # loaded the empty package in every later ticket.
     stack = StackDecision(language="python")
-    tickets = [_ticket("contracts", ("contracts.py",)),
-               _ticket("E1-T02", ("models.py", "tests/test_e1_t02.py")),
-               _ticket("E2-T01", ("auth.py",), reads=("models.py",)),
-               _ticket("E4-T01", ("models/cart.py", "services/cart_service.py"))]
+    tickets = [
+        _ticket("contracts", ("contracts.py",)),
+        _ticket("E1-T02", ("models.py", "tests/test_e1_t02.py")),
+        _ticket("E2-T01", ("auth.py",), reads=("models.py",)),
+        _ticket("E4-T01", ("models/cart.py", "services/cart_service.py")),
+    ]
     out, concerns, _ = _own_stack_files(tickets, stack)
     by_id = {t.id: t for t in out}
     assert by_id["E1-T02"].files == ("models/__init__.py", "tests/test_e1_t02.py")
@@ -369,8 +406,11 @@ def test_a_module_a_planned_package_would_shadow_becomes_the_package() -> None:
     out, _, _ = _own_stack_files(tickets[3:], stack, frozenset({"models.py"}))
     assert "models/__init__.py" in out[0].files
     plain = [_ticket("T1", ("models.py", "app/models.py"))]
-    assert _own_stack_files(plain, stack)[0][0].files == ("models.py", "app/models.py",
-                                                          "app/__init__.py")
+    assert _own_stack_files(plain, stack)[0][0].files == (
+        "models.py",
+        "app/models.py",
+        "app/__init__.py",
+    )
 
 
 # ---- a failed smoke run carries its reason ----------------------------------------
@@ -385,8 +425,9 @@ def test_a_failed_smoke_run_names_the_exit_code_and_error(tmp_path: Path) -> Non
 
 
 def test_a_smoke_command_that_never_exits_is_named_a_server(tmp_path: Path) -> None:
-    (tmp_path / "serve.py").write_text("import time\nprint('listening', flush=True)\n"
-                                       "time.sleep(60)\n")
+    (tmp_path / "serve.py").write_text(
+        "import time\nprint('listening', flush=True)\ntime.sleep(60)\n"
+    )
     gate = SmokeGate((sys.executable, "serve.py"), timeout_s=2)
     obs = gate.execute(tmp_path)
     assert gate.decide(obs) is GateStatus.ERROR

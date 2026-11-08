@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import IO
 from urllib.parse import unquote, urlsplit, urlunsplit
 
-from foundry.execution.sandbox import _force_rmtree
+from foundry.fs import force_rmtree
 
 from .runner import GroundingUnavailable, run_grounding_command
 
@@ -107,9 +107,16 @@ _OPT_OUT = frozenset({"inprocess", "in-process", "none", "off", "0", "false", "n
 #   --fork --kill-child     run the cmd as a child and reap the whole tree on exit
 #   --mount-proc            give the new PID namespace a correct /proc
 UNSHARE_FLAGS: tuple[str, ...] = (
-    "--user", "--map-root-user",
-    "--net", "--mount", "--pid", "--uts", "--ipc",
-    "--fork", "--kill-child", "--mount-proc",
+    "--user",
+    "--map-root-user",
+    "--net",
+    "--mount",
+    "--pid",
+    "--uts",
+    "--ipc",
+    "--fork",
+    "--kill-child",
+    "--mount-proc",
 )
 
 _UNSHARE_BIN = "unshare"
@@ -152,11 +159,28 @@ _FENCE_SETUP_MARKER = "foundry-sandbox-fence: setup failed"
 # Credential stores masked inside the fence (the install step has network, so any
 # readable credential is exfiltratable). A denylist — see the residual note above.
 _HIDDEN_HOME_PATHS: tuple[str, ...] = (
-    ".ssh", ".aws", ".azure", ".config/gcloud", ".config/gh", ".config/git/credentials",
-    ".docker", ".kube", ".gnupg", ".claude", ".claude.json", ".git-credentials",
-    ".netrc", ".npmrc", ".pypirc", ".pip", ".config/pip", ".cargo/credentials",
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/git/credentials",
+    ".docker",
+    ".kube",
+    ".gnupg",
+    ".claude",
+    ".claude.json",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pip",
+    ".config/pip",
+    ".cargo/credentials",
     ".cargo/credentials.toml",
-    ".m2/settings.xml", ".gradle/gradle.properties", ".ccr",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".ccr",
 )
 _HIDDEN_ABS_PATHS: tuple[str, ...] = ("/root/.ccr",)
 # Public CA material kept (read-only) inside a masked dir, by the dir's basename: the
@@ -168,24 +192,70 @@ _KEEP_IN_MASKED: dict[str, tuple[str, ...]] = {
 # Env passed to confined commands: an ALLOWLIST (host env carries cloud/GitHub/API
 # tokens, and the install step has network). Toolchain locations, locale, proxy
 # and CA settings only.
-_ENV_ALLOW = frozenset({
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LANGUAGE", "TERM", "TZ", "CI",
-    "SOURCE_DATE_EPOCH",
-    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
-    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
-    "npm_config_proxy", "npm_config_https_proxy", "npm_config_noproxy", "YARN_HTTPS_PROXY",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    "NODE_EXTRA_CA_CERTS", "PIP_CERT", "CARGO_HTTP_CAINFO", "GIT_SSL_CAINFO",
-    "NIX_SSL_CERT_FILE", "JAVA_TOOL_OPTIONS",
-    "JAVA_HOME", "GOROOT", "GOPATH", "GOPROXY", "GOFLAGS", "CARGO_HOME", "RUSTUP_HOME",
-    "RUSTUP_TOOLCHAIN", "DOTNET_ROOT", "NUGET_PACKAGES", "VIRTUAL_ENV", "NODE_PATH",
-})
+_ENV_ALLOW = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LANGUAGE",
+        "TERM",
+        "TZ",
+        "CI",
+        "SOURCE_DATE_EPOCH",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "all_proxy",
+        "npm_config_proxy",
+        "npm_config_https_proxy",
+        "npm_config_noproxy",
+        "YARN_HTTPS_PROXY",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "PIP_CERT",
+        "CARGO_HTTP_CAINFO",
+        "GIT_SSL_CAINFO",
+        "NIX_SSL_CERT_FILE",
+        "JAVA_TOOL_OPTIONS",
+        "JAVA_HOME",
+        "GOROOT",
+        "GOPATH",
+        "GOPROXY",
+        "GOFLAGS",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "RUSTUP_TOOLCHAIN",
+        "DOTNET_ROOT",
+        "NUGET_PACKAGES",
+        "VIRTUAL_ENV",
+        "NODE_PATH",
+    }
+)
 
 
-_PROXY_VARS = frozenset({
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy",
-    "npm_config_proxy", "npm_config_https_proxy", "YARN_HTTPS_PROXY",
-})
+_PROXY_VARS = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "npm_config_proxy",
+        "npm_config_https_proxy",
+        "YARN_HTTPS_PROXY",
+    }
+)
 _JAVA_PROXY_SECRET = re.compile(r"-D(?:http|https)\.proxy(?:User|Password)=\S*")
 
 
@@ -221,8 +291,9 @@ def toolchain_env() -> dict[str, str]:
     """The host's toolchain, proxy and CA settings (proxy userinfo stripped), minus
     the locations a caller sets itself (``PATH``, ``HOME``) and the host's active
     virtualenv (an install must not target it)."""
-    return {k: v for k, v in _confined_env(None).items()
-            if k not in ("PATH", "HOME", "VIRTUAL_ENV")}
+    return {
+        k: v for k, v in _confined_env(None).items() if k not in ("PATH", "HOME", "VIRTUAL_ENV")
+    }
 
 
 def _host_unix_sockets(limit: int = 4096) -> list[str]:
@@ -558,9 +629,11 @@ class _EgressRelay:
                     conn.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
                     return
                 if self.token and not _proxy_auth_ok(header, self.token):
-                    conn.sendall(b"HTTP/1.1 407 Proxy Authentication Required\r\n"
-                                 b"Proxy-Authenticate: Basic realm=\"foundry\"\r\n"
-                                 b"Connection: close\r\n\r\n")
+                    conn.sendall(
+                        b"HTTP/1.1 407 Proxy Authentication Required\r\n"
+                        b'Proxy-Authenticate: Basic realm="foundry"\r\n'
+                        b"Connection: close\r\n\r\n"
+                    )
                     return
                 target = _split_target(parts[1])
                 if target is None or not egress_allowed(target[0]):
@@ -591,9 +664,7 @@ class _EgressRelay:
         if self._upstream is not None:
             up = socket.create_connection((self._upstream.host, self._upstream.port), 30)
             hp = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
-            up.sendall(
-                f"CONNECT {hp} HTTP/1.1\r\nHost: {hp}\r\n{self._upstream.auth}\r\n".encode()
-            )
+            up.sendall(f"CONNECT {hp} HTTP/1.1\r\nHost: {hp}\r\n{self._upstream.auth}\r\n".encode())
             return up
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
         # Refuse if ANY answer is non-public (DNS pointing at metadata/loopback), and
@@ -624,8 +695,12 @@ _SEATBELT_BIN = "/usr/bin/sandbox-exec"
 _SEATBELT_OK: bool | None = None
 _HIDDEN_HOME_PATHS_DARWIN: tuple[str, ...] = ("Library/Keychains",)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_STATE_DIR_VARS = ("FOUNDRY_AUTH_DIR", "WORKSHOP_STATE_DIR", "FOUNDRY_STATE_DIR",
-                   "WORKSHOP_OUTPUT_DIR")
+_STATE_DIR_VARS = (
+    "FOUNDRY_AUTH_DIR",
+    "WORKSHOP_STATE_DIR",
+    "FOUNDRY_STATE_DIR",
+    "WORKSHOP_OUTPUT_DIR",
+)
 
 # The base profile. Every host path reaches the profile as a ``-D`` parameter, never
 # as profile text, so a build-chosen path cannot inject SBPL. Later rules win, which
@@ -670,7 +745,9 @@ def seatbelt_available() -> bool:
             with contextlib.suppress(GroundingUnavailable):
                 rc, _out, _err = run_grounding_command(
                     (_SEATBELT_BIN, "-p", "(version 1)(allow default)", "/usr/bin/true"),
-                    Path("."), env=None, timeout_s=30.0,
+                    Path("."),
+                    env=None,
+                    timeout_s=30.0,
                 )
                 _SEATBELT_OK = rc == 0
     return _SEATBELT_OK
@@ -691,19 +768,17 @@ def _real(p: str | Path) -> str:
 def _seatbelt_hidden(home: str | None) -> list[str]:
     """Credential stores, Foundry's own ``.env`` and state dir, at both their lexical
     and resolved paths (SBPL matches the resolved one)."""
-    homes = {h for h in (home, os.path.expanduser("~"), pwd.getpwuid(os.getuid()).pw_dir)
-             if h}
-    paths = [os.path.join(h, n) for h in homes
-             for n in (*_HIDDEN_HOME_PATHS, *_HIDDEN_HOME_PATHS_DARWIN)]
+    homes = {h for h in (home, os.path.expanduser("~"), pwd.getpwuid(os.getuid()).pw_dir) if h}
+    paths = [
+        os.path.join(h, n) for h in homes for n in (*_HIDDEN_HOME_PATHS, *_HIDDEN_HOME_PATHS_DARWIN)
+    ]
     paths += _HIDDEN_ABS_PATHS
     # Foundry's own state, wherever the CLI or the Workshop puts it (mirrors the
     # precedence in webapp/auth.py and webapp/server.py, which can't be imported
     # here): the Workshop's auth.json holds the session-cookie HMAC key. A relative
     # setting is resolved against the cwd and the repo root alike.
-    rel = [".env", ".run", *(v for k in _STATE_DIR_VARS
-                             if (v := os.environ.get(k, "").strip()))]
-    paths += [str(Path(root, p).expanduser())
-              for root in (os.getcwd(), _REPO_ROOT) for p in rel]
+    rel = [".env", ".run", *(v for k in _STATE_DIR_VARS if (v := os.environ.get(k, "").strip()))]
+    paths += [str(Path(root, p).expanduser()) for root in (os.getcwd(), _REPO_ROOT) for p in rel]
     out: set[str] = set()
     for p in paths:
         out.update((os.path.abspath(p), _real(p)))
@@ -754,11 +829,16 @@ def seatbelt_profile(
         return " ".join(out)
 
     tmp_roots = sorted({_real(p) for p in ("/tmp", "/var/tmp", tempfile.gettempdir())})
-    trusted = sorted({_real(p) for p in (_REPO_ROOT, sys.prefix, sys.base_prefix,
-                                         os.path.dirname(sys.executable))})
+    trusted = sorted(
+        {
+            _real(p)
+            for p in (_REPO_ROOT, sys.prefix, sys.base_prefix, os.path.dirname(sys.executable))
+        }
+    )
     hidden = _seatbelt_hidden(home)
-    kept = [os.path.join(h, k) for h in hidden
-            for k in _KEEP_IN_MASKED.get(os.path.basename(h), ())]
+    kept = [
+        os.path.join(h, k) for h in hidden for k in _KEEP_IN_MASKED.get(os.path.basename(h), ())
+    ]
     writable = [workdir, private_tmp, *(p for p, rw in binds if rw)]
     readable = [workdir, private_tmp, *(p for p, _ in binds)]
     # getcwd() and realpath() list each ancestor directory: those stay listable.
@@ -779,8 +859,10 @@ def seatbelt_profile(
         f"{refs(writable, '(local unix-socket (subpath {}))')})\n",
         f"(allow network-outbound {refs(writable, '(remote unix-socket (subpath {}))')})\n",
     ]
-    rules += [f'(deny network-outbound (remote ip "localhost:{int(port)}"))\n'
-              for port in sorted(set(deny_ports))]
+    rules += [
+        f'(deny network-outbound (remote ip "localhost:{int(port)}"))\n'
+        for port in sorted(set(deny_ports))
+    ]
     return "".join(rules), params
 
 
@@ -791,8 +873,13 @@ def _run_session(
     when the command exits or times out (``--kill-child`` on Linux)."""
     try:
         proc = subprocess.Popen(
-            argv, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+            argv,
+            cwd=workdir,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
     except FileNotFoundError as exc:
         raise GroundingUnavailable(f"grounding tool not available: {argv[0]!r}") from exc
@@ -804,8 +891,10 @@ def _run_session(
                 buf.append(chunk)
 
     assert proc.stdout is not None and proc.stderr is not None
-    readers = [threading.Thread(target=drain, args=(f, b), daemon=True)
-               for f, b in zip((proc.stdout, proc.stderr), bufs, strict=True)]
+    readers = [
+        threading.Thread(target=drain, args=(f, b), daemon=True)
+        for f, b in zip((proc.stdout, proc.stderr), bufs, strict=True)
+    ]
     for t in readers:
         t.start()
     rc: int | None = None
@@ -841,23 +930,39 @@ def _run_seatbelt(
     upstream = _upstream_from(host_env) if network else None
     relay = _EgressRelay(upstream, tcp=True) if network else None
     try:
-        run_env.update(TMPDIR=private_tmp, XDG_CACHE_HOME=f"{private_tmp}/.cache",
-                       npm_config_cache=f"{private_tmp}/.npm",
-                       GOCACHE=f"{private_tmp}/.cache/go-build")
+        run_env.update(
+            TMPDIR=private_tmp,
+            XDG_CACHE_HOME=f"{private_tmp}/.cache",
+            npm_config_cache=f"{private_tmp}/.npm",
+            GOCACHE=f"{private_tmp}/.cache/go-build",
+        )
         if relay is not None:
             url = f"http://foundry:{relay.token}@127.0.0.1:{relay.port}"
-            for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
-                      "npm_config_https_proxy", "npm_config_proxy", "YARN_HTTPS_PROXY"):
+            for k in (
+                "HTTPS_PROXY",
+                "https_proxy",
+                "HTTP_PROXY",
+                "http_proxy",
+                "npm_config_https_proxy",
+                "npm_config_proxy",
+                "YARN_HTTPS_PROXY",
+            ):
                 run_env[k] = url
             for k in ("NO_PROXY", "no_proxy", "npm_config_noproxy"):
                 run_env[k] = "localhost,127.0.0.1,::1"
             for k in ("ALL_PROXY", "all_proxy"):
                 run_env.pop(k, None)
         profile, params = seatbelt_profile(
-            workdir=str(wd), private_tmp=private_tmp, binds=binds,
-            home=host_env.get("HOME"), network=network,
-            deny_ports=(_loopback_proxy_ports(host_env) | _loopback_proxy_ports(os.environ)
-                        | {_workshop_port()}),
+            workdir=str(wd),
+            private_tmp=private_tmp,
+            binds=binds,
+            home=host_env.get("HOME"),
+            network=network,
+            deny_ports=(
+                _loopback_proxy_ports(host_env)
+                | _loopback_proxy_ports(os.environ)
+                | {_workshop_port()}
+            ),
         )
         return _run_session(
             [_SEATBELT_BIN, *params, "-p", profile, "--", *cmd], wd, run_env, timeout_s
@@ -892,8 +997,13 @@ def run_confined(
     backend = sandbox_backend()
     if backend == "seatbelt":
         return _run_seatbelt(
-            cmd, wd, network=network, env=env, extra_env=extra_env,
-            binds=[(str(p), bool(rw)) for p, rw in bind_list], timeout_s=timeout_s,
+            cmd,
+            wd,
+            network=network,
+            env=env,
+            extra_env=extra_env,
+            binds=[(str(p), bool(rw)) for p, rw in bind_list],
+            timeout_s=timeout_s,
         )
     mount_bin, unshare_bin = shutil.which("mount"), shutil.which(_UNSHARE_BIN)
     if backend != "unshare" or mount_bin is None or unshare_bin is None:
@@ -921,8 +1031,15 @@ def run_confined(
             "forwarder": _FORWARDER,
         }
         argv = [
-            _UNSHARE_BIN, *UNSHARE_FLAGS,
-            sys.executable, "-I", "-S", "-c", _FENCE, json.dumps(cfg), *cmd,
+            _UNSHARE_BIN,
+            *UNSHARE_FLAGS,
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            _FENCE,
+            json.dumps(cfg),
+            *cmd,
         ]
         rc, out, err = run_grounding_command(
             argv, wd, env=_confined_env(env, extra_env), timeout_s=timeout_s
@@ -960,11 +1077,15 @@ class ToolchainCache:
     def env(self) -> dict[str, str]:
         r = self.root
         return {
-            "GOPATH": f"{r}/go", "GOMODCACHE": f"{r}/go/pkg/mod",
+            "GOPATH": f"{r}/go",
+            "GOMODCACHE": f"{r}/go/pkg/mod",
             "CARGO_HOME": f"{r}/cargo",
-            "NUGET_PACKAGES": f"{r}/nuget", "DOTNET_CLI_HOME": f"{r}/dotnet",
-            "MAVEN_OPTS": f"-Dmaven.repo.local={r}/m2", "GRADLE_USER_HOME": f"{r}/gradle",
-            "YARN_CACHE_FOLDER": f"{r}/yarn", "npm_config_store_dir": f"{r}/pnpm",
+            "NUGET_PACKAGES": f"{r}/nuget",
+            "DOTNET_CLI_HOME": f"{r}/dotnet",
+            "MAVEN_OPTS": f"-Dmaven.repo.local={r}/m2",
+            "GRADLE_USER_HOME": f"{r}/gradle",
+            "YARN_CACHE_FOLDER": f"{r}/yarn",
+            "npm_config_store_dir": f"{r}/pnpm",
         }
 
     def close(self) -> None:
@@ -972,7 +1093,7 @@ class ToolchainCache:
             root, self._root = self._root, None
         if root is None:
             return
-        _force_rmtree(Path(root))
+        force_rmtree(Path(root))
 
 
 _OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}
@@ -1025,7 +1146,12 @@ def ground_untrusted(
         binds = (*binds, (cache.root, network))
     if sandbox_enabled():
         return run_confined(
-            cmd, workdir, network=network, env=env, extra_env=extra_env, binds=binds,
+            cmd,
+            workdir,
+            network=network,
+            env=env,
+            extra_env=extra_env,
+            binds=binds,
             timeout_s=timeout_s,
         )
     if network and os.environ.get(_ALLOW_UNSANDBOXED_INSTALL_ENV, "").strip() != "1":

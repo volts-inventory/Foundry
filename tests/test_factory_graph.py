@@ -195,8 +195,7 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
     if handle.kind == "ticket":
         tid = f"T-{handle.seq.local:03d}"
         # No `files`: unrestricted write scope, so the canned diff lands whole.
-        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
-                      seq=handle.seq)
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND, seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -312,9 +311,7 @@ def test_factory_graph_passes_end_to_end_and_opens_one_pr(tmp_path: Any) -> None
     prs = _open_pr_actions(final)
     assert len(prs) == 1
     pr = prs[0]
-    feature_diff_uris = {
-        a.uri for a in final["artifacts"] if a.kind == "feature_diff"
-    }
+    feature_diff_uris = {a.uri for a in final["artifacts"] if a.kind == "feature_diff"}
     assert pr.payload_uri in feature_diff_uris
     assert pr.kind == "open_pr"
     assert final["phase"] == "done"

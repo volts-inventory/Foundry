@@ -162,9 +162,7 @@ class MissingCriteriaResolverError(RuntimeError):
     gate pass."""
 
 
-def live_criterion_ids(
-    state: FactoryState, resolve: ArtifactResolver
-) -> frozenset[str] | None:
+def live_criterion_ids(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str] | None:
     """The criterion ids the newest PRD declares, or ``None`` when no PRD lists any.
 
     Criteria are never tombstoned: a re-plan that keeps a ticket id but drops one

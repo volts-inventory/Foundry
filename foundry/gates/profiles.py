@@ -42,6 +42,7 @@ __all__ = [
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "pytest_bdd_binds",
     "stack_install",
     "stack_profile",
 ]
@@ -81,10 +82,12 @@ def _sh(script: str) -> tuple[str, ...]:
 # replacement for the strict part when no lockfile exists).
 _STRICT_INSTALLS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
     (re.compile(r"npm\s+ci\b"), ("package-lock.json", "npm-shrinkwrap.json"), "npm install"),
-    (re.compile(r"yarn(\s+install)?\s+--(frozen-lockfile|immutable)\b"), ("yarn.lock",),
-     "yarn install"),
-    (re.compile(r"pnpm\s+(install|i)\s+--frozen-lockfile\b"), ("pnpm-lock.yaml",),
-     "pnpm install"),
+    (
+        re.compile(r"yarn(\s+install)?\s+--(frozen-lockfile|immutable)\b"),
+        ("yarn.lock",),
+        "yarn install",
+    ),
+    (re.compile(r"pnpm\s+(install|i)\s+--frozen-lockfile\b"), ("pnpm-lock.yaml",), "pnpm install"),
 )
 _SHELL_META = re.compile(r"[;&|<>`$()]")
 
@@ -102,7 +105,7 @@ def lockfile_tolerant_install(install: str) -> str:
         m = strict.match(cmd)
         if m is None:
             continue
-        rest = cmd[m.end():]
+        rest = cmd[m.end() :]
         test = " || ".join(f"[ -f {f} ]" for f in lockfiles)
         return f"if {test}; then {cmd}; else {loose}{rest}; fi"
     return install
@@ -196,7 +199,8 @@ BDD_RUNNERS: dict[str, str] = {
     "go": (
         "godog (github.com/cucumber/godog v0.16+) has no Cucumber Messages writer; the "
         "gate reads its Cucumber JSON instead. bdd = `go test -count=1 ./bdd`. "
-        "bdd/godog_test.go MUST be exactly:\n" + _GODOG_RUNNER
+        "bdd/godog_test.go MUST be exactly:\n"
+        + _GODOG_RUNNER
         + "It compiles with no step files (the harness wave is checked alone). Each "
         "feature ticket's step file in package bdd (e.g. bdd/<feature>_steps_test.go) "
         "registers its steps in `func init() { register(func(sc *godog.ScenarioContext) "
@@ -208,24 +212,25 @@ BDD_RUNNERS: dict[str, str] = {
         "cucumber-rs has no Cucumber Messages writer; the gate reads its Cucumber "
         "JSON (the crate's `output-json` feature) instead. bdd = `cargo test --quiet "
         "--test cucumber`. Cargo.toml: [dev-dependencies] cucumber = { version = "
-        "\"0.23\", features = [\"output-json\"] }, tokio = { version = \"1\", "
-        "features = [\"macros\", \"rt-multi-thread\"] }; and [[test]] name = "
-        "\"cucumber\", harness = false. Declare no [lib] or [[bin]] section: Cargo "
+        '"0.23", features = ["output-json"] }, tokio = { version = "1", '
+        'features = ["macros", "rt-multi-thread"] }; and [[test]] name = '
+        '"cucumber", harness = false. Declare no [lib] or [[bin]] section: Cargo '
         "finds src/lib.rs, src/main.rs and src/bin/*.rs once the feature tickets write "
         "them, while a declared target whose file is not written yet fails every "
         "build before them (a manifest with only the [[test]] target builds); the "
         "default binary is named after [package] name, so match the run command's "
-        "--bin. tests/cucumber.rs:\n" + _CUCUMBER_RS_RUNNER
+        "--bin. tests/cucumber.rs:\n"
+        + _CUCUMBER_RS_RUNNER
         + "Step attributes MUST use string literals (the gate reads the patterns from "
         "source to reject catch-all matchers)."
     ),
     "javascript": (
-        "bdd = `npx cucumber-js --format \"message:$FOUNDRY_BDD_REPORT\"` exactly (double "
+        'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"` exactly (double '
         "quotes: single quotes stop $FOUNDRY_BDD_REPORT expanding), with "
         "@cucumber/cucumber as a devDependency; `--format json:` is the legacy JSON "
         "report and is rejected. cucumber.json MUST be exactly:\n"
-        + _CUCUMBER_JSON.format(steps="js") +
-        "\nStep files go under features/step_definitions/. \"forceExit\": true is "
+        + _CUCUMBER_JSON.format(steps="js")
+        + '\nStep files go under features/step_definitions/. "forceExit": true is '
         "required: cucumber-js "
         "otherwise waits for every server, socket or timer a step left open, and the "
         "gate kills the hung run; still stop what the steps start in an AfterAll hook. In "
@@ -235,7 +240,7 @@ BDD_RUNNERS: dict[str, str] = {
     "java": (
         "cucumber-jvm writes Cucumber Messages natively: with cucumber-java + "
         "cucumber-junit-platform-engine + junit-platform-suite as test dependencies "
-        "and a @Suite @IncludeEngines(\"cucumber\") class in "
+        'and a @Suite @IncludeEngines("cucumber") class in '
         "src/test/java/RunCucumberTest.java, bdd = `mvn -q -B test "
         "-Dtest=RunCucumberTest -Dsurefire.failIfNoSpecifiedTests=false "
         "-Dcucumber.features=features -Dcucumber.glue=<step package> "
@@ -243,15 +248,15 @@ BDD_RUNNERS: dict[str, str] = {
     ),
     "csharp": (
         "Reqnroll 3.0+ writes Cucumber Messages (SpecFlow cannot): bdd = "
-        "`REQNROLL_FORMATTERS=\"{\\\"formatters\\\":{\\\"message\\\":"
-        "{\\\"outputFilePath\\\":\\\"$FOUNDRY_BDD_REPORT\\\"}}}\" dotnet test "
+        '`REQNROLL_FORMATTERS="{\\"formatters\\":{\\"message\\":'
+        '{\\"outputFilePath\\":\\"$FOUNDRY_BDD_REPORT\\"}}}" dotnet test '
         "<the Reqnroll test project>` with the repo-root features/*.feature files "
         "linked into that project."
     ),
 }
 BDD_RUNNERS["typescript"] = (
     BDD_RUNNERS["javascript"]
-    .replace("bdd = `npx cucumber-js", "bdd = `NODE_OPTIONS=\"--import tsx\" npx cucumber-js")
+    .replace("bdd = `npx cucumber-js", 'bdd = `NODE_OPTIONS="--import tsx" npx cucumber-js')
     .replace(_CUCUMBER_JSON.format(steps="js"), _CUCUMBER_JSON.format(steps="ts"))
     + " TypeScript step files need the tsx loader (tsx as a devDependency): node's "
     "`--import tsx` registers it before cucumber-js imports any step file."
@@ -281,6 +286,11 @@ def bdd_runner_hint(language: str) -> str:
     return BDD_RUNNERS.get(language, "")
 
 
+def pytest_bdd_binds(stack: StackDecision | None) -> bool:
+    """The trusted pytest-bdd harness runs the scenarios (Python with no ``bdd``)."""
+    return stack is None or (stack.language == "python" and not stack.bdd)
+
+
 PROFILES: dict[str, VerificationProfile] = {
     "python": VerificationProfile(
         name="python",
@@ -299,7 +309,8 @@ PROFILES: dict[str, VerificationProfile] = {
             "the repo MUST ship smoke.py that exercises the REAL app headless "
             "(start the service and hit one real endpoint in-process, or run the "
             "CLI end-to-end on sample input) and exits 0 only on success."
-            + _PY_INSTALL_CONTRACT + _BDD_CONTRACT
+            + _PY_INSTALL_CONTRACT
+            + _BDD_CONTRACT
         ),
     ),
     "node-web": VerificationProfile(
@@ -437,27 +448,72 @@ PROFILES: dict[str, VerificationProfile] = {
 
 # Keyword tables for inferring a stack from the request words.
 _GAME_WORDS = (
-    "game", "nes", "snes", "arcade", "tetris", "pong", "pixel", "platformer",
-    "roguelike", "sprite", "tilemap", "stardew", "metroidvania", "shoot-em-up",
-    "sokoban", "breakout", "asteroids",
+    "game",
+    "nes",
+    "snes",
+    "arcade",
+    "tetris",
+    "pong",
+    "pixel",
+    "platformer",
+    "roguelike",
+    "sprite",
+    "tilemap",
+    "stardew",
+    "metroidvania",
+    "shoot-em-up",
+    "sokoban",
+    "breakout",
+    "asteroids",
 )
 _CRYPTO_WORDS = (
-    "encrypt", "decrypt", "cipher", "cryptograph", "password manager",
-    "password vault", "key derivation", "signing service", "e2ee",
+    "encrypt",
+    "decrypt",
+    "cipher",
+    "cryptograph",
+    "password manager",
+    "password vault",
+    "key derivation",
+    "signing service",
+    "e2ee",
 )
 _IAC_WORDS = (
-    "terraform", "cloudformation", "aws infra", "aws infrastructure", "iac",
-    "infrastructure as code", "kubernetes manifests", "k8s cluster",
+    "terraform",
+    "cloudformation",
+    "aws infra",
+    "aws infrastructure",
+    "iac",
+    "infrastructure as code",
+    "kubernetes manifests",
+    "k8s cluster",
 )
-_NODE_WORDS = ("react", "next.js", "nextjs", "vue", "svelte", "node.js", "nodejs",
-               "typescript", "javascript")
+_NODE_WORDS = (
+    "react",
+    "next.js",
+    "nextjs",
+    "vue",
+    "svelte",
+    "node.js",
+    "nodejs",
+    "typescript",
+    "javascript",
+)
 _DOTNET_WORDS = ("c#", "csharp", ".net", "dotnet", "monogame", "asp.net", "xna")
 _RUST_WORDS = ("rust", "cargo", "actix", "tokio", "bevy")
-_JAVA_WORDS = ("java ", "java,", "java.", "spring boot", "springboot", "maven",
-               "libgdx")
+_JAVA_WORDS = ("java ", "java,", "java.", "spring boot", "springboot", "maven", "libgdx")
 # "go" is too short to match bare — require the unambiguous forms.
-_GO_WORDS = ("golang", "go api", "go service", "go server", "go cli",
-             "go backend", "go microservice", "in go", "with go", "ebitengine")
+_GO_WORDS = (
+    "golang",
+    "go api",
+    "go service",
+    "go server",
+    "go cli",
+    "go backend",
+    "go microservice",
+    "in go",
+    "with go",
+    "ebitengine",
+)
 
 
 # Binaries each profile's pinned gates shell out to. A profile whose toolchain is
@@ -510,13 +566,13 @@ def profile_for_request(request: str) -> VerificationProfile:
     if any(w in low for w in _GAME_WORDS):
         if any(w in low for w in ("pygame", "python game", "python")):
             return PROFILES["pygame"]
-        if any(w in low for w in _DOTNET_WORDS):        # MonoGame / C# / XNA game
+        if any(w in low for w in _DOTNET_WORDS):  # MonoGame / C# / XNA game
             return PROFILES["dotnet"]
-        if any(w in low for w in _RUST_WORDS):          # Bevy / Rust game
+        if any(w in low for w in _RUST_WORDS):  # Bevy / Rust game
             return PROFILES["rust"]
-        if any(w in low for w in _GO_WORDS):            # Ebitengine / Go game
+        if any(w in low for w in _GO_WORDS):  # Ebitengine / Go game
             return PROFILES["go"]
-        if any(w in low for w in _JAVA_WORDS):          # libGDX / Java game
+        if any(w in low for w in _JAVA_WORDS):  # libGDX / Java game
             return PROFILES["java-maven"]
         if any(w in low for w in ("phaser", "html5", "canvas", "browser", "javascript", "web")):
             return PROFILES["phaser-web"]
@@ -536,9 +592,18 @@ def profile_for_request(request: str) -> VerificationProfile:
 
 # The language each hand-written profile builds, for a --profile pin.
 _PROFILE_LANGUAGE: dict[str, str] = {
-    "python": "python", "python-app": "python", "pygame": "python", "crypto": "python",
-    "node-web": "javascript", "phaser-web": "javascript", "love2d": "lua", "go": "go",
-    "rust": "rust", "dotnet": "csharp", "java-maven": "java", "iac-terraform": "terraform",
+    "python": "python",
+    "python-app": "python",
+    "pygame": "python",
+    "crypto": "python",
+    "node-web": "javascript",
+    "phaser-web": "javascript",
+    "love2d": "lua",
+    "go": "go",
+    "rust": "rust",
+    "dotnet": "csharp",
+    "java-maven": "java",
+    "iac-terraform": "terraform",
 }
 
 
@@ -592,7 +657,8 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     )
     typecheck = (
         _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, stack.typecheck)
-        if python else stack.typecheck
+        if python
+        else stack.typecheck
     )
     steps = [s for s in (build, typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
@@ -622,11 +688,16 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         build_cmd=build_cmd,
         test_cmd=test_cmd,
         smoke_cmd=_sh(stack.run) if stack.run else None,
-        contract_text="GATES: " + "; ".join(gates) + "."
+        contract_text="GATES: "
+        + "; ".join(gates)
+        + "."
         + (_PY_INSTALL_CONTRACT if python else "")
         + (_BDD_CONTRACT if python and not stack.bdd else "")
-        + (f" BDD: {bdd_runner_hint(stack.language)}"
-           if stack.bdd and bdd_runner_hint(stack.language) else ""),
+        + (
+            f" BDD: {bdd_runner_hint(stack.language)}"
+            if stack.bdd and bdd_runner_hint(stack.language)
+            else ""
+        ),
         python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
@@ -648,17 +719,16 @@ _BDD_EXAMPLES: dict[str, str] = {
     "python": "leave bdd empty (the built-in pytest-bdd harness runs the scenarios)",
     "javascript": 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`',
     "go": "bdd = `go test -count=1 ./bdd` (bdd/godog_test.go: godog writing its "
-          "Cucumber JSON — `cucumber:$FOUNDRY_BDD_REPORT` — the gate converts it)",
+    "Cucumber JSON — `cucumber:$FOUNDRY_BDD_REPORT` — the gate converts it)",
     "rust": "bdd = `cargo test --quiet --test cucumber` (tests/cucumber.rs: cucumber-rs "
-            "writer::Json to $FOUNDRY_BDD_REPORT, the gate converts it)",
+    "writer::Json to $FOUNDRY_BDD_REPORT, the gate converts it)",
     "java": "bdd = `mvn -q -B test -Dtest=RunCucumberTest "
-            "-Dsurefire.failIfNoSpecifiedTests=false -Dcucumber.features=features "
-            "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`",
+    "-Dsurefire.failIfNoSpecifiedTests=false -Dcucumber.features=features "
+    "-Dcucumber.plugin=message:$FOUNDRY_BDD_REPORT`",
     "csharp": "bdd = Reqnroll 3+ `dotnet test` with REQNROLL_FORMATTERS setting the "
-              "message formatter's outputFilePath to $FOUNDRY_BDD_REPORT",
+    "message formatter's outputFilePath to $FOUNDRY_BDD_REPORT",
     "lua": "leave bdd empty (no Cucumber runner the gate reads; scenarios not executed)",
-    "terraform": "leave bdd empty (no Cucumber runner the gate reads; scenarios not "
-                 "executed)",
+    "terraform": "leave bdd empty (no Cucumber runner the gate reads; scenarios not executed)",
 }
 
 

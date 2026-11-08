@@ -39,22 +39,28 @@ class _Calls:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, *, fail: bool = False) -> None:
         self.transport = MockTransport.scripted(
-            {"diagnosing a failed build": json.dumps(_DIAGNOSIS)}, default_text="{}")
+            {"diagnosing a failed build": json.dumps(_DIAGNOSIS)}, default_text="{}"
+        )
         self.fail = fail
 
         def runtime(adapter: Any, store: ArtifactStore) -> AgentRuntime:
             proxy = ModelProviderProxy(self.transport, signer=ZoneBSigner(b"k" * 16, "kid"))
             if self.fail:
+
                 def down(*_a: Any, **_k: Any) -> Any:
                     raise ProxyUnavailable("cloud down")
+
                 proxy.complete = down  # type: ignore[method-assign]
             return AgentRuntime(proxy=proxy, adapter=adapter, cas=store)
 
         monkeypatch.setattr(sched, "_runtime", runtime)
 
     def diagnoses(self) -> list[dict[str, Any]]:
-        return [r for r in self.transport.requests
-                if "diagnosing a failed build" in json.dumps(r.get("system"))]
+        return [
+            r
+            for r in self.transport.requests
+            if "diagnosing a failed build" in json.dumps(r.get("system"))
+        ]
 
 
 class _HybridLocalFixer(_Recorder):
@@ -84,7 +90,8 @@ def _journal(out: FactoryState) -> str:
 
 
 def test_a_local_fix_pass_in_hybrid_gets_the_cloud_diagnosis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _Calls(monkeypatch)
     rec = _HybridLocalFixer(writes=_BROKEN)
@@ -94,17 +101,23 @@ def test_a_local_fix_pass_in_hybrid_gets_the_cloud_diagnosis(
     assert "root cause: app.py has a syntax error in broken()." in lines
     assert "files to edit: app.py" in lines  # nope.py and /etc/passwd are not in the tree
     assert "edit 1: app.py `broken`: close the parameter list" in lines
-    assert not any("nope.py" in line for line in lines[:lines.index("[end of diagnosis]")])
+    assert not any("nope.py" in line for line in lines[: lines.index("[end of diagnosis]")])
     assert "do not: rewrite the module" in lines
     sent = calls.diagnoses()
-    assert sent and sent[0]["model"] == ModelProviderProxy(
-        calls.transport, signer=ZoneBSigner(b"k" * 16, "kid")).tier_models["T1"]
+    assert (
+        sent
+        and sent[0]["model"]
+        == ModelProviderProxy(calls.transport, signer=ZoneBSigner(b"k" * 16, "kid")).tier_models[
+            "T1"
+        ]
+    )
     assert "current content of app.py" in json.dumps(sent[0]["messages"])
     assert "diagnosis from T1" in _journal(out)
 
 
 def test_an_unavailable_cloud_leaves_the_fix_pass_as_it_was(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _Calls(monkeypatch, fail=True)
     rec = _HybridLocalFixer(writes=_BROKEN)
@@ -122,10 +135,15 @@ def test_the_env_switch_turns_it_off(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert not any(line.startswith(_HEAD) for line in rec.packets["fix-1"].prior_failures)
 
 
-@pytest.mark.parametrize("adapter", [_Recorder, _LocalOnly, _HybridCloudFixer],
-                         ids=["cloud-mode", "local-mode", "hybrid-cloud-fix"])
+@pytest.mark.parametrize(
+    "adapter",
+    [_Recorder, _LocalOnly, _HybridCloudFixer],
+    ids=["cloud-mode", "local-mode", "hybrid-cloud-fix"],
+)
 def test_no_diagnosis_without_a_local_attempt_in_hybrid(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: type[_Recorder],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: type[_Recorder],
 ) -> None:
     calls = _Calls(monkeypatch)
     rec = adapter(writes=_BROKEN)
@@ -135,18 +153,27 @@ def test_no_diagnosis_without_a_local_attempt_in_hybrid(
 
 
 def test_a_local_ticket_retry_in_hybrid_gets_the_diagnosis(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _Calls(monkeypatch)
     local = _Recorder(fail_on={"T-001": 1})
     cloud = _Recorder()
-    adapter = TieredAdapter(cloud=cloud, local=local, local_tiers={"T2", "T3"},
-                            local_slot=threading.RLock, escalation_tier="T1")
+    adapter = TieredAdapter(
+        cloud=cloud,
+        local=local,
+        local_tiers={"T2", "T3"},
+        local_slot=threading.RLock,
+        escalation_tier="T1",
+    )
     adapter.name = "recorder"  # type: ignore[misc]
     store = ArtifactStore()
     rt = sched._runtime(adapter, store)
-    out: FactoryState = sched._graph(rt, store, tmp_path).compile().invoke(
-        sched._state(store, [_ticket("T-001", 0, files=("app.py",))]), sched._config())
+    out: FactoryState = (
+        sched._graph(rt, store, tmp_path)
+        .compile()
+        .invoke(sched._state(store, [_ticket("T-001", 0, files=("app.py",))]), sched._config())
+    )
     retry = local.packets["T-001"].prior_failures
     assert retry[0].startswith(_HEAD)
     # app.py is the ticket's own file: allowed though the failed attempt never wrote it.

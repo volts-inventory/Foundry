@@ -71,6 +71,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from foundry.fs import force_rmtree
 from foundry.python_env import activation_env, build_python_env
 from foundry.state.tree_sha import normalized_source_tree
 
@@ -153,30 +154,6 @@ def _tmp_name(digest: str) -> str:
     a uuid make the staging path unique; the final publish stays content-addressed.
     """
     return f".tmp-{digest}-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
-
-
-def _force_rmtree(root: Path) -> None:
-    """``rmtree`` that also removes read-only directories (Go's module cache is
-    written 0555), which a plain ``ignore_errors`` rmtree silently leaves behind.
-    Symlinks are never chmod-ed: each directory is opened O_NOFOLLOW and chmod-ed
-    through its fd, so a symlink swapped in after the walk cannot redirect it."""
-    shutil.rmtree(root, ignore_errors=True)
-    if not root.exists() or root.is_symlink():
-        return
-    _chmod_dir_nofollow(str(root))
-    for dirpath, dirnames, _ in os.walk(root):
-        for name in dirnames:
-            _chmod_dir_nofollow(os.path.join(dirpath, name))
-    shutil.rmtree(root, ignore_errors=True)
-
-
-def _chmod_dir_nofollow(path: str) -> None:
-    with contextlib.suppress(OSError):
-        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            os.fchmod(fd, 0o700)
-        finally:
-            os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -465,10 +442,10 @@ class Sandbox:
                     proc.stdin.write(input_text)
                     proc.stdin.close()
             if proc.stdout is not None:
-                for line in proc.stdout:          # yields as the child flushes
+                for line in proc.stdout:  # yields as the child flushes
                     out.append(line)
                     with contextlib.suppress(Exception):
-                        on_line(line)             # advisory: never break the run
+                        on_line(line)  # advisory: never break the run
             proc.wait()
         finally:
             killer.cancel()
@@ -559,7 +536,7 @@ class Sandbox:
         if self._destroyed:
             return
         self._destroyed = True
-        _force_rmtree(self._root)
+        force_rmtree(self._root)
 
     def _check_alive(self) -> None:
         if self._destroyed:

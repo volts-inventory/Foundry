@@ -44,8 +44,10 @@ class FeatureScenario:
         def fill(text: str, row: dict[str, str]) -> str:
             return _PLACEHOLDER.sub(lambda m: row.get(m.group(1), m.group(0)), text)
 
-        return [tuple(FeatureStep(s.kind, fill(s.text, row)) for s in self.steps)
-                for row in self.examples]
+        return [
+            tuple(FeatureStep(s.kind, fill(s.text, row)) for s in self.steps)
+            for row in self.examples
+        ]
 
 
 def parse_feature(text: str) -> list[FeatureScenario]:
@@ -84,7 +86,7 @@ def parse_feature(text: str) -> list[FeatureScenario]:
                 target = None
             else:
                 steps = [*feature_bg, *rule_bg]
-                scenarios.append((line[m.end():].strip(), steps, []))
+                scenarios.append((line[m.end() :].strip(), steps, []))
                 target = steps
             last = "given"
             continue
@@ -111,8 +113,7 @@ _PARSE_FIELD = re.compile(r"\{([A-Za-z_]\w*)?(?::([^{}]*))?\}")
 
 def parse_fields(pattern: str) -> tuple[str, ...]:
     """The named fields of a ``parsers.parse`` pattern."""
-    return tuple(m.group(1) for m in _PARSE_FIELD.finditer(_unescape_braces(pattern))
-                 if m.group(1))
+    return tuple(m.group(1) for m in _PARSE_FIELD.finditer(_unescape_braces(pattern)) if m.group(1))
 
 
 def _unescape_braces(pattern: str) -> str:
@@ -126,7 +127,7 @@ def parse_regex(pattern: str) -> re.Pattern[str]:
     pos = 0
     text = _unescape_braces(pattern)
     for m in _PARSE_FIELD.finditer(text):
-        out.append(re.escape(text[pos:m.start()]))
+        out.append(re.escape(text[pos : m.start()]))
         out.append(r"([-+]?\d+)" if (m.group(2) or "") in ("d", "n") else r"(.+?)")
         pos = m.end()
     out.append(re.escape(text[pos:]))
@@ -139,8 +140,7 @@ def step_captures(parser: str, pattern: str, line: str) -> dict[str, str] | None
     if parser in ("parse", "cfparse"):
         m = parse_regex(pattern).fullmatch(line)
         names = [f.group(1) for f in _PARSE_FIELD.finditer(_unescape_braces(pattern))]
-        return None if m is None else {
-            n: v for n, v in zip(names, m.groups(), strict=True) if n}
+        return None if m is None else {n: v for n, v in zip(names, m.groups(), strict=True) if n}
     if parser == "re":
         try:
             r = re.fullmatch(pattern, line)
@@ -191,7 +191,7 @@ def _pattern(step: FeatureStep, outline: bool) -> tuple[str, tuple[str, ...]]:
     pieces: list[str] = []
     pos = 0
     for m in _PLACEHOLDER.finditer(step.text):
-        pieces.append(step.text[pos:m.start()].replace("{", "{{").replace("}", "}}"))
+        pieces.append(step.text[pos : m.start()].replace("{", "{{").replace("}", "}}"))
         if m.group(1) not in names:
             names[m.group(1)] = _ident(m.group(1), taken)
         pieces.append("{" + names[m.group(1)] + "}")
@@ -214,7 +214,8 @@ def scaffold_steps(features: Mapping[str, str]) -> list[tuple[FeatureStep, str, 
                 seen[(step.kind, step.text)] = (step, pat, params)
     patterns = [(s.kind, parse_regex(pat)) for s, pat, params in seen.values() if params]
     return [
-        entry for (kind, text), entry in seen.items()
+        entry
+        for (kind, text), entry in seen.items()
         if entry[2] or not any(k == kind and rx.fullmatch(text) for k, rx in patterns)
     ]
 
@@ -227,8 +228,7 @@ def step_scaffold(module: str, features: Mapping[str, str]) -> str:
     ``NotImplementedError``."""
     steps = scaffold_steps(features)
     kinds = sorted({s.kind for s, _a, _p in steps}, key=("given", "when", "then").index)
-    names = ", ".join([*kinds, *(["parsers"] if any(p for *_x, p in steps) else []),
-                       "scenarios"])
+    names = ", ".join([*kinds, *(["parsers"] if any(p for *_x, p in steps) else []), "scenarios"])
     here = posixpath.dirname(module) or "."
     lines = [
         f'"""Step definitions for {", ".join(features)}."""',
@@ -249,17 +249,19 @@ def step_scaffold(module: str, features: Mapping[str, str]) -> str:
         arg = json.dumps(pat, ensure_ascii=False)
         if params:
             arg = f"parsers.parse({arg})"
-        fn = _ident(f"{step.kind}_{' '.join(re.findall(r'[A-Za-z0-9]+', step.text))[:48]}",
-                    taken)
-        lines += ["", "", f"@{step.kind}({arg})",
-                  f"def {fn}({', '.join(('context', *params))}):"]
+        fn = _ident(f"{step.kind}_{' '.join(re.findall(r'[A-Za-z0-9]+', step.text))[:48]}", taken)
+        lines += ["", "", f"@{step.kind}({arg})", f"def {fn}({', '.join(('context', *params))}):"]
         if not params and (literal := _PLACEHOLDER.findall(step.text)):
-            lines.append(f"    # {', '.join(f'<{n}>' for n in dict.fromkeys(literal))} is "
-                         "literal text in this plain Scenario (no Examples fill it): use "
-                         "the value an earlier step stored in context")
+            lines.append(
+                f"    # {', '.join(f'<{n}>' for n in dict.fromkeys(literal))} is "
+                "literal text in this plain Scenario (no Examples fill it): use "
+                "the value an earlier step stored in context"
+            )
         if step.kind != "then":
-            lines.append('    # store what later steps need: context["name"] = value '
-                         '(or add target_fixture="name" and return it)')
+            lines.append(
+                '    # store what later steps need: context["name"] = value '
+                '(or add target_fixture="name" and return it)'
+            )
         lines.append("    raise NotImplementedError")
     return "\n".join(lines) + "\n"
 
@@ -294,6 +296,10 @@ def step_module(files: Sequence[str], ticket_id: str = "") -> str | None:
     tests = [f for f in files if is_python_test(f) and not is_helper_module(f)]
     named = ticket_step_module(ticket_id) if ticket_id else None
     return next((f for f in tests if f == named), None) or next(
-        (f for f in tests
-         if _STEPISH.search(posixpath.basename(f).removesuffix(".py").removeprefix("test_"))),
-        tests[0] if tests else None)
+        (
+            f
+            for f in tests
+            if _STEPISH.search(posixpath.basename(f).removesuffix(".py").removeprefix("test_"))
+        ),
+        tests[0] if tests else None,
+    )

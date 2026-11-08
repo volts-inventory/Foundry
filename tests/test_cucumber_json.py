@@ -59,17 +59,30 @@ def _step(keyword: str, name: str, status: str) -> dict[str, Any]:
 
 
 def _report(*elements: dict[str, Any]) -> bytes:
-    return json.dumps([{"uri": "features/T1.feature", "keyword": "Feature",
-                        "name": "T1", "elements": list(elements)}]).encode()
+    return json.dumps(
+        [
+            {
+                "uri": "features/T1.feature",
+                "keyword": "Feature",
+                "name": "T1",
+                "elements": list(elements),
+            }
+        ]
+    ).encode()
 
 
-def _scenario(name: str, *statuses: str, texts: tuple[str, ...] | None = None,
-              **extra: Any) -> dict[str, Any]:
+def _scenario(
+    name: str, *statuses: str, texts: tuple[str, ...] | None = None, **extra: Any
+) -> dict[str, Any]:
     texts = texts or ("an empty list", 'I add "milk"', "the list has 1 item")
     keywords = ("Given ", "When ", "Then ")
-    return {"type": "scenario", "keyword": "Scenario", "name": name, **extra,
-            "steps": [_step(k, t, s) for k, t, s in zip(keywords, texts, statuses,
-                                                       strict=True)]}
+    return {
+        "type": "scenario",
+        "keyword": "Scenario",
+        "name": name,
+        **extra,
+        "steps": [_step(k, t, s) for k, t, s in zip(keywords, texts, statuses, strict=True)],
+    }
 
 
 def _outcome(wd: Path, data: bytes) -> dict[str, str]:
@@ -77,25 +90,34 @@ def _outcome(wd: Path, data: bytes) -> dict[str, str]:
     return out
 
 
-@pytest.mark.parametrize(("statuses", "want"), [
-    (("passed", "passed", "passed"), "passed"),
-    (("passed", "passed", "failed"), "failed"),
-    (("passed", "undefined", "skipped"), "missing"),
-    (("passed", "pending", "skipped"), "skipped"),
-    (("passed", "skipped", "skipped"), "skipped"),
-    (("passed", "ambiguous", "skipped"), "failed"),
-    (("passed", "passed", "weird"), "missing"),
-])
-def test_step_statuses_map_like_messages(tmp_path: Path, statuses: tuple[str, ...],
-                                         want: str) -> None:
+@pytest.mark.parametrize(
+    ("statuses", "want"),
+    [
+        (("passed", "passed", "passed"), "passed"),
+        (("passed", "passed", "failed"), "failed"),
+        (("passed", "undefined", "skipped"), "missing"),
+        (("passed", "pending", "skipped"), "skipped"),
+        (("passed", "skipped", "skipped"), "skipped"),
+        (("passed", "ambiguous", "skipped"), "failed"),
+        (("passed", "passed", "weird"), "missing"),
+    ],
+)
+def test_step_statuses_map_like_messages(
+    tmp_path: Path, statuses: tuple[str, ...], want: str
+) -> None:
     wd = _go_project(tmp_path)
     assert _outcome(wd, _report(_scenario("AC-1", *statuses))) == {REF + "AC-1": want}
 
 
 def test_forged_step_text_is_unmatched(tmp_path: Path) -> None:
     wd = _go_project(tmp_path)
-    forged = _scenario("AC-1", "passed", "passed", "passed",
-                       texts=("an empty list", 'I add "eggs"', "the list has 1 item"))
+    forged = _scenario(
+        "AC-1",
+        "passed",
+        "passed",
+        "passed",
+        texts=("an empty list", 'I add "eggs"', "the list has 1 item"),
+    )
     assert _outcome(wd, _report(forged)) == {REF + "AC-1": "unmatched"}
 
 
@@ -108,11 +130,21 @@ def test_wrong_keyword_type_is_unmatched(tmp_path: Path) -> None:
 
 def test_background_element_and_failed_hook(tmp_path: Path) -> None:
     wd = _go_project(tmp_path)
-    background = {"type": "background", "keyword": "Background", "name": "",
-                  "steps": [_step("Given ", "an empty list", "passed")]}
-    body = {"type": "scenario", "keyword": "Scenario", "name": "AC-1", "steps": [
-        _step("When ", 'I add "milk"', "passed"), _step("Then ", "the list has 1 item", "passed"),
-    ]}
+    background = {
+        "type": "background",
+        "keyword": "Background",
+        "name": "",
+        "steps": [_step("Given ", "an empty list", "passed")],
+    }
+    body = {
+        "type": "scenario",
+        "keyword": "Scenario",
+        "name": "AC-1",
+        "steps": [
+            _step("When ", 'I add "milk"', "passed"),
+            _step("Then ", "the list has 1 item", "passed"),
+        ],
+    }
     assert _outcome(wd, _report(background, body)) == {REF + "AC-1": "passed"}
     hooked = {**body, "after": [{"result": {"status": "failed"}}]}
     assert _outcome(wd, _report(background, hooked)) == {REF + "AC-1": "failed"}
@@ -120,8 +152,10 @@ def test_background_element_and_failed_hook(tmp_path: Path) -> None:
 
 def test_scenario_outline_rows_each_decide(tmp_path: Path) -> None:
     wd = _go_project(tmp_path)
-    rows = [_scenario("AC-1", "passed", "passed", "passed", keyword="Scenario Outline"),
-            _scenario("AC-1", "passed", "passed", "failed", keyword="Scenario Outline")]
+    rows = [
+        _scenario("AC-1", "passed", "passed", "passed", keyword="Scenario Outline"),
+        _scenario("AC-1", "passed", "passed", "failed", keyword="Scenario Outline"),
+    ]
     assert _outcome(wd, _report(*rows)) == {REF + "AC-1": "failed"}
     assert _outcome(wd, _report(rows[0], rows[0])) == {REF + "AC-1": "passed"}
 
@@ -130,7 +164,8 @@ def test_catch_all_pattern_in_source_is_flagged(tmp_path: Path) -> None:
     steps = GO_STEPS.replace("`^the list has (\\d+) items?$`", "`(.*)`")
     wd = _go_project(tmp_path, steps)
     assert _outcome(wd, _report(_scenario("AC-1", "passed", "passed", "passed"))) == {
-        REF + "AC-1": "catch-all"}
+        REF + "AC-1": "catch-all"
+    }
 
 
 def test_step_no_source_pattern_matches_is_unchecked(tmp_path: Path) -> None:
@@ -138,7 +173,8 @@ def test_step_no_source_pattern_matches_is_unchecked(tmp_path: Path) -> None:
     steps = GO_STEPS.replace("sc.Step(`^an empty list$`, empty)", "")
     wd = _go_project(tmp_path, steps)
     assert _outcome(wd, _report(_scenario("AC-1", "passed", "passed", "passed"))) == {
-        REF + "AC-1": "catch-all"}
+        REF + "AC-1": "catch-all"
+    }
 
 
 def test_go_and_rust_patterns_are_read_from_source(tmp_path: Path) -> None:
@@ -172,7 +208,8 @@ def test_fifo_step_source_does_not_hang_and_fails_closed(tmp_path: Path) -> None
     os.mkfifo(wd / "bdd" / "steps_test.go")
     assert source_step_patterns(wd) == []  # nothing read: every step unchecked
     assert _outcome(wd, _report(_scenario("AC-1", "passed", "passed", "passed"))) == {
-        REF + "AC-1": "catch-all"}
+        REF + "AC-1": "catch-all"
+    }
 
 
 def test_symlinked_step_source_is_not_read(tmp_path: Path) -> None:
@@ -248,8 +285,9 @@ def test_verified_read_converts_json(tmp_path: Path) -> None:
 
 def test_rejected_report_names_the_stacks_runner(tmp_path: Path) -> None:
     wd = _go_project(tmp_path)
-    gate = TestGate(cmd=("true",), min_passed=0, bdd_cmd="echo boom >&2; exit 3",
-                    profile_name="stack:go")
+    gate = TestGate(
+        cmd=("true",), min_passed=0, bdd_cmd="echo boom >&2; exit 3", profile_name="stack:go"
+    )
     obs = gate.execute(wd)
     assert obs.structured[BDD_KEY] == {REF + "AC-1": "missing"}
     assert any("bdd/godog_test.go MUST be exactly" in f for f in obs.findings)
@@ -259,7 +297,9 @@ def test_rejected_report_names_the_stacks_runner(tmp_path: Path) -> None:
 # ---- live godog --------------------------------------------------------------
 
 _GODOG = "github.com/cucumber/godog@v0.16.0"
-_LIVE_FEATURE = FEATURE + """
+_LIVE_FEATURE = (
+    FEATURE
+    + """
   Scenario: AC-2
     Given an empty list
     When I remove "milk"
@@ -270,6 +310,7 @@ _LIVE_FEATURE = FEATURE + """
     When I add "milk"
     Then the list has 2 items
 """
+)
 _LIVE_STEPS = """\
 package bdd
 
@@ -313,11 +354,14 @@ def test_live_godog_run_through_the_gate(tmp_path: Path, monkeypatch: Any) -> No
         pytest.skip("go get godog timed out")
     if got.returncode != 0:
         pytest.skip(f"cannot fetch godog: {got.stderr[-300:]!r}")
-    gate = TestGate(cmd=("true",), min_passed=0, bdd_cmd="go test -count=1 ./bdd",
-                    profile_name="stack:go")
+    gate = TestGate(
+        cmd=("true",), min_passed=0, bdd_cmd="go test -count=1 ./bdd", profile_name="stack:go"
+    )
     obs = gate.execute(wd)
     assert obs.structured[BDD_KEY] == {
-        REF + "AC-1": "passed", REF + "AC-2": "missing", REF + "AC-3": "failed",
+        REF + "AC-1": "passed",
+        REF + "AC-2": "missing",
+        REF + "AC-3": "failed",
     }, obs.findings
     assert gate.decide(obs) is GateStatus.FAIL
     (wd / "features" / "T1.feature").write_text(FEATURE)
@@ -339,6 +383,7 @@ def test_live_godog_runner_compiles_before_any_steps(tmp_path: Path) -> None:
         pytest.skip("go get godog timed out")
     if got.returncode != 0:
         pytest.skip(f"cannot fetch godog: {got.stderr[-300:]!r}")
-    vet = subprocess.run(["go", "vet", "./..."], cwd=wd, capture_output=True, text=True,
-                         timeout=180)
+    vet = subprocess.run(
+        ["go", "vet", "./..."], cwd=wd, capture_output=True, text=True, timeout=180
+    )
     assert vet.returncode == 0, vet.stderr

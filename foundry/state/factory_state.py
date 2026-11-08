@@ -24,7 +24,7 @@ class FactoryState(TypedDict, total=False):
     # OPTIONAL full design-spec document text (task [8]). Additive input: a short
     # `request` still summarizes intent; when present, `spec` carries the detailed
     # design-spec doc(s) text that GROUNDS the plan — the planner derives the
-    # IntentBrief/PRD/criteria/design FROM it (read by `planner._intake_text`).
+    # IntentBrief/PRD/criteria/design FROM it (read by `planner.prompt._intake_text`).
     # Single-writer (seeded at graph entry). It is plain INPUT DATA — it INFORMS
     # the PRD/criteria but never bypasses the acceptance-criteria derivation or
     # any signed gate (same trust posture as `request`: agents propose, only

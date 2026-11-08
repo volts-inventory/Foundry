@@ -21,13 +21,18 @@ from foundry.state.seq import Seq
 
 def _det_gate(name: str = "build", tree: str = "a" * 40) -> GateResult:
     return GateResult(
-        name=name, status=GateStatus.PASS, decision_deterministic=True,
-        execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
-        run_against=tree, seq=Seq("r1", 1, 0, "build_gate", 0),
+        name=name,
+        status=GateStatus.PASS,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        run_against=tree,
+        seq=Seq("r1", 1, 0, "build_gate", 0),
     )
 
 
 # --- HMAC scheme wire format --------------------------------------------------- #
+
 
 def test_hmac_wire_format() -> None:
     s = HmacScheme(b"k", "kid")
@@ -73,6 +78,7 @@ def test_signing_schemes_from_env_shared_hmac() -> None:
 
 
 # --- attestation input binding ------------------------------------------------- #
+
 
 @pytest.mark.parametrize(
     "tamper",

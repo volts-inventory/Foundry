@@ -137,9 +137,15 @@ def _declarations(workdir: Path) -> tuple[list[str], list[str]]:
 
 # Import names whose PyPI distribution is named differently.
 _DIST_FOR_IMPORT = {
-    "bs4": "beautifulsoup4", "cv2": "opencv-python", "dateutil": "python-dateutil",
-    "dotenv": "python-dotenv", "jose": "python-jose", "jwt": "PyJWT",
-    "multipart": "python-multipart", "PIL": "Pillow", "sklearn": "scikit-learn",
+    "bs4": "beautifulsoup4",
+    "cv2": "opencv-python",
+    "dateutil": "python-dateutil",
+    "dotenv": "python-dotenv",
+    "jose": "python-jose",
+    "jwt": "PyJWT",
+    "multipart": "python-multipart",
+    "PIL": "Pillow",
+    "sklearn": "scikit-learn",
     "yaml": "PyYAML",
 }
 _NO_MODULE = re.compile(r"No module named '([A-Za-z_][\w.]*)'")
@@ -199,8 +205,9 @@ def undeclared_distributions(dists: list[str], workdir: Path) -> tuple[str, ...]
         return ()
     out: list[str] = []
     for dist in dict.fromkeys(dists):
-        if (_normalized(dist) in declared | _TOOLING
-                or _normalized(dist) in {_normalized(d) for d in out}):
+        if _normalized(dist) in declared | _TOOLING or _normalized(dist) in {
+            _normalized(d) for d in out
+        }:
             continue
         try:
             im.distribution(dist)
@@ -227,8 +234,10 @@ def _tree_modules(root: Path) -> tuple[set[str], list[Path]]:
     files: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [
-            d for d in dirnames
-            if not d.startswith(".") and d not in _PRUNE
+            d
+            for d in dirnames
+            if not d.startswith(".")
+            and d not in _PRUNE
             and not (Path(dirpath, d) / "pyvenv.cfg").is_file()
         ]
         names.update(dirnames)
@@ -292,8 +301,14 @@ def undeclared_imports(
         return {}
     local, files = _tree_modules(root)
     installed = _host_distributions()
-    available = (local | first_party | _site_modules(site) | set(installed) | _TOOLING
-                 | set(sys.stdlib_module_names))
+    available = (
+        local
+        | first_party
+        | _site_modules(site)
+        | set(installed)
+        | _TOOLING
+        | set(sys.stdlib_module_names)
+    )
     found: dict[str, list[str]] = {}
     for path in sorted(files):
         try:
@@ -315,10 +330,14 @@ def undeclared_import_findings(
 ) -> tuple[str, ...]:
     """The fixer's line for each module :func:`undeclared_imports` reports."""
     req = Path(workdir) / "requirements.txt"
-    scaffolded = req.is_file() and req.read_text(
-        encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
-    manifest = ("requirements.txt" if req.is_file() and not scaffolded
-                else "pyproject.toml's [project].dependencies")
+    scaffolded = req.is_file() and req.read_text(encoding="utf-8", errors="replace").startswith(
+        SCAFFOLD_HEADER
+    )
+    manifest = (
+        "requirements.txt"
+        if req.is_file() and not scaffolded
+        else "pyproject.toml's [project].dependencies"
+    )
     out = []
     for name, where in sorted(missing.items()):
         shown = ", ".join(where[:3]) + (f" and {len(where) - 3} more" if len(where) > 3 else "")
@@ -342,16 +361,22 @@ def undeclared_import_hints(output: str, workdir: Path) -> tuple[str, ...]:
     if declared is None:
         return ()
     root = Path(workdir)
-    scaffolded = (root / "requirements.txt").is_file() and (
-        root / "requirements.txt"
-    ).read_text(encoding="utf-8", errors="replace").startswith(SCAFFOLD_HEADER)
-    manifest = ("requirements.txt" if (root / "requirements.txt").is_file() and not scaffolded
-                else "pyproject.toml's [project].dependencies")
+    scaffolded = (root / "requirements.txt").is_file() and (root / "requirements.txt").read_text(
+        encoding="utf-8", errors="replace"
+    ).startswith(SCAFFOLD_HEADER)
+    manifest = (
+        "requirements.txt"
+        if (root / "requirements.txt").is_file() and not scaffolded
+        else "pyproject.toml's [project].dependencies"
+    )
     installed = _host_distributions()
     hints: list[str] = []
     for name in dict.fromkeys(m.split(".", 1)[0] for m in _NO_MODULE.findall(output)):
-        if (name in sys.stdlib_module_names or (root / name).is_dir()
-                or (root / f"{name}.py").is_file()):
+        if (
+            name in sys.stdlib_module_names
+            or (root / name).is_dir()
+            or (root / f"{name}.py").is_file()
+        ):
             continue
         dist = _dist_for(name, installed)
         if _import_declared(name, declared, installed):
@@ -489,14 +514,17 @@ def manifest_digest(workdir: Path, requirements: tuple[str, ...]) -> str | None:
     text = ""
     if requirements[:2] == ("-r", "requirements.txt"):
         text = (workdir / "requirements.txt").read_text(encoding="utf-8", errors="replace")
-    for line in [*_requirement_lines(text), *requirements[2 if text else 0:]]:
+    for line in [*_requirement_lines(text), *requirements[2 if text else 0 :]]:
         tokens = [t for t in re.split(r"[\s=]+", line) if t]
-        if "file:" in line or tokens[0] in _NESTED or any(
-            t.startswith((".", "/", "~")) for t in tokens
+        if (
+            "file:" in line
+            or tokens[0] in _NESTED
+            or any(t.startswith((".", "/", "~")) for t in tokens)
         ):
             return None
-    return content_digest({"python": sys.version, "requirements": list(requirements),
-                           "requirements.txt": text})
+    return content_digest(
+        {"python": sys.version, "requirements": list(requirements), "requirements.txt": text}
+    )
 
 
 class _SharedInstall:
@@ -522,7 +550,10 @@ class PythonBuildEnv:
     when ``digest`` is set, by the run's later builds with the same manifests)."""
 
     def __init__(
-        self, root: Path, requirements: tuple[str, ...], digest: str | None = None,
+        self,
+        root: Path,
+        requirements: tuple[str, ...],
+        digest: str | None = None,
         shared: _SharedInstall | None = None,
     ) -> None:
         self.venv = root / "venv"
@@ -573,9 +604,18 @@ class PythonBuildEnv:
             shutil.copytree(workdir, self.scratch, symlinks=True)
             try:
                 rc, out, err = ground_untrusted(
-                    (self.python, "-m", "pip", "install", "--disable-pip-version-check",
-                     "--no-input", "--no-cache-dir", "--progress-bar", "off",
-                     *self.requirements),
+                    (
+                        self.python,
+                        "-m",
+                        "pip",
+                        "install",
+                        "--disable-pip-version-check",
+                        "--no-input",
+                        "--no-cache-dir",
+                        "--progress-bar",
+                        "off",
+                        *self.requirements,
+                    ),
                     self.scratch,
                     network=True,
                     extra_env=activation_env(self.venv, os.environ.get("PATH", os.defpath)),
@@ -595,8 +635,11 @@ class PythonBuildEnv:
         """Env for a gate command over this build: the venv first on PATH, and its
         site-packages and python for the pinned harness."""
         self._require_install()
-        return {**activation_env(self.venv, os.environ.get("PATH", os.defpath)),
-                SITE_ENV: self.site, PYTHON_ENV: self.python}
+        return {
+            **activation_env(self.venv, os.environ.get("PATH", os.defpath)),
+            SITE_ENV: self.site,
+            PYTHON_ENV: self.python,
+        }
 
     @property
     def binds(self) -> tuple[tuple[Path, bool], ...]:

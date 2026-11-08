@@ -21,8 +21,13 @@ from foundry.state.seq import Seq
 def _gwt(cid: str, *, abuse: bool = True, **steps: Any) -> dict[str, Any]:
     base: dict[str, Any] = {"given": ["a list"], "when": ["I add x"], "then": ["x is listed"]}
     base.update(steps)
-    return {"id": cid, "text": "Given a list When I add x Then x is listed",
-            "oracle": f"features/T-1.feature::{cid}", "security_abuse": abuse, **base}
+    return {
+        "id": cid,
+        "text": "Given a list When I add x Then x is listed",
+        "oracle": f"features/T-1.feature::{cid}",
+        "security_abuse": abuse,
+        **base,
+    }
 
 
 def _run(tmp_path: Path, criteria: list[Any]) -> tuple[GateStatus, tuple[str, ...]]:
@@ -50,8 +55,7 @@ def test_blank_or_mistyped_steps_fail_closed(tmp_path: Path) -> None:
 
 
 def test_text_only_criteria_still_validate_as_text(tmp_path: Path) -> None:
-    legacy = {"id": "AC-1", "text": "Given a When b Then c", "oracle": "o",
-              "security_abuse": True}
+    legacy = {"id": "AC-1", "text": "Given a When b Then c", "oracle": "o", "security_abuse": True}
     assert _run(tmp_path, [legacy])[0] is GateStatus.PASS
     assert _run(tmp_path, [{**legacy, "text": ""}])[0] is GateStatus.FAIL
 
@@ -69,8 +73,13 @@ def test_criteria_payload_carries_steps_only_for_structured_scenarios() -> None:
     store = ArtifactStore()
     steps = {"given": ("a list",), "when": ("I add x",), "then": ("x is listed",)}
     structured = _criterion(
-        "AC-1", 0, text=render_scenario(**steps), oracle_hint="features/T-1.feature::AC-1",
-        security_abuse=True, ticket_id="T-1", **steps,
+        "AC-1",
+        0,
+        text=render_scenario(**steps),
+        oracle_hint="features/T-1.feature::AC-1",
+        security_abuse=True,
+        ticket_id="T-1",
+        **steps,
     )
     legacy = _criterion("AC-2", 1, text="plain", oracle_hint="o")
     handles = [
@@ -79,8 +88,14 @@ def test_criteria_payload_carries_steps_only_for_structured_scenarios() -> None:
     ]
     payload = _criteria_list({"artifacts": handles}, store.resolve)
     assert payload == [
-        {"id": "AC-1", "text": "Given a list When I add x Then x is listed",
-         "oracle": "features/T-1.feature::AC-1", "security_abuse": True,
-         "given": ["a list"], "when": ["I add x"], "then": ["x is listed"]},
+        {
+            "id": "AC-1",
+            "text": "Given a list When I add x Then x is listed",
+            "oracle": "features/T-1.feature::AC-1",
+            "security_abuse": True,
+            "given": ["a list"],
+            "when": ["I add x"],
+            "then": ["x is listed"],
+        },
         {"id": "AC-2", "text": "plain", "oracle": "o", "security_abuse": False},
     ]

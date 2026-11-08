@@ -1,5 +1,6 @@
 """Namespace (``unshare``) sandbox for the test/build/smoke gates — argv, routing, fail-closed,
 and a REAL end-to-end run (user namespaces are available in CI, so we exercise it)."""
+
 from __future__ import annotations
 
 import json
@@ -31,10 +32,10 @@ from foundry.schemas.implementation import StackDecision
 
 def test_sandbox_is_the_default_and_opt_out_disables_it(monkeypatch: Any) -> None:
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    assert sandbox_enabled() is True                       # default: always sandboxed
+    assert sandbox_enabled() is True  # default: always sandboxed
     for off in ("inprocess", "in-process", "none", "off"):
         monkeypatch.setenv("FOUNDRY_GATE_SANDBOX", off)
-        assert sandbox_enabled() is False                  # explicit opt-out only
+        assert sandbox_enabled() is False  # explicit opt-out only
 
 
 def test_unshare_flags_use_unprivileged_namespaces() -> None:
@@ -55,9 +56,9 @@ def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None
 
     monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
     TestGate().execute(tmp_path)
-    assert captured["cmd"][0] != "unshare"                  # NOT wrapped
-    assert "-c" in captured["cmd"]                          # the isolating bootstrap
-    env = captured["env"]                                   # ...but still env-allowlisted
+    assert captured["cmd"][0] != "unshare"  # NOT wrapped
+    assert "-c" in captured["cmd"]  # the isolating bootstrap
+    env = captured["env"]  # ...but still env-allowlisted
     assert "GH_TOKEN" not in env and "PYTEST_ADDOPTS" not in env
     assert env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1" and env["PATH"] == os.environ["PATH"]
     assert env["FOUNDRY_GATE_WORKDIR"] == str(Path(tmp_path).resolve())
@@ -67,7 +68,7 @@ def test_gate_in_process_when_opted_out(tmp_path: Any, monkeypatch: Any) -> None
 def test_namespace_sandbox_really_runs_and_blocks_network(tmp_path: Any, monkeypatch: Any) -> None:
     """End-to-end: a generated impl under ``foundry/`` (the collision case) PASSES
     inside the real namespace sandbox, and the network is OFF (no exfiltration)."""
-    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)   # real sandbox
+    monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)  # real sandbox
     (tmp_path / "foundry").mkdir()
     (tmp_path / "foundry" / "text_processing.py").write_text(
         "def reverse_words(s):\n    return ' '.join(reversed(s.split()))\n", encoding="utf-8"
@@ -86,7 +87,7 @@ def test_namespace_sandbox_really_runs_and_blocks_network(tmp_path: Any, monkeyp
     rc, out, _err = sandbox.ground_untrusted(
         TestGate().cmd, tmp_path, extra_env=TestGate()._env(Path(tmp_path)), timeout_s=120.0
     )
-    assert rc == 0, out          # both tests passed: collision resolved + network blocked
+    assert rc == 0, out  # both tests passed: collision resolved + network blocked
     assert "2 passed" in out
 
 
@@ -133,7 +134,7 @@ def test_install_alone_gets_the_egress_relay_build_and_smoke_are_offline(
     TestGate(cmd=("true",), min_passed=0).execute(tmp_path)
     install, build, smoke, test = calls
     assert all(argv[0] == "unshare" and "--net" in argv for argv in calls)  # own netns
-    assert all(sandbox._FENCE in argv for argv in calls)                  # all confined
+    assert all(sandbox._FENCE in argv for argv in calls)  # all confined
     assert install[-3:] == ["/bin/sh", "-c", "npm ci"] and _fence_cfg(install)["relay"]
     assert build[-1] == "true" and not _fence_cfg(build)["relay"]
     assert not _fence_cfg(smoke)["relay"] and not _fence_cfg(test)["relay"]
@@ -165,7 +166,8 @@ def test_build_and_smoke_opt_out_mirrors_testgate(tmp_path: Path, monkeypatch: A
     monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        sandbox, "run_grounding_command",
+        sandbox,
+        "run_grounding_command",
         lambda argv, *a, **k: calls.append(list(argv)) or (0, "", ""),
     )
     BuildGate(cmd=("true",), install_cmd="echo hi").execute(tmp_path)
@@ -182,7 +184,7 @@ def test_install_failure_is_build_error_with_findings(tmp_path: Path, monkeypatc
     assert gate.decide(obs) is GateStatus.ERROR
     assert obs.exit_codes == (4,)
     assert obs.findings[0].startswith("install command exited 4") and "nope" in obs.findings
-    assert not (tmp_path / "built").exists()          # build never ran
+    assert not (tmp_path / "built").exists()  # build never ran
 
 
 def test_build_decide_shapes() -> None:
@@ -215,14 +217,20 @@ def test_real_build_and_install_cannot_reach_host_loopback(
         srv.bind(("127.0.0.1", 0))
         srv.listen(4)
         code = _CONNECT.format(port=srv.getsockname()[1])
-        for gate in (BuildGate(cmd=_py(code)),
-                     BuildGate(cmd=("true",), install_cmd=shlex.join(_py(code)))):
+        for gate in (
+            BuildGate(cmd=_py(code)),
+            BuildGate(cmd=("true",), install_cmd=shlex.join(_py(code))),
+        ):
             obs = gate.execute(tmp_path)
             # A failed install is infra (ERROR, retried); a failed build is FAIL.
             want = GateStatus.ERROR if gate.install_cmd else GateStatus.FAIL
             assert gate.decide(obs) is want and "blocked" in obs.stderr
-        inet = BuildGate(cmd=_py("socket = __import__('socket'); socket.create_connection("
-                                 "('1.1.1.1', 53), timeout=3)"))
+        inet = BuildGate(
+            cmd=_py(
+                "socket = __import__('socket'); socket.create_connection("
+                "('1.1.1.1', 53), timeout=3)"
+            )
+        )
         assert inet.decide(inet.execute(tmp_path)) is GateStatus.FAIL
 
 
@@ -231,7 +239,7 @@ def test_real_writes_are_fenced_to_the_workdir(tmp_path: Path, monkeypatch: Any)
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     wd = tmp_path / "wd"
     wd.mkdir()
-    host_tmp = tmp_path / "escaped.txt"                       # host /tmp: shadowed
+    host_tmp = tmp_path / "escaped.txt"  # host /tmp: shadowed
     host_fs = Path(__file__).parent / f".escaped-{os.getpid()}"  # elsewhere: read-only
     for target, blocked in ((host_tmp, False), (host_fs, True)):
         write = f"open({str(target)!r}, 'w').write('x')"
@@ -246,8 +254,10 @@ def test_real_writes_are_fenced_to_the_workdir(tmp_path: Path, monkeypatch: Any)
         assert not target.exists()
     # ...while the workdir itself, /tmp and installed deps persist across steps.
     gate = BuildGate(
-        cmd=_py("import os; assert open('node_modules/dep').read() == 'ok'; "
-                "open(os.path.join(os.environ['TMPDIR'], 't'), 'w').write('t')"),
+        cmd=_py(
+            "import os; assert open('node_modules/dep').read() == 'ok'; "
+            "open(os.path.join(os.environ['TMPDIR'], 't'), 'w').write('t')"
+        ),
         install_cmd="mkdir -p node_modules && printf ok > node_modules/dep",
     )
     obs = gate.execute(wd)
@@ -378,8 +388,8 @@ def test_real_bdd_cmd_is_confined_but_writes_its_report(tmp_path: Path, monkeypa
     )
     gate = TestGate(cmd=("true",), min_passed=0, bdd_cmd=bdd)
     obs = gate.execute(tmp_path)
-    assert seen["report"] == "report", obs.stdout + obs.stderr     # report reached host
-    assert "planted" not in seen["siblings"]                       # only that file is bound
+    assert seen["report"] == "report", obs.stdout + obs.stderr  # report reached host
+    assert "planted" not in seen["siblings"]  # only that file is bound
     assert not escaped.exists()
     assert "LOOPBACK-OK" in obs.stdout, obs.stdout + obs.stderr
 
@@ -488,15 +498,30 @@ def test_real_install_egress_is_proxy_only(tmp_path: Path, monkeypatch: Any) -> 
     up.srv.close()
     assert gate.decide(obs) is GateStatus.PASS, obs.stdout + obs.stderr
     assert "EGRESS-OK" in obs.stdout
-    assert up.targets == ["registry.example.com:443"]          # nothing else got out
+    assert up.targets == ["registry.example.com:443"]  # nothing else got out
 
 
 def test_egress_allowed_refuses_non_public_destinations() -> None:
     for ok in ("registry.npmjs.org", "pypi.org", "1.1.1.1", "2606:4700:4700::1111"):
         assert sandbox.egress_allowed(ok), ok
-    for bad in ("169.254.169.254", "fd00:ec2::254", "[fd00:ec2::254]", "127.0.0.1", "::1",
-                "10.0.0.1", "100.64.0.1", "::ffff:169.254.169.254", "localhost", "a.localhost",
-                "metadata.google.internal", "2130706433", "0x7f.1", "0", "", "host name"):
+    for bad in (
+        "169.254.169.254",
+        "fd00:ec2::254",
+        "[fd00:ec2::254]",
+        "127.0.0.1",
+        "::1",
+        "10.0.0.1",
+        "100.64.0.1",
+        "::ffff:169.254.169.254",
+        "localhost",
+        "a.localhost",
+        "metadata.google.internal",
+        "2130706433",
+        "0x7f.1",
+        "0",
+        "",
+        "host name",
+    ):
         assert not sandbox.egress_allowed(bad), bad
 
 
@@ -538,8 +563,10 @@ def test_real_host_unix_sockets_and_run_are_masked(tmp_path: Path, monkeypatch: 
                 "else:\n    sys.exit('socket reachable')\n"
                 "assert not os.path.isdir('/run') or os.listdir('/run') == [], os.listdir('/run')\n"
             )
-            for gate in (BuildGate(cmd=_py(code)),
-                         BuildGate(cmd=("true",), install_cmd=shlex.join(_py(code)))):
+            for gate in (
+                BuildGate(cmd=_py(code)),
+                BuildGate(cmd=("true",), install_cmd=shlex.join(_py(code))),
+            ):
                 obs = gate.execute(tmp_path)
                 assert gate.decide(obs) is GateStatus.PASS, obs.stderr
     finally:
@@ -557,7 +584,7 @@ def test_real_symlinked_and_extra_credential_stores_are_masked(
         (store / "aws" / "credentials").write_text("AKIA-secret")
         (store / "settings.xml").write_text("<password>m2-secret</password>")
         (home / ".m2").mkdir(parents=True)
-        (home / ".aws").symlink_to(store / "aws")                          # symlinked dir
+        (home / ".aws").symlink_to(store / "aws")  # symlinked dir
         (home / ".m2" / "settings.xml").symlink_to(store / "settings.xml")  # symlinked file
         (home / ".pypirc").write_text("password = pypi-secret")
         monkeypatch.setenv("HOME", str(home))
@@ -600,8 +627,8 @@ def test_inprocess_refuses_networked_install_unless_explicitly_allowed(
     monkeypatch.setattr(sandbox, "run_grounding_command", fake_run)
     with pytest.raises(GroundingUnavailable, match="FOUNDRY_ALLOW_UNSANDBOXED_INSTALL"):
         BuildGate(cmd=("true",), install_cmd="npm ci").execute(tmp_path)
-    assert calls == []                                       # nothing ran
-    sandbox.ground_untrusted(("true",), tmp_path)            # offline steps still run...
+    assert calls == []  # nothing ran
+    sandbox.ground_untrusted(("true",), tmp_path)  # offline steps still run...
     monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
     BuildGate(cmd=("true",), install_cmd="npm ci").execute(tmp_path)
     assert len(calls) == 3
@@ -641,8 +668,9 @@ def test_proxy_credentials_never_enter_the_sandbox_env(monkeypatch: Any) -> None
     secret = "http://alice:S3cret@proxy.corp:3128"
     for k in ("HTTP_PROXY", "https_proxy", "ALL_PROXY", "npm_config_proxy"):
         monkeypatch.setenv(k, secret)
-    monkeypatch.setenv("JAVA_TOOL_OPTIONS",
-                       "-Dhttps.proxyHost=proxy.corp -Dhttps.proxyPassword=S3cret -Xmx1g")
+    monkeypatch.setenv(
+        "JAVA_TOOL_OPTIONS", "-Dhttps.proxyHost=proxy.corp -Dhttps.proxyPassword=S3cret -Xmx1g"
+    )
     env = _confined_env(None)
     assert "S3cret" not in repr(env) and "alice" not in repr(env)
     assert env["HTTP_PROXY"] == "http://proxy.corp:3128"
@@ -708,7 +736,8 @@ def test_seatbelt_writes_reach_only_the_workdir_tmp_and_writable_binds(tmp_path:
         "open(os.path.join(os.environ['TMPDIR'], 't'), 'w').write('t')\n"
         f"open({str(chan / 'report')!r}, 'w').write('r')\n"
         f"assert open({str(chan / 'ro.json')!r}).read() == '{{}}'\n"
-        + _denied(chan / "ro.json") + _denied(tmp_path / "escaped")
+        + _denied(chan / "ro.json")
+        + _denied(tmp_path / "escaped")
         + _denied(Path(__file__).parent / f".escaped-{os.getpid()}")
         + _denied(Path("/tmp") / f"foundry-escaped-{os.getpid()}")
     )
@@ -725,9 +754,7 @@ def test_seatbelt_handles_a_workdir_path_with_quotes(tmp_path: Path) -> None:
     wd = tmp_path / 'we"ird) (allow default) \\'
     wd.mkdir()
     sibling = tmp_path / 'we"ird) (allow default) \\x'
-    rc, _out, err = sandbox.run_confined(
-        _py("open('f', 'w').write('ok')\n" + _denied(sibling)), wd
-    )
+    rc, _out, err = sandbox.run_confined(_py("open('f', 'w').write('ok')\n" + _denied(sibling)), wd)
     assert rc == 0, err
     assert (wd / "f").read_text() == "ok" and not sibling.exists()
 
@@ -848,7 +875,7 @@ def test_seatbelt_kills_the_process_group(tmp_path: Path) -> None:
     start = time.monotonic()
     rc, _out, err = sandbox.run_confined((*_py(spawn), "0"), tmp_path, timeout_s=30)
     assert rc == 0, err
-    assert time.monotonic() - start < 20                       # did not wait on the orphan
+    assert time.monotonic() - start < 20  # did not wait on the orphan
     assert not alive(int((tmp_path / "child.pid").read_text()))
     with pytest.raises(subprocess.TimeoutExpired):
         sandbox.run_confined((*_py(spawn), "60"), tmp_path, timeout_s=2)
@@ -925,12 +952,11 @@ def test_toolchain_cache_is_shared_and_writable_only_by_the_install_step(
     root = cache.root
     install, build, smoke = (_fence_cfg(a)["binds"] for a in calls)
     assert [root, True] in install and [root, False] in build and [root, False] in smoke
-    assert all(e["GOMODCACHE"].startswith(root) and e["CARGO_HOME"].startswith(root)
-               for e in envs)
+    assert all(e["GOMODCACHE"].startswith(root) and e["CARGO_HOME"].startswith(root) for e in envs)
     assert all(not e["GOPATH"].startswith(os.path.expanduser("~")) for e in envs)
-    assert os.path.isdir(root)                     # the run's cache outlives the scope...
+    assert os.path.isdir(root)  # the run's cache outlives the scope...
     cache.close()
-    assert not os.path.exists(root)                # ...until the run closes it
+    assert not os.path.exists(root)  # ...until the run closes it
     calls.clear()
     BuildGate(cmd=("true",), install_cmd="true").execute(tmp_path)  # own scope
     eph = next(b for b, rw in _fence_cfg(calls[0])["binds"] if rw and "toolchain" in b)
@@ -941,9 +967,11 @@ def test_offline_steps_run_cargo_offline(tmp_path: Path, monkeypatch: Any) -> No
     # No DNS offline: cargo otherwise retries the registry and fails on a host lookup.
     _capture(monkeypatch)
     envs: list[dict[str, str]] = []
-    monkeypatch.setattr(sandbox, "run_grounding_command",
-                        lambda argv, wd, *, env=None, timeout_s=600.0:
-                        envs.append(env) or (0, "", ""))
+    monkeypatch.setattr(
+        sandbox,
+        "run_grounding_command",
+        lambda argv, wd, *, env=None, timeout_s=600.0: envs.append(env) or (0, "", ""),
+    )
     BuildGate(cmd=("true",), install_cmd="cargo fetch").execute(tmp_path)
     install, build = envs
     assert "CARGO_NET_OFFLINE" not in install and build["CARGO_NET_OFFLINE"] == "true"
@@ -966,12 +994,15 @@ def _go_module_proxy(root: Path) -> None:
     (v / "v1.0.0.mod").write_text(mod)
     with zipfile.ZipFile(v / "v1.0.0.zip", "w") as z:
         z.writestr("example.com/dep@v1.0.0/go.mod", mod)
-        z.writestr("example.com/dep@v1.0.0/dep.go",
-                   'package dep\n\nfunc Answer() int { return 42 }\n')
+        z.writestr(
+            "example.com/dep@v1.0.0/dep.go", "package dep\n\nfunc Answer() int { return 42 }\n"
+        )
 
 
-@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _go_works(),
-                    reason="needs the gate sandbox and the go toolchain")
+@pytest.mark.skipif(
+    sandbox.sandbox_backend() is None or not _go_works(),
+    reason="needs the gate sandbox and the go toolchain",
+)
 def test_real_go_install_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
     """`go mod download` (networked) fills the run's module cache; the offline build and
     smoke steps then compile against it. HOME stays untouched (it is read-only)."""
@@ -990,9 +1021,18 @@ def test_real_go_install_feeds_the_offline_build(tmp_path: Path, monkeypatch: An
     goproxy = "file://" + str(proxy)
     # go.sum, written host-side against the same local proxy (no sumdb for it).
     subprocess.run(
-        ["go", "mod", "tidy"], cwd=wd, check=True, capture_output=True,
-        env={**os.environ, "GOPROXY": goproxy, "GOSUMDB": "off",
-             "GOFLAGS": "-modcacherw", "GOPATH": str(host), "GOCACHE": str(host / "c")},
+        ["go", "mod", "tidy"],
+        cwd=wd,
+        check=True,
+        capture_output=True,
+        env={
+            **os.environ,
+            "GOPROXY": goproxy,
+            "GOSUMDB": "off",
+            "GOFLAGS": "-modcacherw",
+            "GOPATH": str(host),
+            "GOCACHE": str(host / "c"),
+        },
     )
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
     monkeypatch.setenv("GOPROXY", goproxy)
@@ -1002,8 +1042,9 @@ def test_real_go_install_feeds_the_offline_build(tmp_path: Path, monkeypatch: An
     cache = sandbox.ToolchainCache()
     try:
         with sandbox.toolchain_scope(cache):
-            gate = BuildGate(cmd=("/bin/sh", "-c", "go build -o app . && ./app"),
-                             install_cmd="go mod download")
+            gate = BuildGate(
+                cmd=("/bin/sh", "-c", "go build -o app . && ./app"), install_cmd="go mod download"
+            )
             obs = gate.execute(wd)
             assert gate.decide(obs) is GateStatus.PASS, obs.stderr
             assert "42" in obs.stdout
@@ -1027,8 +1068,10 @@ def _cargo_works() -> bool:
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(sandbox.sandbox_backend() is None or not _cargo_works(),
-                    reason="needs the gate sandbox, a working cargo and crates.io")
+@pytest.mark.skipif(
+    sandbox.sandbox_backend() is None or not _cargo_works(),
+    reason="needs the gate sandbox, a working cargo and crates.io",
+)
 def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: Any) -> None:
     """Live (crates.io): `cargo fetch` fills the run's CARGO_HOME; the offline build
     compiles against it while the rustup toolchains stay read-only."""
@@ -1051,15 +1094,16 @@ def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: A
         with sandbox.toolchain_scope(cache):
             # The planner's `cargo update` downloads nothing; the stack profile
             # adds the fetch the offline test step's dev-dependencies need.
-            install = stack_profile(StackDecision(
-                language="rust", install="cargo update", test="cargo test")).install_cmd
-            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet"),
-                             install_cmd=install)
+            install = stack_profile(
+                StackDecision(language="rust", install="cargo update", test="cargo test")
+            ).install_cmd
+            gate = BuildGate(cmd=("/bin/sh", "-c", "cargo run --quiet"), install_cmd=install)
             obs = gate.execute(tmp_path)
             assert gate.decide(obs) is GateStatus.PASS, obs.stderr
             assert "42" in obs.stdout
             rc, _out, err = sandbox.ground_untrusted(
-                ("/bin/sh", "-c", "cargo test --quiet"), tmp_path)
+                ("/bin/sh", "-c", "cargo test --quiet"), tmp_path
+            )
             assert rc == 0, err
     finally:
         cache.close()

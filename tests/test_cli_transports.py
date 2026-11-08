@@ -103,9 +103,7 @@ def _openai_client(
         return SimpleNamespace(choices=[choice], model=model, id=request_id, usage=usage)
 
     create.calls = []  # type: ignore[attr-defined]
-    return SimpleNamespace(
-        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
-    )
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
 
 
 # --------------------------------------------------------------------------- #
@@ -116,9 +114,19 @@ def _openai_client(
 def _timeout_capturing_runner() -> Any:
     def run(argv: Sequence[str], timeout_s: float | None) -> CliResult:
         run.timeouts.append(timeout_s)  # type: ignore[attr-defined]
-        return CliResult(0, json.dumps({"type": "result", "subtype": "success",
-                                        "result": "ok", "session_id": "s",
-                                        "modelUsage": {"claude-opus-4-8": {}}}))
+        return CliResult(
+            0,
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "result": "ok",
+                    "session_id": "s",
+                    "modelUsage": {"claude-opus-4-8": {}},
+                }
+            ),
+        )
+
     run.timeouts = []  # type: ignore[attr-defined]
     return run
 
@@ -129,19 +137,27 @@ def test_cli_backends_apply_a_default_subprocess_timeout() -> None:
     runner = _timeout_capturing_runner()
     proxy = build_backend("claude-cli", runner=runner)
     proxy.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
-    assert runner.timeouts[0] == 1800.0                      # default cap applied
+    assert runner.timeouts[0] == 1800.0  # default cap applied
 
     over = _timeout_capturing_runner()
     proxy2 = build_backend("claude-cli", runner=over, timeout_s=42.0)
     proxy2.complete("n1", "T1", "SOP", [{"role": "user", "content": "x"}], purpose="ideation")
-    assert over.timeouts[0] == 42.0                          # override flows through
+    assert over.timeouts[0] == 42.0  # override flows through
 
 
 @pytest.mark.parametrize("backend", ["claude-cli", "codex"])
-@pytest.mark.parametrize(("env", "expected"), [
-    ("90", 90.0), ("2.5", 2.5), ("0", 1800.0), ("-5", 1800.0), ("nope", 1800.0),
-    ("inf", 1800.0), ("", 1800.0),
-])
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ("90", 90.0),
+        ("2.5", 2.5),
+        ("0", 1800.0),
+        ("-5", 1800.0),
+        ("nope", 1800.0),
+        ("inf", 1800.0),
+        ("", 1800.0),
+    ],
+)
 def test_cli_timeout_env_override(
     monkeypatch: pytest.MonkeyPatch, backend: str, env: str, expected: float
 ) -> None:
@@ -161,7 +177,8 @@ def test_cli_hard_kill_message_names_the_cap() -> None:
 
     with pytest.raises(TransportError, match="hard-killed at 1800s"):
         ClaudeCliTransport(runner=slow, timeout_s=1800.0).send(
-            {"model": "claude-opus-4-8", "messages": []})
+            {"model": "claude-opus-4-8", "messages": []}
+        )
 
 
 def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:
@@ -195,6 +212,7 @@ def test_claude_cli_completion_observes_model_and_flattens_prompt() -> None:
 def _versioned_claude_runner(version: str, payload: dict[str, Any]) -> Any:
     """Fake `claude` that answers `--version` with a version banner and every other
     argv with the completion `payload` (so one runner serves the probe + the call)."""
+
     def run(argv: Sequence[str], timeout_s: float | None) -> CliResult:
         run.calls.append(list(argv))  # type: ignore[attr-defined]
         if "--version" in argv:
@@ -219,8 +237,12 @@ def test_claude_cli_runs_persona_calls_one_shot() -> None:
     """The SOP REPLACES Claude Code's default system prompt and the agent
     scaffolding (tools, settings, MCP, skills) is switched off, so a persona call
     pays only for its own prompt. The version probe runs once per binary."""
-    payload = {"type": "result", "subtype": "success", "result": "ok",
-               "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "ok",
+        "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}},
+    }
     runner = _versioned_claude_runner("2.5.1", payload)
     tx = ClaudeCliTransport(claude_bin="claude-modern", runner=runner)
 
@@ -244,8 +266,12 @@ def test_claude_cli_rejects_a_binary_too_old_for_one_shot_flags() -> None:
     """A `claude` below the floor fails closed with an upgrade instruction rather
     than silently running the expensive default agent — the minimum version is a
     hard REQUIREMENT."""
-    payload = {"type": "result", "subtype": "success", "result": "ok",
-               "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}}}
+    payload = {
+        "type": "result",
+        "subtype": "success",
+        "result": "ok",
+        "modelUsage": {"claude-opus-4-8": {"inputTokens": 1, "outputTokens": 1}},
+    }
     runner = _versioned_claude_runner("1.9.9", payload)
     tx = ClaudeCliTransport(claude_bin="claude-ancient", runner=runner)
 
@@ -255,9 +281,20 @@ def test_claude_cli_rejects_a_binary_too_old_for_one_shot_flags() -> None:
 
 
 def test_claude_cli_verdict_path_parses_and_stamps_verifiable_binding() -> None:
-    verdict = json.dumps({"status": "request-changes", "findings": [{
-        "finding": "nit", "failing_check": "", "command": "app", "expected": "1",
-        "actual": "2"}]})
+    verdict = json.dumps(
+        {
+            "status": "request-changes",
+            "findings": [
+                {
+                    "finding": "nit",
+                    "failing_check": "",
+                    "command": "app",
+                    "expected": "1",
+                    "actual": "2",
+                }
+            ],
+        }
+    )
     runner = _claude_runner(
         {
             "subtype": "success",
@@ -318,8 +355,10 @@ def test_codex_completion_observes_openai_lineage() -> None:
     runner = _codex_runner(
         [
             {"type": "session_configured", "model": "gpt-5-codex"},
-            {"msg": {"type": "agent_message", "message": "codex says hi"},
-             "usage": {"input_tokens": 7, "output_tokens": 3}},
+            {
+                "msg": {"type": "agent_message", "message": "codex says hi"},
+                "usage": {"input_tokens": 7, "output_tokens": 3},
+            },
         ]
     )
     proxy = build_backend("codex", runner=runner)
@@ -436,18 +475,24 @@ def test_openai_native_tools_round_trip_and_rejection_is_remembered() -> None:
 
     def with_calls(**params: Any) -> Any:
         resp = create(**params)
-        call = SimpleNamespace(id="c1", function=SimpleNamespace(name="run",
-                                                                 arguments='{"cmd": "ls"}'))
+        call = SimpleNamespace(
+            id="c1", function=SimpleNamespace(name="run", arguments='{"cmd": "ls"}')
+        )
         resp.choices[0].message.tool_calls = [call]
         return resp
 
     client.chat.completions.create = with_calls
     proxy = build_backend("openai", client=client)
-    result = proxy.complete("n", "T1", "SYS", [{"role": "user", "content": "hi"}],
-                            purpose="ideation", tools=tools)
+    result = proxy.complete(
+        "n", "T1", "SYS", [{"role": "user", "content": "hi"}], purpose="ideation", tools=tools
+    )
     assert result.tool_calls == ({"id": "c1", "name": "run", "input": {"cmd": "ls"}},)
-    assert create.calls[0]["tools"] == [{"type": "function", "function": {
-        "name": "run", "description": "d", "parameters": {"type": "object"}}}]
+    assert create.calls[0]["tools"] == [
+        {
+            "type": "function",
+            "function": {"name": "run", "description": "d", "parameters": {"type": "object"}},
+        }
+    ]
 
     def reject(**params: Any) -> Any:
         create.calls.append(params)
@@ -457,13 +502,20 @@ def test_openai_native_tools_round_trip_and_rejection_is_remembered() -> None:
     fresh = build_backend("openai", client=client)
     for _ in range(2):
         with pytest.raises(ToolsUnsupported):
-            fresh.complete("n", "T1", "SYS", [{"role": "user", "content": "hi"}],
-                           purpose="ideation", tools=tools)
+            fresh.complete(
+                "n",
+                "T1",
+                "SYS",
+                [{"role": "user", "content": "hi"}],
+                purpose="ideation",
+                tools=tools,
+            )
     assert len(create.calls) == 2  # rejected once (no retries), then refused unsent
     # Support is per model: gpt-5's rejection leaves T3's gpt-5-mini its tools.
     client.chat.completions.create = with_calls
-    mini = fresh.complete("n", "T3", "SYS", [{"role": "user", "content": "hi"}],
-                          purpose="ideation", tools=tools)
+    mini = fresh.complete(
+        "n", "T3", "SYS", [{"role": "user", "content": "hi"}], purpose="ideation", tools=tools
+    )
     assert create.calls[-1]["model"] == "gpt-5-mini" and "tools" in create.calls[-1]
     assert mini.tool_calls[0]["name"] == "run"
 

@@ -96,7 +96,10 @@ class _CleanGate:
 def test_sealed_genuine_observation_passes(tmp_path, records, verifier):
     """A genuine sealed observation verifies → the correct verdict (PASS)."""
     runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
+        ZoneBSigner(KEY, KEY_ID),
+        records,
+        "scanner-rev-1",
+        LINEAGE_REV,
         seal_key=SEAL_KEY,
     )
     gate: GateImpl = _CleanGate(seal_key=SEAL_KEY)
@@ -147,7 +150,10 @@ class _TamperingGate:
 def test_tampered_observation_is_error_not_pass(tmp_path, records, verifier):
     """A swapped/forged observation fails the seal → ERROR, never PASS."""
     runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
+        ZoneBSigner(KEY, KEY_ID),
+        records,
+        "scanner-rev-1",
+        LINEAGE_REV,
         seal_key=SEAL_KEY,
     )
     gate: GateImpl = _TamperingGate()
@@ -161,7 +167,10 @@ def test_tampered_observation_is_error_not_pass(tmp_path, records, verifier):
 def test_unsealed_observation_on_sealed_channel_is_error(tmp_path, records, verifier):
     """On a sealed channel an observation with NO seal is rejected (ERROR)."""
     runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), records, "scanner-rev-1", LINEAGE_REV,
+        ZoneBSigner(KEY, KEY_ID),
+        records,
+        "scanner-rev-1",
+        LINEAGE_REV,
         seal_key=SEAL_KEY,
     )
     # The gate produces an UNSEALED observation (seal_key=None) on a sealed channel.

@@ -152,8 +152,13 @@ def test_an_undeclared_import_names_the_dependency_to_add(
     assert hints[0] == (
         "the project imports `flask` but declares no dependency on it: add `flask` to "
         "requirements.txt (the Foundry-generated manifest is never installed)"
-        + ("; requirements.txt still starts with Foundry's `" + SCAFFOLD_HEADER.strip()
-           + "` header: rewrite it without that header so it is installed" if files else "")
+        + (
+            "; requirements.txt still starts with Foundry's `"
+            + SCAFFOLD_HEADER.strip()
+            + "` header: rewrite it without that header so it is installed"
+            if files
+            else ""
+        )
     )
     assert "add `PyYAML`" in hints[1] and len(hints) == 2  # local and stdlib skipped
 
@@ -165,8 +170,7 @@ def test_a_manifest_missing_the_import_names_the_dependency_to_add(
     # had only `pip install`ed in their sandbox: the gate's venv lacked it, the step
     # modules failed to import, and no finding said to declare it.
     monkeypatch.setattr(pydeps.im, "packages_distributions", dict)
-    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n",
-                      "app/__init__.py": ""})
+    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n", "app/__init__.py": ""})
     output = _NO_FLASK + "E   ModuleNotFoundError: No module named 'bcrypt'\n"
     assert undeclared_import_hints(output, tmp_path) == (
         "the project imports `bcrypt` but its declared dependencies do not include it: "
@@ -205,9 +209,17 @@ _IMPORTS = (
 
 def test_the_tree_scan_names_only_unconditional_undeclared_imports(tmp_path: Path) -> None:
     # The notes build: Flask declared, bcrypt only `pip install`ed in the sandbox.
-    _write(tmp_path, {"requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n",
-                      "app/__init__.py": "", "app/models.py": "", "app/views.py": _IMPORTS,
-                      "lib/helpers.py": "", "tests/test_x.py": "import bcrypt\n"})
+    _write(
+        tmp_path,
+        {
+            "requirements.txt": "Flask==3.0.0\nPyYAML==6.0.1\n",
+            "app/__init__.py": "",
+            "app/models.py": "",
+            "app/views.py": _IMPORTS,
+            "lib/helpers.py": "",
+            "tests/test_x.py": "import bcrypt\n",
+        },
+    )
     missing = pydeps.undeclared_imports(tmp_path, first_party=frozenset({"later"}))
     assert missing == {"bcrypt": ("app/views.py", "tests/test_x.py")}
     assert pydeps.undeclared_import_findings(missing, tmp_path) == (
@@ -217,14 +229,22 @@ def test_the_tree_scan_names_only_unconditional_undeclared_imports(tmp_path: Pat
     )
     # What the build venv installed (a declared dependency's own dependency) is there.
     (tmp_path.parent / "site" / "bcrypt").mkdir(parents=True)
-    assert pydeps.undeclared_imports(tmp_path, site=tmp_path.parent / "site",
-                                     first_party=frozenset({"later"})) == {}
+    assert (
+        pydeps.undeclared_imports(
+            tmp_path, site=tmp_path.parent / "site", first_party=frozenset({"later"})
+        )
+        == {}
+    )
 
 
-@pytest.mark.parametrize("manifest", [
-    {}, {"requirements.txt": SCAFFOLD_HEADER + "flask\n"},
-    {"requirements.txt": "flask\n-e .\n"},
-])
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        {},
+        {"requirements.txt": SCAFFOLD_HEADER + "flask\n"},
+        {"requirements.txt": "flask\n-e .\n"},
+    ],
+)
 def test_the_tree_scan_is_silent_without_a_plain_manifest(
     tmp_path: Path, manifest: dict[str, str]
 ) -> None:
@@ -240,8 +260,9 @@ def test_an_undeclared_import_fails_a_python_build(tmp_path: Path) -> None:
     assert "add `bcrypt` to requirements.txt" in obs.findings[1]
     assert BuildGate().decide(BuildGate().execute(tmp_path)) is GateStatus.PASS  # not Python
     _write(tmp_path, {"requirements.txt": "pytest\nbcrypt\n"})
-    assert BuildGate(python=True).decide(BuildGate(python=True).execute(tmp_path)) \
-        is GateStatus.PASS
+    assert (
+        BuildGate(python=True).decide(BuildGate(python=True).execute(tmp_path)) is GateStatus.PASS
+    )
 
 
 def test_install_failure_classification() -> None:
@@ -307,10 +328,20 @@ def _state(files: dict[str, str], criteria: tuple[AcceptanceCriterion, ...] = ()
         h = emit_artifact(c, CRITERION_KIND, "planner", c.seq)
         artifacts.append(h)
         by_uri[h.uri] = c
-    diff = FeatureDiff(diff_uri="cas://sha256/d1", task_id="T1", branch="task/T1",
-                       base_tree_sha="base", seq=_seq("junior_engineer"))
-    h = Artifact(kind=FEATURE_DIFF_KIND, uri="cas://fd/T1", produced_by="junior_engineer",
-                 task_id="T1", seq=diff.seq)
+    diff = FeatureDiff(
+        diff_uri="cas://sha256/d1",
+        task_id="T1",
+        branch="task/T1",
+        base_tree_sha="base",
+        seq=_seq("junior_engineer"),
+    )
+    h = Artifact(
+        kind=FEATURE_DIFF_KIND,
+        uri="cas://fd/T1",
+        produced_by="junior_engineer",
+        task_id="T1",
+        seq=diff.seq,
+    )
     artifacts.append(h)
     by_uri[h.uri] = diff
     body = json.dumps({"kind": "full-file-snapshot", "files": files}).encode()
@@ -338,8 +369,13 @@ def _gates(tmp_path: Path, files: dict[str, str], rt: _Rt | None = None) -> dict
     state, resolve, blob = _state(files)
     with tempfile.TemporaryDirectory(dir=tmp_path) as wd:
         out = run_build_test_gates(
-            state, {"configurable": {}}, rt=rt or _Rt(),  # type: ignore[arg-type]
-            runner=_runner(), resolve=resolve, resolve_blob=blob, workdir=Path(wd),
+            state,
+            {"configurable": {}},
+            rt=rt or _Rt(),  # type: ignore[arg-type]
+            runner=_runner(),
+            resolve=resolve,
+            resolve_blob=blob,
+            workdir=Path(wd),
             profile=PROFILES["python-app"],
         )
     return {g.name: g for g in out["gates"]}
@@ -350,7 +386,9 @@ def test_declared_dependency_installs_into_the_build_venv_only(
 ) -> None:
     gates = _gates(tmp_path, {**_APP, "requirements.txt": f"{tinydep}\n"})
     assert {n: g.status for n, g in gates.items()} == {
-        "build": GateStatus.PASS, "test": GateStatus.PASS, "smoke": GateStatus.PASS,
+        "build": GateStatus.PASS,
+        "test": GateStatus.PASS,
+        "smoke": GateStatus.PASS,
     }, [f for g in gates.values() for f in g.findings]
     _foundry_has_no("tinydep")
 
@@ -393,15 +431,21 @@ def test_network_failure_is_an_error_everywhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def _offline(*_a: Any, **_k: Any) -> tuple[int, str, str]:
-        return 1, "", (
-            "WARNING: Retrying (Retry(total=0)) after connection broken by "
-            "'NewConnectionError(...)'\nERROR: No matching distribution found for flask\n"
+        return (
+            1,
+            "",
+            (
+                "WARNING: Retrying (Retry(total=0)) after connection broken by "
+                "'NewConnectionError(...)'\nERROR: No matching distribution found for flask\n"
+            ),
         )
 
     monkeypatch.setattr(pydeps, "ground_untrusted", _offline)
     gates = _gates(tmp_path, {**_APP, "requirements.txt": "flask\n"})
     assert {n: g.status for n, g in gates.items()} == {
-        "build": GateStatus.ERROR, "test": GateStatus.ERROR, "smoke": GateStatus.ERROR,
+        "build": GateStatus.ERROR,
+        "test": GateStatus.ERROR,
+        "smoke": GateStatus.ERROR,
     }
 
 
@@ -412,8 +456,12 @@ def test_no_declared_dependency_skips_the_venv(
         raise AssertionError("no venv without a declared dependency")
 
     monkeypatch.setattr(pydeps, "build_python_env", _no_venv)
-    files = {"app.py": "VALUE = 42\n", "test_app.py": _APP["test_app.py"],
-             "smoke.py": "import app\n", "requirements.txt": "pytest\n"}
+    files = {
+        "app.py": "VALUE = 42\n",
+        "test_app.py": _APP["test_app.py"],
+        "smoke.py": "import app\n",
+        "requirements.txt": "pytest\n",
+    }
     gates = _gates(tmp_path, files)
     assert all(g.status is GateStatus.PASS for g in gates.values())
 
@@ -421,8 +469,9 @@ def test_no_declared_dependency_skips_the_venv(
 def test_non_python_profile_never_gets_a_venv(tmp_path: Path) -> None:
     node = stack_profile(StackDecision(language="javascript", test="npm test"))
     assert not node.python
-    with python_build_env(_write(tmp_path, {"requirements.txt": "flask\n"}),
-                          python=node.python) as env:
+    with python_build_env(
+        _write(tmp_path, {"requirements.txt": "flask\n"}), python=node.python
+    ) as env:
         assert env is None
 
 
@@ -432,17 +481,25 @@ def test_a_dependency_cannot_shadow_the_pinned_harness(
     # A dependency shipping a `pytest` that reports a green run: the project's code
     # may import it, the gate's harness never does, so the red suite stays red.
     fake = "def console_main():\n    print('1 passed in 0.01s')\n    return 0\n"
-    evil = _wheel(tmp_path / "wheels", "evil-harness", {
-        "pytest/__init__.py": fake, "pytest_bdd/__init__.py": "",
-    })
-    files = {**_APP, "test_app.py": "def test_red():\n    assert False\n",
-             "requirements.txt": f"{tinydep}\nevil-harness @ {evil.as_uri()}\n"}
+    evil = _wheel(
+        tmp_path / "wheels",
+        "evil-harness",
+        {
+            "pytest/__init__.py": fake,
+            "pytest_bdd/__init__.py": "",
+        },
+    )
+    files = {
+        **_APP,
+        "test_app.py": "def test_red():\n    assert False\n",
+        "requirements.txt": f"{tinydep}\nevil-harness @ {evil.as_uri()}\n",
+    }
     gates = _gates(tmp_path, files)
     assert gates["build"].status is GateStatus.PASS
     assert gates["test"].status is GateStatus.FAIL
 
 
-_STEPS = '''\
+_STEPS = """\
 import tinydep
 from pytest_bdd import given, parsers, scenarios, then, when
 
@@ -462,16 +519,21 @@ def _add(items, x):
 @then(parsers.parse("the list has {n:d} item"))
 def _count(items, n):
     assert len(items) == n and tinydep.VALUE == 42
-'''
+"""
 
 
 def test_bdd_harness_runs_scenarios_against_installed_deps(
     tmp_path: Path, tinydep: str, allow_install: None
 ) -> None:
     criterion = AcceptanceCriterion(
-        id="AC-1", text="Given … When … Then …", ticket_id="T1",
-        oracle_hint=scenario_ref("T1", "AC-1"), seq=_seq("planner"),
-        given=("an empty list",), when=('I add "milk"',), then=("the list has 1 item",),
+        id="AC-1",
+        text="Given … When … Then …",
+        ticket_id="T1",
+        oracle_hint=scenario_ref("T1", "AC-1"),
+        seq=_seq("planner"),
+        given=("an empty list",),
+        when=('I add "milk"',),
+        then=("the list has 1 item",),
     )
     state, resolve, blob = _state(
         {"tests/test_t1.py": _STEPS, "requirements.txt": f"{tinydep}\n"}, (criterion,)
@@ -498,8 +560,9 @@ def test_a_declared_module_cannot_replace_the_stdlib_but_overrides_foundrys_copy
     pytest.importorskip("six")  # in Foundry's environment, so the override is observable
     host_six = im.version("six")
     # `colorsys`: a stdlib module neither pytest nor the bootstrap imports first.
-    stdlib = _wheel(tmp_path / "wheels", "evil-stdlib",
-                    {"colorsys/__init__.py": "rgb_to_hsv = None\n"})
+    stdlib = _wheel(
+        tmp_path / "wheels", "evil-stdlib", {"colorsys/__init__.py": "rgb_to_hsv = None\n"}
+    )
     six = _wheel(tmp_path / "wheels", "six", {"six.py": "MARK = 'project'\n"}, version="99.0")
     test = (
         "def test_paths():\n"
@@ -517,15 +580,22 @@ def test_a_declared_pytest_cannot_kill_the_discriminators_mutants(
     tmp_path: Path, allow_install: None
 ) -> None:
     # A `pytest` that always exits 1 would "kill" every mutant if it ran the suite.
-    evil = _wheel(tmp_path / "wheels", "evil-pytest", {
-        "pytest/__init__.py": "def console_main():\n    return 1\n",
-        "pytest/__main__.py": "raise SystemExit(1)\n",
-    })
-    wd = _write(tmp_path / "wd", {
-        "calc.py": "def add(a, b):\n    return a + b\n",
-        "test_calc.py": "def test_vacuous():\n    assert True\n",
-        "requirements.txt": f"evil-pytest @ {evil.as_uri()}\n",
-    })
+    evil = _wheel(
+        tmp_path / "wheels",
+        "evil-pytest",
+        {
+            "pytest/__init__.py": "def console_main():\n    return 1\n",
+            "pytest/__main__.py": "raise SystemExit(1)\n",
+        },
+    )
+    wd = _write(
+        tmp_path / "wd",
+        {
+            "calc.py": "def add(a, b):\n    return a + b\n",
+            "test_calc.py": "def test_vacuous():\n    assert True\n",
+            "requirements.txt": f"evil-pytest @ {evil.as_uri()}\n",
+        },
+    )
     mutant = HeldOutMutant(mutant_id="m1", target="calc.py", find="a + b", replace="a - b")
     with python_build_env(wd, python=True) as env:
         assert env is not None
@@ -583,8 +653,12 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 
 # `pytest>=1` installs offline ("already satisfied" from Foundry's copy) and is no
 # exact pin, so it takes the install path.
-_CACHEABLE = {"app.py": "VALUE = 42\n", "test_app.py": _APP["test_app.py"],
-              "smoke.py": "import app\n", "requirements.txt": "pytest>=1\n"}
+_CACHEABLE = {
+    "app.py": "VALUE = 42\n",
+    "test_app.py": _APP["test_app.py"],
+    "smoke.py": "import app\n",
+    "requirements.txt": "pytest>=1\n",
+}
 
 
 def test_the_run_reuses_one_install_per_manifest(

@@ -1,14 +1,89 @@
 """webapp.events — pure telemetry->game-event mapping (no server, no factory)."""
+
 from __future__ import annotations
 
-from webapp.events import events_for_node_output, events_for_result, live_event_for_node
+import pytest
+
+from webapp.events import (
+    LOG_TEXT_MAX,
+    event_for_log_line,
+    events_for_node_output,
+    events_for_result,
+    live_event_for_node,
+)
+
+
+@pytest.mark.parametrize(
+    "line,kind,extra,text",
+    [
+        (
+            "[08:09:34] self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+            "self-check",
+            {"ticket": "T-ORDERS", "verdict": "red"},
+            "self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+        ),
+        (
+            "[08:10:01] self-check T2: green (0.9s; 7 left)",
+            "self-check",
+            {"ticket": "T2", "verdict": "green"},
+            "self-check T2: green (0.9s; 7 left)",
+        ),
+        (
+            "[08:09:34] start model call: planner (T1, ideation)",
+            "call",
+            {"phase": "start"},
+            "start model call: planner (T1, ideation)",
+        ),
+        (
+            "[08:11:03] done  model call: planner in 89s, 20k tokens (T1)",
+            "call",
+            {"phase": "done"},
+            "done model call: planner in 89s, 20k tokens (T1)",
+        ),
+        (
+            "[08:12:00] retry model call: planner — timeout [1/3], waiting 0s",
+            "retry",
+            {},
+            "retry model call: planner — timeout [1/3], waiting 0s",
+        ),
+        (
+            "[08:12:00] WARNING planner: context truncated: sent ~90000, model saw 32000",
+            "warning",
+            {},
+            "WARNING planner: context truncated: sent ~90000, model saw 32000",
+        ),
+        ("[08:13:00] escalate T3 to T1", "escalate", {}, "escalate T3 to T1"),
+        (
+            "[autoresume] transient provider failure (529); waiting 5 min before resuming",
+            "wait",
+            {},
+            "transient provider failure (529); waiting 5 min before resuming",
+        ),
+        ("[08:14:00] wrote BUILD-MANIFEST.json", "info", {}, "wrote BUILD-MANIFEST.json"),
+    ],
+)
+def test_progress_lines_become_classified_log_events(line, kind, extra, text) -> None:
+    assert event_for_log_line(line) == {"type": "log", "kind": kind, "text": text, **extra}
+
+
+def test_log_lines_are_trimmed_and_blank_ones_dropped() -> None:
+    assert event_for_log_line("") is None
+    assert event_for_log_line("[08:00:00]   ") is None
+    ev = event_for_log_line("[08:00:00] WARNING x: " + "y" * 1000)
+    assert ev is not None and ev["kind"] == "warning"
+    assert len(ev["text"]) == LOG_TEXT_MAX and ev["text"].endswith("…")
 
 
 def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
     # START: a named agent node seats that agent in its room for the whole model call.
     ev = live_event_for_node("planner", "planning", "start")
-    assert ev == {"type": "active", "room": "plan", "agent": "Planner",
-                  "live": True, "phase": "start"}
+    assert ev == {
+        "type": "active",
+        "room": "plan",
+        "agent": "Planner",
+        "live": True,
+        "phase": "start",
+    }
     # FINISH: clears the agent and carries a human summary of what the step produced.
     fin = live_event_for_node("planner", "planning", "finish")
     assert fin["phase"] == "finish"
@@ -16,8 +91,13 @@ def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:
     assert "Planner" in fin["summary"] and fin["summary"] != "Planner"
     # An unnamed node falls back to the subgraph scope -> room (room still lights).
     ev2 = live_event_for_node("some_infra_node", "engineering", "start")
-    assert ev2 == {"type": "active", "room": "engineering", "agent": "", "live": True,
-                   "phase": "start"}
+    assert ev2 == {
+        "type": "active",
+        "room": "engineering",
+        "agent": "",
+        "live": True,
+        "phase": "start",
+    }
     # A node with neither a known agent nor a room scope -> no desk to light.
     assert live_event_for_node("__start__", "", "start") is None
 
@@ -51,12 +131,14 @@ def test_subgraph_scopes_all_resolve_to_a_room() -> None:
     # ("factory:implementation"), not a bare stage name — these are the real strings
     # observed from a run. Matching the whole string resolved nothing, so every
     # unnamed step inside a stage was dropped.
-    for scope, room in (("factory:implementation", "engineering"),
-                        ("factory:quality", "review"),
-                        ("factory:assurance", "review"),   # old builds' replays
-                        ("factory:architecture", "plan"),
-                        ("factory:product", "plan"),
-                        ("implementation", "engineering")):    # bare form still works
+    for scope, room in (
+        ("factory:implementation", "engineering"),
+        ("factory:quality", "review"),
+        ("factory:assurance", "review"),  # old builds' replays
+        ("factory:architecture", "plan"),
+        ("factory:product", "plan"),
+        ("implementation", "engineering"),
+    ):  # bare form still works
         ev = live_event_for_node("some_unnamed_node", scope, "start")
         assert ev is not None and ev["room"] == room, scope
     # A scope naming no stage at all still yields nothing to light.
@@ -66,8 +148,14 @@ def test_subgraph_scopes_all_resolve_to_a_room() -> None:
 def test_node_output_maps_artifacts_and_journal() -> None:
     result = {
         "_art_details": [{"kind": "prd", "uri": "cas://a", "produced_by": "planner"}],
-        "agent_journal": [{"node_id": "planner", "role": "pm",
-                           "summary": "Authored the PRD", "concerns": ["thin criteria"]}],
+        "agent_journal": [
+            {
+                "node_id": "planner",
+                "role": "pm",
+                "summary": "Authored the PRD",
+                "concerns": ["thin criteria"],
+            }
+        ],
     }
     seen: set[str] = set()
     evs = events_for_node_output(result, seen)
@@ -125,16 +213,29 @@ def test_org_chart_emitted_once() -> None:
 
 
 def test_result_release_opens_chest() -> None:
-    evs = events_for_result({"passed": True, "phase": "done", "mode": "assistant",
-                             "artifact_uri": "cas://diff",
-                             "gate_statuses": {"test": "GateStatus.PASS"}})
+    evs = events_for_result(
+        {
+            "passed": True,
+            "phase": "done",
+            "mode": "assistant",
+            "artifact_uri": "cas://diff",
+            "gate_statuses": {"test": "GateStatus.PASS"},
+        }
+    )
     assert any(e["type"] == "release" and e["uri"] == "cas://diff" for e in evs)
     assert evs[-1] == {"type": "done", "passed": True, "phase": "done"}
 
 
 def test_result_halt_on_fail() -> None:
-    evs = events_for_result({"passed": False, "phase": "build_test_gate", "mode": "assistant",
-                             "artifact_uri": None, "gate_statuses": {"test": "GateStatus.FAIL"}})
+    evs = events_for_result(
+        {
+            "passed": False,
+            "phase": "build_test_gate",
+            "mode": "assistant",
+            "artifact_uri": None,
+            "gate_statuses": {"test": "GateStatus.FAIL"},
+        }
+    )
     assert any(e["type"] == "halt" for e in evs)
     assert not any(e["type"] == "release" for e in evs)
 
@@ -169,9 +270,14 @@ def test_cast_is_planner_engineers_reviewer_and_old_ids_still_seat_someone() -> 
         ev = live_event_for_node(node, "", "start")
         assert ev is not None and (ev["agent"], ev["room"]) == (agent, room), node
     out = events_for_node_output(
-        {"_art_details": [
-            {"uri": "u1", "kind": "prd", "produced_by": "planner"},
-            {"uri": "u2", "kind": "test_report", "produced_by": "reviewer"}]}, set())
+        {
+            "_art_details": [
+                {"uri": "u1", "kind": "prd", "produced_by": "planner"},
+                {"uri": "u2", "kind": "test_report", "produced_by": "reviewer"},
+            ]
+        },
+        set(),
+    )
     arts = {e["kind"]: (e["agent"], e["room"]) for e in out if e["type"] == "artifact"}
     assert arts == {"prd": ("Planner", "plan"), "test_report": ("Reviewer", "review")}
 
@@ -181,25 +287,48 @@ def test_ticket_artifact_surfaces_as_a_planner_pickup_and_a_ticket_event() -> No
 
     from webapp.events import event_for_task, ticket_event
 
-    detail = json.dumps({"id": "T-001", "title": "Add login", "specialty": "frontend",
-                         "difficulty": "complex", "depends_on": ["T-000"]})
-    payload = {"_art_details": [
-        {"kind": "ticket", "uri": "cas://t1", "produced_by": "planner", "detail": detail},
-        {"kind": "ticket", "uri": "cas://t2", "produced_by": "planner", "detail": "plain text"},
-    ]}
+    detail = json.dumps(
+        {
+            "id": "T-001",
+            "title": "Add login",
+            "specialty": "frontend",
+            "difficulty": "complex",
+            "depends_on": ["T-000"],
+        }
+    )
+    payload = {
+        "_art_details": [
+            {"kind": "ticket", "uri": "cas://t1", "produced_by": "planner", "detail": detail},
+            {"kind": "ticket", "uri": "cas://t2", "produced_by": "planner", "detail": "plain text"},
+        ]
+    }
     evs = events_for_node_output(payload, set())
     arts = [e for e in evs if e["type"] == "artifact"]
     assert [(a["room"], a["agent"], a["kind"]) for a in arts] == [("plan", "Planner", "ticket")] * 2
     assert arts[0]["label"] == "Ticket #1" and arts[0]["detail"] == "T-001 — Add login"
     tickets = [e for e in evs if e["type"] == "ticket"]
-    assert tickets == [{"type": "ticket", "id": "T-001", "title": "Add login",
-                        "specialty": "frontend", "difficulty": "complex", "tier": "T1",
-                        "depends_on": ["T-000"], "retired": False}]  # unparseable: pickup only
+    assert tickets == [
+        {
+            "type": "ticket",
+            "id": "T-001",
+            "title": "Add login",
+            "specialty": "frontend",
+            "difficulty": "complex",
+            "tier": "T1",
+            "depends_on": ["T-000"],
+            "retired": False,
+        }
+    ]  # unparseable: pickup only
     assert ticket_event("not json") is None
 
     # pool TaskEvent -> floor `task` event; malformed events are dropped
-    ev = {"phase": "start", "ticket_id": "T-001", "title": "Add login",
-          "specialty": "test", "tier": "T3"}
+    ev = {
+        "phase": "start",
+        "ticket_id": "T-001",
+        "title": "Add login",
+        "specialty": "test",
+        "tier": "T3",
+    }
     assert event_for_task(ev) == {"type": "task", **ev}
     odd = event_for_task({**ev, "specialty": "weird"})
     assert odd is not None and odd["specialty"] == "backend"
@@ -214,9 +343,14 @@ def test_ticket_artifact_detail_feeds_the_tickets_tab() -> None:
     from webapp.events import ticket_event
 
     long_title = "Add an item to the list " * 20
-    ticket = Ticket(id="T-001", title=long_title, specialty=Specialty.DATA,
-                    difficulty=Difficulty.COMPLEX, depends_on=("T-000",),
-                    seq=Seq("r", 1, 1, "planner", 0))
+    ticket = Ticket(
+        id="T-001",
+        title=long_title,
+        specialty=Specialty.DATA,
+        difficulty=Difficulty.COMPLEX,
+        depends_on=("T-000",),
+        seq=Seq("r", 1, 1, "planner", 0),
+    )
     detail = _artifact_detail("ticket", ticket)
     assert detail is not None
     row = ticket_event(detail)
@@ -231,8 +365,9 @@ def test_ticket_event_uses_the_run_tier_overrides() -> None:
 
     from webapp.events import ticket_event
 
-    detail = _json.dumps({"id": "T-1", "title": "x", "specialty": "data",
-                          "difficulty": "trivial", "depends_on": []})
+    detail = _json.dumps(
+        {"id": "T-1", "title": "x", "specialty": "data", "difficulty": "trivial", "depends_on": []}
+    )
     assert ticket_event(detail)["tier"] == "T3"  # type: ignore[index]
     assert ticket_event(detail, {"trivial": "T1"})["tier"] == "T1"  # type: ignore[index]
 
@@ -254,23 +389,44 @@ def test_gate_verdicts_surface_from_node_output_as_they_land() -> None:
     from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
     from foundry.state.seq import Seq
 
-    fail = GateResult(name="spec", status=GateStatus.FAIL, decision_deterministic=True,
-                      execution_deterministic=False,
-                      verdict_class=VerdictClass.CONFIG_EVALUABLE, run_against="sha-1",
-                      seq=Seq("r", 1, 1, "spec_gate", 0))
+    fail = GateResult(
+        name="spec",
+        status=GateStatus.FAIL,
+        decision_deterministic=True,
+        execution_deterministic=False,
+        verdict_class=VerdictClass.CONFIG_EVALUABLE,
+        run_against="sha-1",
+        seq=Seq("r", 1, 1, "spec_gate", 0),
+    )
     seen: set[str] = set()
     evs = events_for_node_output({"gates": [fail]}, seen)
-    assert [e for e in evs if e["type"] == "gate"] == [{
-        "type": "gate", "name": "spec", "status": "fail", "attested": True,
-        "advisory": True, "run_against": "sha-1",
-    }]
+    assert [e for e in evs if e["type"] == "gate"] == [
+        {
+            "type": "gate",
+            "name": "spec",
+            "status": "fail",
+            "attested": True,
+            "advisory": True,
+            "run_against": "sha-1",
+        }
+    ]
     # An enclosing node re-reporting the same verdict does not fire it again.
     assert events_for_node_output({"gates": [fail]}, seen) == []
 
 
 def test_epic_artifact_is_a_labelled_planner_pickup() -> None:
-    evs = events_for_node_output({"_art_details": [
-        {"kind": "epic", "uri": "cas://e1", "produced_by": "planner", "detail": "E1 — Storage"},
-    ]}, set())
+    evs = events_for_node_output(
+        {
+            "_art_details": [
+                {
+                    "kind": "epic",
+                    "uri": "cas://e1",
+                    "produced_by": "planner",
+                    "detail": "E1 — Storage",
+                },
+            ]
+        },
+        set(),
+    )
     [art] = [e for e in evs if e["type"] == "artifact"]
     assert (art["agent"], art["room"], art["label"]) == ("Planner", "plan", "Epic")

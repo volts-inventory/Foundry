@@ -192,6 +192,8 @@ _BDD_PASSING_DIFF = _PASSING_DIFF + (
     "+def _unauthenticated_rejected():\n"
     "+    assert app.VALUE != 401\n"
 )
+
+
 def _synthetic_resolve(handle: Artifact) -> FrozenModel:
     """KIND-dispatching typed resolver (an in-memory infra double).
 
@@ -237,8 +239,7 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
     if handle.kind == "ticket":
         tid = f"T-{handle.seq.local:03d}"
         # No `files`: unrestricted write scope, so the canned diff lands whole.
-        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND,
-                      seq=handle.seq)
+        return Ticket(id=tid, title=f"Ticket {tid}", specialty=Specialty.BACKEND, seq=handle.seq)
     if handle.kind == "feature_diff":
         return FeatureDiff(
             diff_uri=_DIFF_BODY_URI,
@@ -329,8 +330,12 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
     # First match wins: the revision prompt gets the fixed plan, the first pass
     # a plan with no security/abuse criterion (a Spec FAIL); an empty delta falls
     # back to that full re-plan.
-    scripts = {"REVISION PASS": _plan(PRD_PAYLOAD), DELTA_SOP_KEY: "{}", **_SCRIPTS,
-               PLANNER_SOP_KEY: _plan(no_abuse)}
+    scripts = {
+        "REVISION PASS": _plan(PRD_PAYLOAD),
+        DELTA_SOP_KEY: "{}",
+        **_SCRIPTS,
+        PLANNER_SOP_KEY: _plan(no_abuse),
+    }
     tx = MockTransport.scripted(scripts, default_verdict="approve")
     cas = ArtifactStore()
     rt = AgentRuntime(
@@ -389,14 +394,19 @@ def test_a_spec_advance_resets_the_fix_budget_for_the_build_boundary(tmp_path: A
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
     budgets: list[tuple[GateStatus, int]] = []
     try:
-        for step in app.stream({"request": "build a todo app"}, _config("run-respec-budget"),
-                               stream_mode="updates"):
+        for step in app.stream(
+            {"request": "build a todo app"}, _config("run-respec-budget"), stream_mode="updates"
+        ):
             out = step.get("spec_gate")
             if out:
                 (verdict,) = out["gates"]
                 ledger = out.get("budget")
-                budgets.append((verdict.status, ledger.fix_attempts_since_all_green
-                                if ledger is not None else -1))
+                budgets.append(
+                    (
+                        verdict.status,
+                        ledger.fix_attempts_since_all_green if ledger is not None else -1,
+                    )
+                )
     finally:
         reset_gate_write_verifier(token)
     assert budgets == [(GateStatus.FAIL, 1), (GateStatus.PASS, 0)]
@@ -423,19 +433,26 @@ def test_a_build_with_no_ticket_built_halts_at_the_final_gates_without_a_review(
     src.mkdir()
     (src / "README.md").write_text("seed\n")
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
-    rt = AgentRuntime(proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
-                      adapter=_FailingAdapter())
+    rt = AgentRuntime(
+        proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)), adapter=_FailingAdapter()
+    )
     records = GlobalRecords()
     app = build_supervisor_graph(
-        rt, runner=_runner(records), resolve=_synthetic_resolve,
-        resolve_blob=_resolve_blob_factory(_PASSING_DIFF), source_dir=str(src),
+        rt,
+        runner=_runner(records),
+        resolve=_synthetic_resolve,
+        resolve_blob=_resolve_blob_factory(_PASSING_DIFF),
+        source_dir=str(src),
     ).compile(checkpointer=MemorySaver())
     config = _config("run-nothing-built")
     del config["configurable"]["subject_artifact_uri"]
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
     try:
-        nodes = [n for step in app.stream({"request": "build a todo app"}, config,
-                                          stream_mode="updates") for n in step]
+        nodes = [
+            n
+            for step in app.stream({"request": "build a todo app"}, config, stream_mode="updates")
+            for n in step
+        ]
     finally:
         reset_gate_write_verifier(token)
 

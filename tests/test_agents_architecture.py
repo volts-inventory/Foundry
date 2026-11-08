@@ -63,8 +63,13 @@ def test_entry_predicates(enter: Any, matching: list[list[str]], other: list[str
 @pytest.mark.parametrize(
     ("make", "match", "other", "kind", "node_id"),
     [
-        (make_domain_specialist_node, ["regulated"], ["ui"], "domain_addendum",
-         DOMAIN_SPECIALIST_NODE_ID),
+        (
+            make_domain_specialist_node,
+            ["regulated"],
+            ["ui"],
+            "domain_addendum",
+            DOMAIN_SPECIALIST_NODE_ID,
+        ),
         (make_ux_design_node, ["frontend"], ["regulated"], "ux_spec", UX_DESIGN_NODE_ID),
     ],
 )

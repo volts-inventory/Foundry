@@ -63,7 +63,9 @@ class SmokeGate:
     def execute(self, workdir: Path) -> ZoneAObservation:
         try:
             rc, out, err = ground_untrusted(
-                self.cmd, workdir, timeout_s=self._timeout_s,
+                self.cmd,
+                workdir,
+                timeout_s=self._timeout_s,
                 extra_env=self._pyenv.run_env() if self._pyenv is not None else None,
                 binds=self._pyenv.binds if self._pyenv is not None else (),
             )

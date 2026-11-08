@@ -48,6 +48,7 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     assert app.is_file()
     assert test_app.is_file()
     assert "VALUE = 42" in app.read_text(encoding="utf-8")
+    assert result.draft_status is None
 
     # The Spec gate's criteria.json INPUT is not a source file — it is excluded.
     assert not (out / "criteria.json").exists()
@@ -82,6 +83,21 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
     assert (out / "DRAFT-STATUS.md").is_file()
     assert "held at the gate" in (out / "DRAFT-STATUS.md").read_text(encoding="utf-8").lower()
     assert "DRAFT written to" in result.summary()
+    assert result.draft_status == (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
+
+
+def test_halted_run_carries_its_draft_status_without_an_output_dir() -> None:
+    result = run(
+        "build a broken service",
+        thread_id="cli-status-halt",
+        diff_body=_ERROR_DIFF,
+        max_fix_attempts=2,
+    )
+
+    assert result.passed is False and result.draft_root is None
+    assert result.draft_status is not None
+    assert "held at the gate" in result.draft_status.lower()
+    assert "❌ **test**" in result.draft_status
 
 
 def test_a_run_stopped_at_its_cap_still_writes_its_latest_tree(
@@ -96,8 +112,7 @@ def test_a_run_stopped_at_its_cap_still_writes_its_latest_tree(
     monkeypatch.setattr("foundry.agents.quality.reviewer.review", capped)
     out = tmp_path / "generated"
     with pytest.raises(TimeCapExceeded) as caught:
-        run("build a tiny URL-shortener service", thread_id="cli-out-capped",
-            output_dir=str(out))
+        run("build a tiny URL-shortener service", thread_id="cli-out-capped", output_dir=str(out))
 
     assert "VALUE = 42" in (out / "app.py").read_text(encoding="utf-8")
     status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
@@ -119,10 +134,11 @@ def test_a_manifest_write_failure_never_changes_the_build_result(
     def boom(*_: object, **__: object) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr("foundry.cli.write_manifest", boom)
+    monkeypatch.setattr("foundry.cli.runner.write_manifest", boom)
     out = tmp_path / "generated"
-    result = run("build a tiny URL-shortener service", thread_id="cli-out-manifest-fail",
-                 output_dir=str(out))
+    result = run(
+        "build a tiny URL-shortener service", thread_id="cli-out-manifest-fail", output_dir=str(out)
+    )
     assert result.passed is True and (out / "app.py").is_file()
     assert not (out / "BUILD-MANIFEST.json").exists()
 
@@ -137,3 +153,38 @@ def test_telemetry_details_every_ticket_past_the_bulk_cap() -> None:
     picked = _detailed_artifacts(arts)
     assert sum(a.kind == "ticket" for a in picked) == 5
     assert sum(a.kind == "acceptance_criterion" for a in picked) == 200
+
+
+def test_a_run_halted_in_planning_has_no_draft_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    import foundry.cli as cli
+
+    # An empty plan fails the Spec gate before any ticket is built.
+    monkeypatch.setattr(cli.doubles, "_SCRIPTS", {"You are the Planner": "{}"})
+    result = run("build a tiny service", thread_id="cli-status-plan-halt", max_fix_attempts=1)
+
+    assert result.passed is False and result.gate_statuses.get("spec") is GateStatus.FAIL
+    assert result.draft_status is None
+
+
+def test_a_draft_tree_that_cannot_be_written_is_tried_once_without_a_best(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.cli as cli
+
+    calls: list[object] = []
+
+    def boom(*_: object, **kw: object) -> str:
+        calls.append(kw.get("best"))
+        raise ValueError("unparseable diff")
+
+    monkeypatch.setattr(cli.output, "_draft_best", lambda *_: None)
+    monkeypatch.setattr(cli.output, "_write_output_tree", boom)
+    root, text = cli._write_draft_on_halt(
+        {"gates": []},
+        str(tmp_path),
+        gate_findings={},
+        resolve=lambda h: None,
+        resolve_blob=lambda h: None,
+    )
+    assert root is None and "held at the gate" in text.lower()
+    assert calls == [None]

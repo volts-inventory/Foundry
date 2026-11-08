@@ -191,8 +191,13 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
     from the new node, so a later approve on the same key cannot override it."""
     from foundry.graph.supervisor import _commit_judgment_ledger
 
-    finding = {"finding": "x", "failing_check": "", "command": "app", "expected": "1",
-               "actual": "2"}
+    finding = {
+        "finding": "x",
+        "failing_check": "",
+        "command": "app",
+        "expected": "1",
+        "actual": "2",
+    }
     final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", [finding])]))
     [rc] = final["gates"]
     assert rc.status is GateStatus.FAIL
@@ -207,19 +212,30 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
 
 def _gate(name: str, status: GateStatus, *findings: str, local: int = 0) -> GateResult:
     return GateResult(
-        name=name, status=status, decision_deterministic=True,
-        execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
-        findings=findings, run_against="tree-1", seq=Seq("r", 1, local, "gate", 0),
+        name=name,
+        status=status,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        findings=findings,
+        run_against="tree-1",
+        seq=Seq("r", 1, local, "gate", 0),
     )
 
 
 _S001_FAILED = "BDD criterion S001: scenario features/T1.feature::S001 failed"
-_CITES_S001 = {"finding": "total-sum check is fragile", "failing_check": "S001",
-               "command": "pytest -k S001", "expected": "", "actual": ""}
+_CITES_S001 = {
+    "finding": "total-sum check is fragile",
+    "failing_check": "S001",
+    "command": "pytest -k S001",
+    "expected": "",
+    "actual": "",
+}
 
 
-def _review(state: FactoryState, cas: ArtifactStore, tree: str | None,
-            monkeypatch: pytest.MonkeyPatch) -> tuple[GateResult, str]:
+def _review(
+    state: FactoryState, cas: ArtifactStore, tree: str | None, monkeypatch: pytest.MonkeyPatch
+) -> tuple[GateResult, str]:
     # Materializing a real tree is gate_wiring's job (and its tests'); pin the result.
     monkeypatch.setattr(reviewer_critic, "_reviewed_tree", lambda *_: tree)
     transport = MockTransport(verdicts=[verdict_json("request-changes", [_CITES_S001])])
@@ -228,15 +244,18 @@ def _review(state: FactoryState, cas: ArtifactStore, tree: str | None,
     return verdict, transport.requests[0]["messages"][0]["content"]
 
 
-@pytest.mark.parametrize(("test_gate", "tree", "blocks"), [
-    (_gate("test", GateStatus.PASS, local=1), "tree-1", False),
-    (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-1", True),
-    # A fix pass: the failure is on the pre-fix tree, not the one under review.
-    (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-2", False),
-])
+@pytest.mark.parametrize(
+    ("test_gate", "tree", "blocks"),
+    [
+        (_gate("test", GateStatus.PASS, local=1), "tree-1", False),
+        (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-1", True),
+        # A fix pass: the failure is on the pre-fix tree, not the one under review.
+        (_gate("test", GateStatus.FAIL, _S001_FAILED, local=1), "tree-2", False),
+    ],
+)
 def test_reviewer_blocks_only_on_a_check_failing_on_the_reviewed_tree(
-        records: Any, monkeypatch: pytest.MonkeyPatch, test_gate: GateResult, tree: str,
-        blocks: bool) -> None:
+    records: Any, monkeypatch: pytest.MonkeyPatch, test_gate: GateResult, tree: str, blocks: bool
+) -> None:
     cas = ArtifactStore()
     state = {**_seed(cas), "gates": [_gate("build", GateStatus.PASS), test_gate]}
     verdict, prompt = _review(state, cas, tree, monkeypatch)
@@ -260,6 +279,7 @@ def test_failing_checks_keep_findingless_gates_and_skip_reviews_and_other_trees(
 def test_reviewed_tree_is_not_built_when_nothing_failed() -> None:
     def boom(*_: Any) -> Any:
         raise AssertionError("materialized")
+
     passing: FactoryState = {"gates": [_gate("test", GateStatus.PASS)]}
     assert reviewer_critic._reviewed_tree(passing, boom, boom) is None
     failed: FactoryState = {"gates": [_gate("test", GateStatus.FAIL)]}

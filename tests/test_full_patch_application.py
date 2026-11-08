@@ -33,8 +33,11 @@ def a_seq(local: int = 0) -> Seq:
 
 def feature_diff(uri: str, local: int = 0) -> FeatureDiff:
     return FeatureDiff(
-        diff_uri=uri, task_id=f"t-{local}", branch=f"task/t-{local}",
-        base_tree_sha="base", seq=a_seq(local),
+        diff_uri=uri,
+        task_id=f"t-{local}",
+        branch=f"task/t-{local}",
+        base_tree_sha="base",
+        seq=a_seq(local),
     )
 
 
@@ -56,11 +59,7 @@ MOD_DIFF = (
 
 DEL_DIFF = "--- a/dead.py\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-DEAD = 1\n"
 
-RENAME_DIFF = (
-    "diff --git a/old.py b/new.py\n"
-    "rename from old.py\n"
-    "rename to new.py\n"
-)
+RENAME_DIFF = "diff --git a/old.py b/new.py\nrename from old.py\nrename to new.py\n"
 
 
 # ---- parser ------------------------------------------------------------------
@@ -148,8 +147,12 @@ def write_sources(tmp_path: Path, bodies: dict[str, str]) -> Path:
     """Materialize N diffs (Seq order = insertion order) into a workdir."""
     uris = list(bodies)
     artifacts = [
-        Artifact(kind="feature_diff", uri=f"cas://feature_diff/{i}", produced_by="junior_engineer",
-                 seq=a_seq(i))
+        Artifact(
+            kind="feature_diff",
+            uri=f"cas://feature_diff/{i}",
+            produced_by="junior_engineer",
+            seq=a_seq(i),
+        )
         for i, _ in enumerate(uris)
     ]
     diffs = {a.uri: feature_diff(uris[i], i) for i, a in enumerate(artifacts)}
@@ -171,7 +174,7 @@ def test_second_diff_edits_a_file_the_first_created(tmp_path: Path) -> None:
         tmp_path,
         {
             "cas://one": "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,3 @@\n"
-                         "+import os\n+VALUE = 1\n+print(VALUE)\n",
+            "+import os\n+VALUE = 1\n+print(VALUE)\n",
             "cas://two": MOD_DIFF,
         },
     )
@@ -194,8 +197,10 @@ def test_delete_of_absent_path_is_tolerated(tmp_path: Path) -> None:
     # is "contributes nothing", not an error.
     dest = write_sources(
         tmp_path,
-        {"cas://one": '{"kind": "full-file-snapshot", "files": {"a.py": "A\\n"}, '
-                      '"deleted": ["never-existed.py"]}'},
+        {
+            "cas://one": '{"kind": "full-file-snapshot", "files": {"a.py": "A\\n"}, '
+            '"deleted": ["never-existed.py"]}'
+        },
     )
     assert (dest / "a.py").exists()
 

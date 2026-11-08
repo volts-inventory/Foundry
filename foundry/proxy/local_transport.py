@@ -86,8 +86,9 @@ _REASONING_MEMORY = 1024
 # decoder silently drops the rest (top_k, min_p, repeat_penalty), so those ride as
 # extra body fields: honoured by llama.cpp / vLLM / LM Studio, while on Ollama the
 # model's Modelfile PARAMETERs supply them (Qwen tags ship top_k 20, min_p 0).
-_OPENAI_SAMPLING = frozenset({"temperature", "top_p", "presence_penalty",
-                              "frequency_penalty", "seed"})
+_OPENAI_SAMPLING = frozenset(
+    {"temperature", "top_p", "presence_penalty", "frequency_penalty", "seed"}
+)
 _SCHEMA_REJECTION_MARKERS = ("response_format", "json_schema", "schema", "structured", "grammar")
 
 
@@ -162,8 +163,10 @@ class LocalOpenAITransport:
                 import openai
             except ImportError as exc:  # pragma: no cover - import guard
                 raise TransportError("the local backend requires the openai SDK") from exc
-            return openai.OpenAI(base_url=self.base_url, api_key=_PLACEHOLDER_KEY,
-                                 timeout=timeout_s, max_retries=0)
+            return openai.OpenAI(
+                base_url=self.base_url, api_key=_PLACEHOLDER_KEY, timeout=timeout_s, max_retries=0
+            )
+
         self._cache = _ClientCache(_build, injected=client)
 
     def tools_support(self, model: str) -> bool | None:
@@ -204,9 +207,11 @@ class LocalOpenAITransport:
 
         # Ollama's /v1 ignores `think` and honours this; "none" turns a Qwen3.x
         # model's default thinking off.
-        params: dict[str, Any] = {"model": model, "messages": messages,
-                                  "reasoning_effort": (request.get("local_effort") or "xhigh")
-                                  if thinking else "none"}
+        params: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "reasoning_effort": (request.get("local_effort") or "xhigh") if thinking else "none",
+        }
         max_tokens = request.get("max_tokens")
         if isinstance(max_tokens, int) and max_tokens > 0:
             params["max_tokens"] = max_tokens
@@ -227,8 +232,7 @@ class LocalOpenAITransport:
                 if model in self._tools_by_model or not _is_tools_rejection(exc):
                     raise
                 self._tools_by_model[model] = False
-                progress.log(f"local server rejected tools for {model} ({exc}); "
-                             "using JSON actions")
+                progress.log(f"local server rejected tools for {model} ({exc}); using JSON actions")
                 raise ToolsUnsupported(f"local server rejected tools for {model}: {exc}") from exc
             self._tools_by_model[model] = True
             return response
@@ -236,18 +240,23 @@ class LocalOpenAITransport:
         if schema is None:
             return self._call(params)
         if self.schema_supported is not False:
-            native = {**params, "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "response", "schema": schema, "strict": True},
-            }}
+            native = {
+                **params,
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "schema": schema, "strict": True},
+                },
+            }
             try:
                 response = self._call(native)
             except Exception as exc:
                 if not _is_schema_rejection(exc):
                     raise
                 self.schema_supported = False
-                progress.log(f"local server rejected json_schema output ({exc}); "
-                             "falling back to prompt-and-parse")
+                progress.log(
+                    f"local server rejected json_schema output ({exc}); "
+                    "falling back to prompt-and-parse"
+                )
             else:
                 self.schema_supported = True
                 return response
@@ -304,12 +313,21 @@ class LocalServerStatus:
     model_served: bool | None = None  # is ``model`` among ``models`` (None: not asked)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"url": self.url, "reachable": self.reachable, "models": list(self.models),
-                "error": self.error, "model": self.model, "model_served": self.model_served}
+        return {
+            "url": self.url,
+            "reachable": self.reachable,
+            "models": list(self.models),
+            "error": self.error,
+            "model": self.model,
+            "model_served": self.model_served,
+        }
 
 
 def check_local_server(
-    url: str = DEFAULT_LOCAL_URL, *, model: str | None = None, timeout_s: float = 5.0,
+    url: str = DEFAULT_LOCAL_URL,
+    *,
+    model: str | None = None,
+    timeout_s: float = 5.0,
     opener: Any = None,
 ) -> LocalServerStatus:
     """Is the local server up, and which models does it serve (``GET /models``)?
@@ -328,5 +346,6 @@ def check_local_server(
     data = _as_dict(body).get("data")
     models = tuple(str(m.get("id")) for m in data or () if isinstance(m, dict) and m.get("id"))
     served = (model in models) if model else None
-    return LocalServerStatus(url=base, reachable=True, models=models, model=model,
-                             model_served=served)
+    return LocalServerStatus(
+        url=base, reachable=True, models=models, model=model, model_served=served
+    )

@@ -148,13 +148,15 @@ def resume_boundary(state: FactoryState, resolve: ArtifactResolver) -> str:
     """The boundary a halted run stopped at, read off its state: a Spec gate that
     has not passed, else a wave left unbuilt (the per-wave check spent its budget),
     else the final build/test gates."""
-    spec = max((g for g in state.get("gates") or () if g.name == "spec"),
-               key=lambda g: g.seq, default=None)
+    spec = max(
+        (g for g in state.get("gates") or () if g.name == "spec"), key=lambda g: g.seq, default=None
+    )
     if spec is None or spec.status is not GateStatus.PASS:
         return RESUME_SPEC
     if pending_wave(state, resolve):
         return RESUME_WAVE
     return RESUME_FINAL
+
 
 def _commit_judgment_ledger(
     prior: list[GateResult] | None,
@@ -252,6 +254,7 @@ def build_supervisor_graph(
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
     fix_policy: FixPolicy | None = None,
+    self_check_mode: str | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -331,12 +334,24 @@ def build_supervisor_graph(
     # channel writes fold through FactoryState's reducers on the parent run).
     planner = build_planner_subgraph(rt, index).compile()
     implementation = build_implementation_subgraph(
-        rt, source_dir=source_dir, resolve=resolve, resolve_blob=resolve_blob,
-        max_slots=max_slots, cost_cap_microusd=cost_cap_microusd,
-        workers=workers, ticket_tiers=ticket_tiers, on_task=on_task,
+        rt,
+        source_dir=source_dir,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        max_slots=max_slots,
+        cost_cap_microusd=cost_cap_microusd,
+        workers=workers,
+        ticket_tiers=ticket_tiers,
+        on_task=on_task,
+        self_check_mode=self_check_mode,
         wave_check=WaveBuildCheck(
-            rt, runner, resolve, resolve_blob,
-            max_fix_attempts=max_fix_attempts, profile=profile, ticket_tiers=ticket_tiers,
+            rt,
+            runner,
+            resolve,
+            resolve_blob,
+            max_fix_attempts=max_fix_attempts,
+            profile=profile,
+            ticket_tiers=ticket_tiers,
             fix_policy=policy,
         ),
     ).compile()
@@ -369,9 +384,16 @@ def build_supervisor_graph(
     def _bump_on_non_advance(
         state: FactoryState, config: RunnableConfig, out: dict[str, Any], *, boundary: str
     ) -> None:
-        bump_fix_attempts(state, config, out, boundary=boundary,
-                          records=runner.records, max_fix_attempts=max_fix_attempts,
-                          total_cap=fix_cap(state, resolve, max_fix_attempts), fix_policy=policy)
+        bump_fix_attempts(
+            state,
+            config,
+            out,
+            boundary=boundary,
+            records=runner.records,
+            max_fix_attempts=max_fix_attempts,
+            total_cap=fix_cap(state, resolve, max_fix_attempts),
+            fix_policy=policy,
+        )
 
     def _gate_workdir(name: str) -> Path:
         # A fresh materialization tree per gate run (materialize_workdir writes
@@ -400,8 +422,14 @@ def build_supervisor_graph(
         out["phase"] = _SPEC_GATE
         # A Spec PASS resets the counter: the re-plans it took must not shrink the
         # build/test boundary's fix budget.
-        settle_fix_attempts(state, config, out, boundary=SPEC_BOUNDARY,
-                            records=runner.records, max_fix_attempts=max_fix_attempts)
+        settle_fix_attempts(
+            state,
+            config,
+            out,
+            boundary=SPEC_BOUNDARY,
+            records=runner.records,
+            max_fix_attempts=max_fix_attempts,
+        )
         return out
 
     # The gates read the stack off state at gate time, so the boundary cannot
@@ -425,9 +453,18 @@ def build_supervisor_graph(
     def build_test_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         _stop_if_cancelled()
         out = _final_gates(state, config)
-        keep_best(state, config, out, boundary=bt_boundary, scope=frozenset(), rt=rt,
-                  resolve=resolve, resolve_blob=resolve_blob,
-                  rerun=lambda s: _final_gates(s, config), policy=policy)
+        keep_best(
+            state,
+            config,
+            out,
+            boundary=bt_boundary,
+            scope=frozenset(),
+            rt=rt,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
+            rerun=lambda s: _final_gates(s, config),
+            policy=policy,
+        )
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=bt_boundary)
         return out
@@ -502,14 +539,22 @@ def build_supervisor_graph(
         return decision
 
     def _review_skipped(state: FactoryState) -> bool:
-        return len({g.run_against for g in state.get("gates") or ()
-                    if g.name == "smoke"}) > 1
+        return len({g.run_against for g in state.get("gates") or () if g.name == "smoke"}) > 1
 
     def _route_quality(state: FactoryState, config: RunnableConfig) -> str:
         # After the gates passed, the review is the run's last step.
-        if policy.until_cap and route_after_gates(
-                state, config, boundary=bt_boundary, records=runner.records,
-                max_fix_attempts=max_fix_attempts, fix_policy=policy) == ADVANCE:
+        if (
+            policy.until_cap
+            and route_after_gates(
+                state,
+                config,
+                boundary=bt_boundary,
+                records=runner.records,
+                max_fix_attempts=max_fix_attempts,
+                fix_policy=policy,
+            )
+            == ADVANCE
+        ):
             return END
         return _BUILD_TEST_GATE
 
@@ -545,12 +590,17 @@ def build_supervisor_graph(
     g.add_conditional_edges(
         _IMPLEMENTATION,
         _route_implementation,
-        {_QUALITY: _QUALITY, _BUILD_TEST_GATE: _BUILD_TEST_GATE,
-         _TOKEN_CAP: _TOKEN_CAP, "halt": END},
+        {
+            _QUALITY: _QUALITY,
+            _BUILD_TEST_GATE: _BUILD_TEST_GATE,
+            _TOKEN_CAP: _TOKEN_CAP,
+            "halt": END,
+        },
     )
     g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
-    g.add_conditional_edges(_QUALITY, _route_quality,
-                            {_BUILD_TEST_GATE: _BUILD_TEST_GATE, END: END})
+    g.add_conditional_edges(
+        _QUALITY, _route_quality, {_BUILD_TEST_GATE: _BUILD_TEST_GATE, END: END}
+    )
 
     # BUILD+TEST boundary: advance -> END; fix -> back to implementation; halt -> END.
     g.add_conditional_edges(

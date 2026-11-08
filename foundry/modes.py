@@ -102,8 +102,11 @@ def preset_levels(
     local_tiers = {"cloud": (), "hybrid": ("T2", "T3"), "local": LEVEL_TIERS}[mode]
     url = validate_local_url(local_url)
     return {
-        tier: (Level(LOCAL_BACKEND, local_model, url) if tier in local_tiers
-               else Level(cloud_backend, cloud_models[tier]))
+        tier: (
+            Level(LOCAL_BACKEND, local_model, url)
+            if tier in local_tiers
+            else Level(cloud_backend, cloud_models[tier])
+        )
         for tier in LEVEL_TIERS
     }
 
@@ -127,8 +130,10 @@ def parse_levels(
         else:
             raise ValueError(f"levels: {tier} must be a mapping with backend and model")
         if backend != LOCAL_BACKEND and backend not in cloud_backends:
-            raise ValueError(f"levels: {tier} has unknown backend {backend!r}; choose from "
-                             f"{', '.join((*cloud_backends, LOCAL_BACKEND))}")
+            raise ValueError(
+                f"levels: {tier} has unknown backend {backend!r}; choose from "
+                f"{', '.join((*cloud_backends, LOCAL_BACKEND))}"
+            )
         if not _MODEL_ID.match(model):
             raise ValueError(f"levels: {tier} has an invalid model id {model!r}")
         if backend == LOCAL_BACKEND:
@@ -165,8 +170,13 @@ def resolve_levels(
     model = local_model or DEFAULT_LOCAL_MODEL
     if not _MODEL_ID.match(model):
         raise ValueError(f"invalid local model id {model!r}")
-    return preset_levels(model_mode, cloud_backend=backend, cloud_models=cloud_models,
-                         local_url=url, local_model=model)
+    return preset_levels(
+        model_mode,
+        cloud_backend=backend,
+        cloud_models=cloud_models,
+        local_url=url,
+        local_model=model,
+    )
 
 
 def local_tiers(levels: Mapping[str, Level]) -> frozenset[str]:
@@ -188,8 +198,9 @@ def level_lineage(levels: Mapping[str, Level]) -> LineageMap:
     curated pattern knows is pinned to its own family (``local:<id>``): the
     operator named it, so it is attested as exactly that model, never guessed
     into a known lineage."""
-    curated = LineageMap((*LOCAL_LINEAGE_ENTRIES, *OPENAI_LINEAGE_ENTRIES,
-                          *DEFAULT_LINEAGE_ENTRIES))
+    curated = LineageMap(
+        (*LOCAL_LINEAGE_ENTRIES, *OPENAI_LINEAGE_ENTRIES, *DEFAULT_LINEAGE_ENTRIES)
+    )
     pins: list[tuple[str, frozenset[str]]] = []
     for lvl in levels.values():
         if not lvl.local:
@@ -211,6 +222,7 @@ def build_level_proxy(
     """One proxy that routes each tier to its level's transport. Transports are
     shared between tiers on the same cloud backend / the same local server, so a
     local server's schema-support probe happens once per run."""
+
     def _local(url: str) -> ProviderTransport:
         return LocalOpenAITransport(url, timeout_s=DEFAULT_LOCAL_TIMEOUT_S)
 

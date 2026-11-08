@@ -199,6 +199,7 @@ PLAN: dict[str, Any] = {
     ],
 }
 
+
 def _paired_tickets() -> list[dict[str, Any]]:
     """PLAN's tickets in the older paired shape: no feature ticket writes a step
     module; one trailing test ticket binds both feature tickets' scenarios."""
@@ -207,9 +208,14 @@ def _paired_tickets() -> list[dict[str, Any]]:
     t1["files"] = ["todo/__init__.py", "todo/store.py"]
     t2["files"] = ["todo/api.py"]
     t3 = {
-        "id": "T-003", "title": "Step definitions for the todo features",
-        "specialty": "test", "difficulty": "trivial", "depends_on": ["T-001", "T-002"],
-        "files": ["tests/step_defs/test_todo.py"], "implements": [], "consumes": [],
+        "id": "T-003",
+        "title": "Step definitions for the todo features",
+        "specialty": "test",
+        "difficulty": "trivial",
+        "depends_on": ["T-001", "T-002"],
+        "files": ["tests/step_defs/test_todo.py"],
+        "implements": [],
+        "consumes": [],
         "scenarios": [],
     }
     return [t1, t2, t3]
@@ -290,7 +296,10 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
     assert writes["scope_tier"].tier.value == "standard"
     # PLAN persists in SQLite on Python: the planner pins the :memory: footgun itself.
     assert {c.id for c in writes["pinned_constraints"]} == {
-        "PC-001", "PC-002", "PC-python-sqlite-memory"}
+        "PC-001",
+        "PC-002",
+        "PC-python-sqlite-memory",
+    }
     assert "gates" not in writes  # agents triage, never bless (L5)
 
 
@@ -334,9 +343,7 @@ def test_bodies_resolve_back_and_ownership_carries_unit_criteria() -> None:
     assert lanes == {"data-T-001": "data", "backend-T-002": "backend", "test-T-003": "backend"}
     prd = cas.resolve(by_kind["prd"])
     assert set(prd.criterion_ids) == {"AC-001", "AC-002", "AC-003"}
-    criteria = [
-        cas.resolve(a) for a in writes["artifacts"] if a.kind == "acceptance_criterion"
-    ]
+    criteria = [cas.resolve(a) for a in writes["artifacts"] if a.kind == "acceptance_criterion"]
     assert all(isinstance(c, AcceptanceCriterion) and c.oracle_hint for c in criteria)
     # The sprint cap is clamped into the route's Triage envelope, never widened.
     plan = cas.resolve(by_kind["sprint_plan"])
@@ -491,17 +498,32 @@ def test_off_schema_fields_degrade_to_defaults_instead_of_raising() -> None:
     seq = Seq("r", 1, 1, NODE_ID, 0)
     criteria = [
         _build_criterion(item, ticket_id="T-1", default_id=f"AC-{i:03d}", seq=seq)
-        for i, item in enumerate([
-            {"id": "AC-1", "given": ["g"], "when": ["w"], "then": ["t"],
-             "criticality": "HIGH_RISK"},
-            {"id": "AC-2", "given": "g", "when": ["w", None, " "], "then": ["t"],
-             "criticality": "High Risk"},
-            {"id": None, "text": None, "criticality": "critical!!", "security_abuse": "false"},
-            {"id": "AC-4", "criticality": None, "security_abuse": "true", "text": "legacy"},
-        ])
+        for i, item in enumerate(
+            [
+                {
+                    "id": "AC-1",
+                    "given": ["g"],
+                    "when": ["w"],
+                    "then": ["t"],
+                    "criticality": "HIGH_RISK",
+                },
+                {
+                    "id": "AC-2",
+                    "given": "g",
+                    "when": ["w", None, " "],
+                    "then": ["t"],
+                    "criticality": "High Risk",
+                },
+                {"id": None, "text": None, "criticality": "critical!!", "security_abuse": "false"},
+                {"id": "AC-4", "criticality": None, "security_abuse": "true", "text": "legacy"},
+            ]
+        )
     ]
     assert [c.criticality for c in criteria] == [
-        Criticality.HIGH_RISK, Criticality.HIGH_RISK, Criticality.NORMAL, Criticality.NORMAL
+        Criticality.HIGH_RISK,
+        Criticality.HIGH_RISK,
+        Criticality.NORMAL,
+        Criticality.NORMAL,
     ]
     assert criteria[1].given == ("g",) and criteria[1].when == ("w",)
     assert criteria[2].id == "AC-002" and criteria[2].text == "" and not criteria[2].security_abuse
@@ -520,8 +542,12 @@ def test_off_schema_fields_degrade_to_defaults_instead_of_raising() -> None:
 
 
 def test_numeric_strings_and_floats_are_accepted_for_the_cap() -> None:
-    for raw, expected in (("3000000", 3_000_000), (3e6, 3_000_000), ("lots", 5_000_000),
-                          (float("nan"), 5_000_000)):
+    for raw, expected in (
+        ("3000000", 3_000_000),
+        (3e6, 3_000_000),
+        ("lots", 5_000_000),
+        (float("nan"), 5_000_000),
+    ):
         cas = ArtifactStore()
         sprint = {**PLAN["sprint_plan"], "usd_cap_microusd": raw}
         rt, _ = runtime_for(_plan(sprint_plan=sprint), cas=cas)
@@ -532,8 +558,12 @@ def test_numeric_strings_and_floats_are_accepted_for_the_cap() -> None:
 
 def test_one_bad_field_does_not_kill_the_plan() -> None:
     first = PLAN["tickets"][0]
-    bad = {**first, "difficulty": "brutal", "specialty": None,
-           "scenarios": [{**first["scenarios"][0], "criticality": "urgent"}]}
+    bad = {
+        **first,
+        "difficulty": "brutal",
+        "specialty": None,
+        "scenarios": [{**first["scenarios"][0], "criticality": "urgent"}],
+    }
     rt, _ = runtime_for(_plan(tickets=[bad], sprint_plan={"usd_cap_microusd": None}))
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 1
@@ -547,8 +577,16 @@ _CSEQ = Seq("r", 1, 1, NODE_ID, 1)
 
 
 def _ticket(tid: str, *deps: str, **extra: Any) -> dict[str, Any]:
-    return {"id": tid, "title": tid, "specialty": "backend", "difficulty": "standard",
-            "depends_on": list(deps), "files": [f"{tid}.py"], "scenarios": [], **extra}
+    return {
+        "id": tid,
+        "title": tid,
+        "specialty": "backend",
+        "difficulty": "standard",
+        "depends_on": list(deps),
+        "files": [f"{tid}.py"],
+        "scenarios": [],
+        **extra,
+    }
 
 
 def _scn(cid: str, *, abuse: bool = False) -> dict[str, Any]:
@@ -558,14 +596,21 @@ def _scn(cid: str, *, abuse: bool = False) -> dict[str, Any]:
 def test_tickets_parse_with_tolerant_enums_and_contract_filtering() -> None:
     tickets, criteria, concerns = _build_tickets(
         [
-            _ticket("T-1", specialty="Frontend", difficulty="COMPLEX",
-                    implements=["Api.get", "Nope"], consumes="Api.get",
-                    scenarios=[_scn("AC-1"), "stray"]),
+            _ticket(
+                "T-1",
+                specialty="Frontend",
+                difficulty="COMPLEX",
+                implements=["Api.get", "Nope"],
+                consumes="Api.get",
+                scenarios=[_scn("AC-1"), "stray"],
+            ),
             _ticket("T-2", "T-1", specialty="devops", difficulty="hard"),
             _ticket("T-3", "T-1", "T-2", specialty="test", scenarios=[_scn("AC-3")]),
             "not-a-ticket",
         ],
-        _TSEQ, _CSEQ, {"Api.get"},
+        _TSEQ,
+        _CSEQ,
+        {"Api.get"},
     )
     t1, t2, t3 = tickets
     assert all(isinstance(t, Ticket) for t in tickets)
@@ -589,7 +634,9 @@ def test_unknown_dependencies_are_dropped_with_a_concern() -> None:
 def test_cycles_lose_their_closing_edge() -> None:
     tickets, _, concerns = _build_tickets(
         [_ticket("A", "B"), _ticket("B", "C"), _ticket("C", "A"), _ticket("D", "D", "A")],
-        _TSEQ, _CSEQ, set(),
+        _TSEQ,
+        _CSEQ,
+        set(),
     )
     deps = {t.id: t.depends_on for t in tickets}
     assert deps == {"A": ("B",), "B": ("C",), "C": (), "D": ("A",)}
@@ -616,7 +663,9 @@ def test_duplicate_ticket_and_scenario_ids_later_entry_wins() -> None:
             _ticket("T-1", title="second", files=["b.py"], scenarios=[]),
             _ticket("T-3", scenarios=[{**_scn("AC-2"), "given": ["later"]}]),
         ],
-        _TSEQ, _CSEQ, set(),
+        _TSEQ,
+        _CSEQ,
+        set(),
     )
     by_id = {t.id: t for t in tickets}
     assert by_id["T-1"].title == "second" and by_id["T-1"].files == ("b.py",)
@@ -630,22 +679,30 @@ def test_duplicate_ticket_and_scenario_ids_later_entry_wins() -> None:
 def test_ownership_is_derived_from_ticket_files() -> None:
     tickets, _, _ = _build_tickets(
         [
-            _ticket("T-1", specialty="frontend", files=["web/page.html", "shared.py"],
-                    scenarios=[_scn("AC-1")]),
+            _ticket(
+                "T-1",
+                specialty="frontend",
+                files=["web/page.html", "shared.py"],
+                scenarios=[_scn("AC-1")],
+            ),
             _ticket("T-2", files=["shared.py"], scenarios=[_scn("AC-2")]),
             _ticket("T-3", files=[]),
             _ticket("T-4", "T-1", specialty="test", files=["tests/test_shared.py"]),
         ],
-        _TSEQ, _CSEQ, set(),
+        _TSEQ,
+        _CSEQ,
+        set(),
     )
     ownership = _ownership_from_tickets(tickets, _TSEQ)
     # A shared file goes to the later ticket and keeps both tickets' scenarios.
     assert ownership.owners == {
-        "web/page.html": "frontend-T-1", "shared.py": "backend-T-2",
+        "web/page.html": "frontend-T-1",
+        "shared.py": "backend-T-2",
         "tests/test_shared.py": "test-T-4",
     }
     assert ownership.unit_criteria == {
-        "web/page.html": ("AC-1",), "shared.py": ("AC-1", "AC-2"),
+        "web/page.html": ("AC-1",),
+        "shared.py": ("AC-1", "AC-2"),
         "tests/test_shared.py": ("AC-1",),
     }
     assert lane_of_area(ownership.area_of("frontend-T-1")) == "frontend"
@@ -657,14 +714,14 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
     cas = ArtifactStore()
     rt, _ = runtime_for(PLAN, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    tickets = {
-        t.id: t for t in (cas.resolve(a) for a in writes["artifacts"] if a.kind == "ticket")
-    }
+    tickets = {t.id: t for t in (cas.resolve(a) for a in writes["artifacts"] if a.kind == "ticket")}
     assert set(tickets) == {"T-001", "T-002", "T-003"}
     t2 = tickets["T-002"]
     assert isinstance(t2, Ticket)
     assert (t2.specialty, t2.difficulty, t2.depends_on) == (
-        Specialty.BACKEND, Difficulty.COMPLEX, ("T-001",)
+        Specialty.BACKEND,
+        Difficulty.COMPLEX,
+        ("T-001",),
     )
     assert t2.consumes == ("TodoStore.add",) and t2.scenario_ids == ("AC-001", "AC-002")
     # Each feature ticket binds its own scenarios; the fixtures ticket binds none.
@@ -709,15 +766,34 @@ def test_one_to_one_test_tickets_fold_into_their_features_end_to_end() -> None:
     # test tickets fold away and T-002 follows T-001 instead of its test ticket.
     t1, t2, _ = _paired_tickets()
     t2["depends_on"] = ["T-001", "T-003"]
-    pair = {"specialty": "test", "difficulty": "trivial", "implements": [],
-            "consumes": [], "scenarios": []}
-    plan = {**PAIRED_PLAN, "tickets": [
-        t1, t2,
-        {**pair, "id": "T-003", "title": "steps 1", "depends_on": ["T-001"],
-         "files": ["tests/test_store_steps.py"]},
-        {**pair, "id": "T-004", "title": "steps 2", "depends_on": ["T-002"],
-         "files": ["tests/test_api_steps.py"]},
-    ]}
+    pair = {
+        "specialty": "test",
+        "difficulty": "trivial",
+        "implements": [],
+        "consumes": [],
+        "scenarios": [],
+    }
+    plan = {
+        **PAIRED_PLAN,
+        "tickets": [
+            t1,
+            t2,
+            {
+                **pair,
+                "id": "T-003",
+                "title": "steps 1",
+                "depends_on": ["T-001"],
+                "files": ["tests/test_store_steps.py"],
+            },
+            {
+                **pair,
+                "id": "T-004",
+                "title": "steps 2",
+                "depends_on": ["T-002"],
+                "files": ["tests/test_api_steps.py"],
+            },
+        ],
+    }
     tickets, ownership = _emitted(plan)
     assert set(tickets) == {"T-001", "T-002"}
     assert tickets["T-002"].depends_on == ("T-001",)
@@ -745,11 +821,22 @@ def test_flagged_self_review_revises_once_in_node() -> None:
 
 def test_revision_with_tickets_emits_the_revised_tickets() -> None:
     flagged = _plan(criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]})
-    extra = {**PLAN["tickets"][1], "id": "T-004", "depends_on": ["T-001"],
-             "files": ["todo/limits.py"],
-             "scenarios": [{"id": "AC-009", "given": ["100 adds in a second"],
-                            "when": ["one more add arrives"], "then": ["it is rejected"],
-                            "criticality": "high-risk", "security_abuse": True}]}
+    extra = {
+        **PLAN["tickets"][1],
+        "id": "T-004",
+        "depends_on": ["T-001"],
+        "files": ["todo/limits.py"],
+        "scenarios": [
+            {
+                "id": "AC-009",
+                "given": ["100 adds in a second"],
+                "when": ["one more add arrives"],
+                "then": ["it is rejected"],
+                "criticality": "high-risk",
+                "security_abuse": True,
+            }
+        ],
+    }
     revised = _plan(tickets=[*PLAN["tickets"], extra])
     cas = ArtifactStore()
     rt, tx = runtime_for(flagged, revised, cas=cas)
@@ -763,8 +850,9 @@ def test_revision_with_tickets_emits_the_revised_tickets() -> None:
 
 
 def test_revision_output_is_what_gets_emitted() -> None:
-    flagged = _plan(criteria_review={"missing": ["no delete criterion"],
-                                     "security_abuse_omissions": []})
+    flagged = _plan(
+        criteria_review={"missing": ["no delete criterion"], "security_abuse_omissions": []}
+    )
     rt, tx = runtime_for(flagged, PLAN)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 2
@@ -794,7 +882,10 @@ def test_replan_retires_constraints_it_no_longer_emits() -> None:
     channel = merge_constraints(channel, second["pinned_constraints"])
 
     assert {c.id for c in live_constraints(channel)} == {
-        "PC-001", "OP-1", "PC-python-sqlite-memory"}
+        "PC-001",
+        "OP-1",
+        "PC-python-sqlite-memory",
+    }
 
 
 def test_replan_retires_tickets_it_no_longer_emits() -> None:
@@ -820,7 +911,9 @@ def test_replan_retires_tickets_it_no_longer_emits() -> None:
 def test_ticket_ids_are_made_file_safe_and_references_follow() -> None:
     tickets, criteria, concerns = _build_tickets(
         [_ticket("a/b"), _ticket("a-b"), _ticket("x y", "a/b", scenarios=[_scn("AC-1")])],
-        _TSEQ, _CSEQ, set(),
+        _TSEQ,
+        _CSEQ,
+        set(),
     )
     assert [t.id for t in tickets] == ["a-b-2", "a-b", "x-y"]
     assert tickets[2].depends_on == ("a-b-2",)
@@ -838,21 +931,25 @@ def _match(*needles: str) -> Callable[[dict[str, Any]], bool]:
 
 
 def _epic_scripts(
-    plan: dict[str, Any], replies: dict[str, dict[str, Any]],
+    plan: dict[str, Any],
+    replies: dict[str, dict[str, Any]],
     *extra: ResponseScript,
 ) -> list[ResponseScript]:
     return [
         *extra,
         ResponseScript(json.dumps(plan), match=_match(PLANNER_SOP_KEY)),
-        *(ResponseScript(json.dumps(r), match=_match(f"YOUR EPIC: {eid}"))
-          for eid, r in replies.items()),
+        *(
+            ResponseScript(json.dumps(r), match=_match(f"YOUR EPIC: {eid}"))
+            for eid, r in replies.items()
+        ),
         # A delta that changes nothing: the planner falls back to a full re-plan.
         ResponseScript("{}", match=_match(DELTA_SOP_KEY)),
     ]
 
 
 def _epic_runtime(
-    *scripts: ResponseScript, cas: ArtifactStore | None = None,
+    *scripts: ResponseScript,
+    cas: ArtifactStore | None = None,
     transport: type[MockTransport] = MockTransport,
 ) -> tuple[AgentRuntime, MockTransport]:
     tx = transport(scripts)
@@ -870,8 +967,14 @@ def _bodies(cas: ArtifactStore, writes: dict[str, Any], kind: str) -> list[Any]:
 
 
 def test_single_epic_with_inline_tickets_is_one_call() -> None:
-    epic = {"id": "E1", "title": "Todo", "summary": "all of it", "depends_on": [],
-            "provides": [], "consumes": []}
+    epic = {
+        "id": "E1",
+        "title": "Todo",
+        "summary": "all of it",
+        "depends_on": [],
+        "provides": [],
+        "consumes": [],
+    }
     rt, tx = runtime_for(_plan(epics=[epic]))
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 1
@@ -894,7 +997,13 @@ def test_multi_epic_plan_makes_one_ticket_call_per_epic_with_namespaced_ids() ->
 
     tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
     assert list(tickets) == [
-        "E1-T01", "E1-T02", "E1-T03", "E2-T01", "E2-T02", "E3-web-page", "E3-T02",
+        "E1-T01",
+        "E1-T02",
+        "E1-T03",
+        "E2-T01",
+        "E2-T02",
+        "E3-web-page",
+        "E3-T02",
     ]
     assert tickets["E3-T02"].depends_on == ("E3-web-page",)  # sanitized refs follow
     criteria = {c.id: c for c in _bodies(cas, writes, "acceptance_criterion")}
@@ -929,8 +1038,10 @@ def test_a_dependency_on_another_epics_ticket_is_dropped() -> None:
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     deps = {t.id: t.depends_on for t in _bodies(cas, writes, "ticket")}
     assert deps["E2-T01"] == ("E1-T02",)
-    assert any("E2-T01: dropped unknown dependencies E2-E1-T01" in c
-               for c in writes["agent_journal"][0].concerns)
+    assert any(
+        "E2-T01: dropped unknown dependencies E2-E1-T01" in c
+        for c in writes["agent_journal"][0].concerns
+    )
 
 
 def test_epic_calls_overlap_in_time() -> None:
@@ -965,8 +1076,7 @@ def test_token_cap_from_a_parallel_epic_call_propagates() -> None:
 def test_global_and_per_epic_ticket_caps(monkeypatch: pytest.MonkeyPatch) -> None:
     plan, replies = multi_epic_plan()
     replies["E1"]["tickets"] = [
-        {**replies["E1"]["tickets"][0], "id": f"T{i:02d}", "title": f"t{i}",
-         "files": [f"f{i}.py"]}
+        {**replies["E1"]["tickets"][0], "id": f"T{i:02d}", "title": f"t{i}", "files": [f"f{i}.py"]}
         for i in range(MAX_EPIC_TICKETS + 3)
     ]
     monkeypatch.setattr(planner, "MAX_PLAN_TICKETS", MAX_EPIC_TICKETS + 2)
@@ -998,7 +1108,8 @@ def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
     cas = ArtifactStore()
     rt, tx = _epic_runtime(
         *_epic_scripts(
-            plan, {**replies, "E2": flagged},
+            plan,
+            {**replies, "E2": flagged},
             ResponseScript(json.dumps(still), match=_match("YOUR EPIC: E2", "SELF-REVIEW")),
         ),
         cas=cas,
@@ -1013,9 +1124,9 @@ def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
     assert "Self-revised epic(s) E2 once" in writes["agent_journal"][0].summary
 
 
-def _first_pass(cas: ArtifactStore, *extra: ResponseScript) -> tuple[
-    Any, MockTransport, dict[str, Any]
-]:
+def _first_pass(
+    cas: ArtifactStore, *extra: ResponseScript
+) -> tuple[Any, MockTransport, dict[str, Any]]:
     plan, replies = multi_epic_plan()
     rt, tx = _epic_runtime(*_epic_scripts(plan, replies, *extra), cas=cas)
     node = make_planner_node(rt)
@@ -1035,9 +1146,13 @@ def test_spec_fix_naming_a_criterion_reruns_only_its_epic() -> None:
     from foundry.agents.implementation.tickets import read_tickets
 
     _, replies = multi_epic_plan()
-    revised = {**replies["E2"], "tickets": [
-        replies["E2"]["tickets"][0], {**replies["E2"]["tickets"][1], "id": "T03"},
-    ]}
+    revised = {
+        **replies["E2"],
+        "tickets": [
+            replies["E2"]["tickets"][0],
+            {**replies["E2"]["tickets"][1], "id": "T03"},
+        ],
+    }
     cas = ArtifactStore()
     node, tx, first = _first_pass(
         cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REVISION PASS"))
@@ -1050,7 +1165,11 @@ def test_spec_fix_naming_a_criterion_reruns_only_its_epic() -> None:
     prompt = json.dumps(new[0], ensure_ascii=False)
     assert "E2-AC01: scenario has no then step" in prompt and "E2-T02" in prompt
     assert {a.kind for a in second["artifacts"]} == {
-        "prd", "acceptance_criterion", "criteria_findings", "ticket", "ownership_map"
+        "prd",
+        "acceptance_criterion",
+        "criteria_findings",
+        "ticket",
+        "ownership_map",
     }
     after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
     live = {t.id: t for t in read_tickets(after, cas.resolve)}
@@ -1096,12 +1215,15 @@ def test_epics_are_positional_capped_and_validated() -> None:
 
 def test_epic_items_are_namespaced_and_capped() -> None:
     epic = _build_epics([{"id": "E1"}], set())[0][0]
-    items, concerns = _epic_items(epic, [
-        {"id": "T01", "depends_on": ["E1-T02"], "scenarios": [{"id": ""}, {"id": "AC9"}]},
-        {"id": "E1-T02"},
-        {},
-        *({"id": f"X{i}"} for i in range(MAX_EPIC_TICKETS)),
-    ])
+    items, concerns = _epic_items(
+        epic,
+        [
+            {"id": "T01", "depends_on": ["E1-T02"], "scenarios": [{"id": ""}, {"id": "AC9"}]},
+            {"id": "E1-T02"},
+            {},
+            *({"id": f"X{i}"} for i in range(MAX_EPIC_TICKETS)),
+        ],
+    )
     # The tail past the cap is kept marked dropped, so its scenarios can be rehomed.
     assert [bool(i.get(planner._DROPPED_KEY)) for i in items] == (
         [False] * MAX_EPIC_TICKETS + [True] * 3
@@ -1143,7 +1265,6 @@ def test_cross_epic_links_never_count_as_test_coverage() -> None:
     )
 
 
-
 def test_a_feature_ticket_with_its_own_test_file_needs_no_test_ticket() -> None:
     plan, replies = multi_epic_plan()
     replies["E1"]["tickets"] = replies["E1"]["tickets"][:2]  # no test ticket ...
@@ -1151,6 +1272,7 @@ def test_a_feature_ticket_with_its_own_test_file_needs_no_test_ticket() -> None:
     cas = ArtifactStore()
     _, writes = _run_epics(plan, replies, cas)
     assert not any("E1-T02 has scenarios" in c for c in writes["agent_journal"][0].concerns)
+
 
 def test_epics_are_recorded_and_read_back_whole_for_a_targeted_replan() -> None:
     plan, replies = multi_epic_plan()
@@ -1186,11 +1308,23 @@ def test_a_scenario_dropped_by_a_replan_stays_dropped() -> None:
 def test_a_full_replan_pairs_epics_by_title_not_position() -> None:
     plan, replies = multi_epic_plan()
     storage, api, web = plan["epics"]
-    search = {"id": "E2", "title": "Search", "summary": "find notes", "depends_on": ["E1"],
-              "provides": [], "consumes": []}
-    replan = {**plan, "epics": [
-        storage, search, {**api, "id": "E3"}, {**web, "id": "E4", "depends_on": ["E3"]},
-    ]}
+    search = {
+        "id": "E2",
+        "title": "Search",
+        "summary": "find notes",
+        "depends_on": ["E1"],
+        "provides": [],
+        "consumes": [],
+    }
+    replan = {
+        **plan,
+        "epics": [
+            storage,
+            search,
+            {**api, "id": "E3"},
+            {**web, "id": "E4", "depends_on": ["E3"]},
+        ],
+    }
     cas = ArtifactStore()
     node, tx, first = _first_pass(
         cas,
@@ -1224,14 +1358,34 @@ def test_replan_prompt_lists_only_the_current_prds_criteria() -> None:
         return Seq("r", epoch, 1, NODE_ID, local)
 
     arts = [
-        emit_artifact(AcceptanceCriterion(id="AC-1", text="kept", seq=seq(1, 0)),
-                      "acceptance_criterion", NODE_ID, seq(1, 0), store=store),
-        emit_artifact(AcceptanceCriterion(id="AC-2", text="dropped later", seq=seq(1, 1)),
-                      "acceptance_criterion", NODE_ID, seq(1, 1), store=store),
-        emit_artifact(PRD(title="v1", prd_uri="cas://p1", criterion_ids=("AC-1", "AC-2"),
-                          seq=seq(1, 2)), "prd", NODE_ID, seq(1, 2), store=store),
-        emit_artifact(PRD(title="v1", prd_uri="cas://p2", criterion_ids=("AC-1",),
-                          seq=seq(2, 0)), "prd", NODE_ID, seq(2, 0), store=store),
+        emit_artifact(
+            AcceptanceCriterion(id="AC-1", text="kept", seq=seq(1, 0)),
+            "acceptance_criterion",
+            NODE_ID,
+            seq(1, 0),
+            store=store,
+        ),
+        emit_artifact(
+            AcceptanceCriterion(id="AC-2", text="dropped later", seq=seq(1, 1)),
+            "acceptance_criterion",
+            NODE_ID,
+            seq(1, 1),
+            store=store,
+        ),
+        emit_artifact(
+            PRD(title="v1", prd_uri="cas://p1", criterion_ids=("AC-1", "AC-2"), seq=seq(1, 2)),
+            "prd",
+            NODE_ID,
+            seq(1, 2),
+            store=store,
+        ),
+        emit_artifact(
+            PRD(title="v1", prd_uri="cas://p2", criterion_ids=("AC-1",), seq=seq(2, 0)),
+            "prd",
+            NODE_ID,
+            seq(2, 0),
+            store=store,
+        ),
     ]
     text = _declared_criteria_text({"artifacts": arts}, rt)
     assert "AC-1" in text and "AC-2" not in text

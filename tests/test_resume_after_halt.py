@@ -80,22 +80,28 @@ def test_resume_after_a_wave_check_halt_reruns_the_check_and_continues(
     store = ArtifactStore()
     rec = _Recorder(writes={"T-001": {"app.py": "def broken(:\n"}})
     tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
-    rt = AgentRuntime(proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)),
-                      adapter=rec, cas=store)
+    rt = AgentRuntime(
+        proxy=ModelProviderProxy(tx, signer=ZoneBSigner(KEY, KEY_ID)), adapter=rec, cas=store
+    )
     src = tmp_path / "src"
     src.mkdir()
     records, saver = GlobalRecords(), MemorySaver()
 
     def app(max_fix_attempts: int) -> Any:
         return build_supervisor_graph(
-            rt, runner=_runner(records), resolve=store.resolve,
-            resolve_blob=store.resolve_blob, source_dir=str(src),
+            rt,
+            runner=_runner(records),
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+            source_dir=str(src),
             max_fix_attempts=max_fix_attempts,
         ).compile(checkpointer=saver)
 
     cfg = _config("wave-halt")
-    tickets = [_ticket("T-001", 0, files=("app.py",)),
-               _ticket("T-002", 1, files=("later.py",), deps=("T-001",))]
+    tickets = [
+        _ticket("T-001", 0, files=("app.py",)),
+        _ticket("T-002", 1, files=("later.py",), deps=("T-001",)),
+    ]
     _stream(app(1), _state(store, tickets), cfg, records)
     halted = app(1).get_state(cfg).values
     assert [t.id for t in pending_wave(halted, store.resolve)] == ["T-002"]
@@ -133,49 +139,79 @@ def test_resume_after_a_spec_halt_reenters_the_planner_revision(tmp_path: Path) 
 
 def test_rerun_after_a_final_gate_halt_reenters_the_final_gates(tmp_path: Path) -> None:
     request = "build a todo cli"
-    halted = run(request, thread_id="final-halt", state_dir=str(tmp_path),
-                 diff_body=_ERROR_DIFF, max_fix_attempts=1)
+    halted = run(
+        request,
+        thread_id="final-halt",
+        state_dir=str(tmp_path),
+        diff_body=_ERROR_DIFF,
+        max_fix_attempts=1,
+    )
     assert not halted.passed
     assert halted.resume_from == RESUME_FINAL and halted.resumable
     assert "rerun the same command to resume from the final gates" in halted.summary()
 
     nodes: list[str] = []
-    resumed = run(request, thread_id="final-halt", state_dir=str(tmp_path),
-                  progress_cb=lambda node, scope, **_k: nodes.append(node))
+    resumed = run(
+        request,
+        thread_id="final-halt",
+        state_dir=str(tmp_path),
+        progress_cb=lambda node, scope, **_k: nodes.append(node),
+    )
     assert resumed.passed
     assert "planner" not in nodes
     assert "build_test_gate" in nodes
 
 
 def test_a_new_thread_or_request_still_plans(tmp_path: Path) -> None:
-    run("build a todo cli", thread_id="t-old", state_dir=str(tmp_path),
-        diff_body=_ERROR_DIFF, max_fix_attempts=1)
+    run(
+        "build a todo cli",
+        thread_id="t-old",
+        state_dir=str(tmp_path),
+        diff_body=_ERROR_DIFF,
+        max_fix_attempts=1,
+    )
     for thread, request in (("t-new", "build a todo cli"), ("t-old", "build a notes cli")):
         nodes: list[str] = []
-        run(request, thread_id=thread, state_dir=str(tmp_path),
-            progress_cb=lambda node, scope, _n=nodes, **_k: _n.append(node))
+        run(
+            request,
+            thread_id=thread,
+            state_dir=str(tmp_path),
+            progress_cb=lambda node, scope, _n=nodes, **_k: _n.append(node),
+        )
         assert "planner" in nodes, (thread, request)
 
 
 def test_a_changed_spec_plans_fresh_instead_of_resuming(tmp_path: Path) -> None:
-    run("build a todo cli", thread_id="t-spec", state_dir=str(tmp_path),
-        diff_body=_ERROR_DIFF, max_fix_attempts=1)
+    run(
+        "build a todo cli",
+        thread_id="t-spec",
+        state_dir=str(tmp_path),
+        diff_body=_ERROR_DIFF,
+        max_fix_attempts=1,
+    )
     nodes: list[str] = []
-    run("build a todo cli", thread_id="t-spec", state_dir=str(tmp_path),
+    run(
+        "build a todo cli",
+        thread_id="t-spec",
+        state_dir=str(tmp_path),
         spec="Todos also carry a due date.",
-        progress_cb=lambda node, scope, **_k: nodes.append(node))
+        progress_cb=lambda node, scope, **_k: nodes.append(node),
+    )
     assert "planner" in nodes
 
 
 def test_the_cli_halt_message_says_how_to_resume(
-    tmp_path: Path, capsys: Any, monkeypatch: Any,
+    tmp_path: Path,
+    capsys: Any,
+    monkeypatch: Any,
 ) -> None:
     import foundry.cli as cli
 
     real_run = cli.run
-    monkeypatch.setattr(cli, "run", lambda *a, **k: real_run(*a, **k, diff_body=_ERROR_DIFF))
-    assert main(["--state-dir", str(tmp_path), "--max-fix-attempts", "1",
-                 "build a thing"]) == 1
+    monkeypatch.setattr(
+        cli.command, "run", lambda *a, **k: real_run(*a, **k, diff_body=_ERROR_DIFF)
+    )
+    assert main(["--state-dir", str(tmp_path), "--max-fix-attempts", "1", "build a thing"]) == 1
     assert "rerun the same command to resume from the final gates" in capsys.readouterr().out
 
 
@@ -188,8 +224,13 @@ def test_an_epoch_floor_outranks_a_resumed_runs_records() -> None:
 
 def test_a_resumed_process_seeds_the_floor_from_the_runs_newest_record() -> None:
     def note(run: str, epoch: int) -> GateTriage:
-        return GateTriage(name=f"n{epoch}", run_against="x", explanation="", produced_by="p",
-                          seq=Seq(run, epoch, 1, "p", 0))
+        return GateTriage(
+            name=f"n{epoch}",
+            run_against="x",
+            explanation="",
+            produced_by="p",
+            seq=Seq(run, epoch, 1, "p", 0),
+        )
 
     values = {"gate_triage": [note("run", 3), note("run", 9), note("other", 50)], "phase": "x"}
     assert _max_epoch(values, "run") == 9

@@ -68,15 +68,22 @@ class _Rt:
 
 def _criterion(cid: str, ticket: str, item: str = "milk") -> AcceptanceCriterion:
     return AcceptanceCriterion(
-        id=cid, text="Given … When … Then …", ticket_id=ticket,
-        oracle_hint=scenario_ref(ticket, cid), seq=_seq("planner"),
-        given=("an empty list",), when=(f'I add "{item}"',), then=("the list has 1 item",),
+        id=cid,
+        text="Given … When … Then …",
+        ticket_id=ticket,
+        oracle_hint=scenario_ref(ticket, cid),
+        seq=_seq("planner"),
+        given=("an empty list",),
+        when=(f'I add "{item}"',),
+        then=("the list has 1 item",),
     )
 
 
 def _state(
-    built: Mapping[str, str], criteria: tuple[AcceptanceCriterion, ...] = (),
-    stack: StackDecision | None = None, tickets: tuple[Ticket, ...] = (),
+    built: Mapping[str, str],
+    criteria: tuple[AcceptanceCriterion, ...] = (),
+    stack: StackDecision | None = None,
+    tickets: tuple[Ticket, ...] = (),
 ) -> tuple[dict[str, Any], Any, Any]:
     """A state whose integrated tree is ``built`` (one earlier ticket's diff) plus
     the criteria's trusted feature files; ``tickets`` are the plan's."""
@@ -91,10 +98,20 @@ def _state(
         artifacts.append(h)
         by_uri[h.uri] = c
     if built:
-        diff = FeatureDiff(diff_uri="cas://sha256/d0", task_id="T0", branch="task/T0",
-                           base_tree_sha="base", seq=_seq("junior_engineer"))
-        h = Artifact(kind=FEATURE_DIFF_KIND, uri="cas://fd/T0", produced_by="junior_engineer",
-                     task_id="T0", seq=diff.seq)
+        diff = FeatureDiff(
+            diff_uri="cas://sha256/d0",
+            task_id="T0",
+            branch="task/T0",
+            base_tree_sha="base",
+            seq=_seq("junior_engineer"),
+        )
+        h = Artifact(
+            kind=FEATURE_DIFF_KIND,
+            uri="cas://fd/T0",
+            produced_by="junior_engineer",
+            task_id="T0",
+            seq=diff.seq,
+        )
         artifacts.append(h)
         by_uri[h.uri] = diff
     body = json.dumps({"kind": "full-file-snapshot", "files": dict(built)}).encode()
@@ -106,16 +123,28 @@ def _state(
 
 @contextlib.contextmanager
 def _spec(
-    built: Mapping[str, str], criteria: tuple[AcceptanceCriterion, ...] = (), *,
-    own: tuple[str, ...] = (), files: tuple[str, ...] = (),
-    stack: StackDecision | None = None, tickets: tuple[Ticket, ...] = (),
+    built: Mapping[str, str],
+    criteria: tuple[AcceptanceCriterion, ...] = (),
+    *,
+    own: tuple[str, ...] = (),
+    files: tuple[str, ...] = (),
+    stack: StackDecision | None = None,
+    tickets: tuple[Ticket, ...] = (),
 ) -> Iterator[CheckSpec]:
     state, resolve, blob = _state(built, criteria, stack, tickets)
-    with check_base(state, resolve=resolve, resolve_blob=blob, rt=_Rt(),  # type: ignore[arg-type]
-                    settings=SelfCheckSettings()) as base:
-        yield CheckSpec(base=base,
-                        scope=frozenset(scenario_ref(c.ticket_id or "", c.id) for c in criteria),
-                        own_refs=frozenset(own), own_files=files)
+    with check_base(
+        state,
+        resolve=resolve,
+        resolve_blob=blob,
+        rt=_Rt(),  # type: ignore[arg-type]
+        settings=SelfCheckSettings(),
+    ) as base:
+        yield CheckSpec(
+            base=base,
+            scope=frozenset(scenario_ref(c.ticket_id or "", c.id) for c in criteria),
+            own_refs=frozenset(own),
+            own_files=files,
+        )
 
 
 def _steps(feature: str, item: str = "milk", ok: bool = True, extra: str = "") -> str:
@@ -124,7 +153,7 @@ def _steps(feature: str, item: str = "milk", ok: bool = True, extra: str = "") -
         f'scenarios("../features/{feature}")\n\n\n'
         '@given("an empty list", target_fixture="items")\n'
         "def _empty():\n    return []\n\n\n"
-        f'@when(parsers.parse(\'I add "{{x}}"\'))\n'
+        f"@when(parsers.parse('I add \"{{x}}\"'))\n"
         "def _add(items, x):\n    items.append(x)\n\n\n"
         '@then(parsers.parse("the list has {n:d} item"))\n'
         "def _count(items, n):\n"
@@ -139,8 +168,14 @@ def _sandbox_passes(
     for rel, text in files.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text, encoding="utf-8")
-    proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=120,
-                          env={**os.environ, **(env or {})})
+    proc = subprocess.run(
+        cmd,
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, **(env or {})},
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
@@ -155,8 +190,12 @@ def test_check_fails_an_import_only_the_sandbox_has(tmp_path: Path) -> None:
     (site / "tinydep" / "__init__.py").write_text("VALUE = 42\n")
     built = {"requirements.txt": "pytest\n"}
     mine = {"app.py": "import tinydep\n\nVALUE = tinydep.VALUE\n"}
-    _sandbox_passes(tmp_path / "wt", {**built, **mine}, [sys.executable, "-c", "import app"],
-                    env={"PYTHONPATH": str(site)})
+    _sandbox_passes(
+        tmp_path / "wt",
+        {**built, **mine},
+        [sys.executable, "-c", "import app"],
+        env={"PYTHONPATH": str(site)},
+    )
     with _spec(built, files=("app.py",)) as spec:
         session = SessionCheck(spec)
         session.opening()
@@ -174,9 +213,11 @@ def test_check_runs_the_trusted_feature_not_the_sessions_copy(tmp_path: Path) ->
 
     steps = _steps("T1.feature").replace("I add", "I put")
     mine = {"tests/test_t1.py": steps, "features/T1.feature": render_feature("T1", [own_feature])}
-    _sandbox_passes(tmp_path / "wt", mine,
-                    [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                     "tests/test_t1.py"])
+    _sandbox_passes(
+        tmp_path / "wt",
+        mine,
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests/test_t1.py"],
+    )
     ref = scenario_ref("T1", "AC-1")
     with _spec({}, (c,), own=(ref,), files=("tests/test_t1.py",)) as spec:
         session = SessionCheck(spec)
@@ -192,11 +233,11 @@ def test_check_runs_offline_as_the_gate_does(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)  # the real confined sandbox
     c = _criterion("AC-1", "T1")
     ref = scenario_ref("T1", "AC-1")
-    online = ("import socket\n\nsocket.create_connection(('1.1.1.1', 53), timeout=3).close()"
-              "\n\n")
+    online = "import socket\n\nsocket.create_connection(('1.1.1.1', 53), timeout=3).close()\n\n"
     with _spec({}, (c,), own=(ref,), files=("tests/test_t1.py",)) as spec:
         verdict = SessionCheck(spec).check(
-            {"tests/test_t1.py": _steps("T1.feature", extra=online)}, ())
+            {"tests/test_t1.py": _steps("T1.feature", extra=online)}, ()
+        )
     assert verdict.red and any(ref in line for line in verdict.yours), verdict
 
 
@@ -223,8 +264,10 @@ def test_the_opening_check_splits_pre_existing_failures_from_the_sessions_own() 
 
 def test_a_failure_the_session_causes_in_an_earlier_ticket_is_its_own() -> None:
     earlier = _criterion("AC-0", "T0")
-    built = {"tests/test_t0.py": _steps("T0.feature", extra="import app\n\n"),
-             "app.py": "VALUE = 1\n"}
+    built = {
+        "tests/test_t0.py": _steps("T0.feature", extra="import app\n\n"),
+        "app.py": "VALUE = 1\n",
+    }
     with _spec(built, (earlier,), files=("app.py",)) as spec:
         session = SessionCheck(spec)
         assert not session.opening().red
@@ -235,16 +278,20 @@ def test_a_failure_the_session_causes_in_an_earlier_ticket_is_its_own() -> None:
 @pytest.mark.skipif(shutil.which("go") is None, reason="no Go toolchain on this host")
 def test_a_go_stack_runs_through_the_same_check() -> None:
     stack = StackDecision(language="go", build="go build ./...", test="go test ./...")
-    built = {"go.mod": "module example.com/notes\n\ngo 1.21\n",
-             "main.go": "package main\n\nfunc main() { println(Greeting()) }\n",
-             "greet.go": "package main\n\nfunc Greeting() string { return \"hi\" }\n"}
+    built = {
+        "go.mod": "module example.com/notes\n\ngo 1.21\n",
+        "main.go": "package main\n\nfunc main() { println(Greeting()) }\n",
+        "greet.go": 'package main\n\nfunc Greeting() string { return "hi" }\n',
+    }
     with _spec(built, stack=stack, files=("greet.go",)) as spec:
         session = SessionCheck(spec)
         assert session.opening().green
-        broken = session.check({"greet.go": "package main\n\nfunc Greeting() int { "
-                                "return \"hi\" }\n"}, ())
-        fixed = session.check({"greet.go": "package main\n\nfunc Greeting() string { "
-                               "return \"hello\" }\n"}, ())
+        broken = session.check(
+            {"greet.go": 'package main\n\nfunc Greeting() int { return "hi" }\n'}, ()
+        )
+        fixed = session.check(
+            {"greet.go": 'package main\n\nfunc Greeting() string { return "hello" }\n'}, ()
+        )
     assert broken.red and any("greet.go" in line for line in broken.yours), broken
     assert fixed.green, fixed
 
@@ -253,12 +300,19 @@ def test_a_go_stack_runs_through_the_same_check() -> None:
 
 
 def _fake_base(tmp_path: Path, budget: int = 8) -> CheckBase:
-    return CheckBase({}, tmp_path, resolve=lambda a: None, resolve_blob=lambda u: b"",
-                     rt=_Rt(), settings=SelfCheckSettings(budget=budget))  # type: ignore[arg-type]
+    return CheckBase(
+        {},
+        tmp_path,
+        resolve=lambda a: None,
+        resolve_blob=lambda u: b"",
+        rt=_Rt(),
+        settings=SelfCheckSettings(budget=budget),
+    )  # type: ignore[arg-type]
 
 
 def _red_unless(marker: str, calls: list[dict[str, str]]) -> Any:
     """A fake gate run: the build FAILs naming app.py unless app.py holds ``marker``."""
+
     def _run(
         spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()
     ) -> tuple[GateOutcome, ...]:
@@ -266,6 +320,7 @@ def _red_unless(marker: str, calls: list[dict[str, str]]) -> Any:
         if marker in files.get("app.py", ""):
             return (GateOutcome("build", GateStatus.PASS, ()),)
         return (GateOutcome("build", GateStatus.FAIL, ("app.py:1: error: not done yet",)),)
+
     return _run
 
 
@@ -274,15 +329,15 @@ def test_an_unchanged_tree_answers_from_the_cache(
 ) -> None:
     calls: list[dict[str, str]] = []
     monkeypatch.setattr(self_check, "run_check", _red_unless("OK", calls))
-    spec = CheckSpec(base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(),
-                     own_files=("app.py",))
+    spec = CheckSpec(
+        base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(), own_files=("app.py",)
+    )
     session = SessionCheck(spec)
     session.opening()
     first = session.check({"app.py": "x"}, ())
     assert session.cached({"app.py": "x"}, ()) == first
     # Out-of-scope files and gate inputs never reach the gate copy or the key.
-    assert session.cached({"app.py": "x", "other.py": "y", "features/T1.feature": "z"}, ()) \
-        == first
+    assert session.cached({"app.py": "x", "other.py": "y", "features/T1.feature": "z"}, ()) == first
     assert session.cached({"app.py": "OK"}, ()) is None
     assert len(calls) == 2 and session.left == 7
 
@@ -292,9 +347,17 @@ def test_an_unchanged_tree_answers_from_the_cache(
 
 def _packet(turn_budget: int = 12) -> TaskPacket:
     return TaskPacket(
-        task={"id": "t-1", "title": "t-1", "branch": "task/t-1", "criterion_ids": [],
-              "files": ["app.py"], "rules": ["VERIFY BEFORE YOU FINISH: run verify"]},
-        worktree_path="/unused", turn_budget=turn_budget, cost_budget_microusd=1_000_000,
+        task={
+            "id": "t-1",
+            "title": "t-1",
+            "branch": "task/t-1",
+            "criterion_ids": [],
+            "files": ["app.py"],
+            "rules": ["VERIFY BEFORE YOU FINISH: run verify"],
+        },
+        worktree_path="/unused",
+        turn_budget=turn_budget,
+        cost_budget_microusd=1_000_000,
     )
 
 
@@ -315,14 +378,22 @@ def _observations(seen: list[list[dict[str, Any]]]) -> list[str]:
 
 
 def _run_loop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, actions: list[dict[str, Any]],
-    budget: int = 8, turn_budget: int = 12, run: Any = None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    actions: list[dict[str, Any]],
+    budget: int = 8,
+    turn_budget: int = 12,
+    run: Any = None,
 ) -> tuple[Any, list[list[dict[str, Any]]], list[dict[str, str]]]:
     calls: list[dict[str, str]] = []
     monkeypatch.setattr(self_check, "run_check", run or _red_unless("OK", calls))
-    spec = CheckSpec(base=_fake_base(tmp_path / "base", budget), scope=frozenset(),
-                     own_refs=frozenset(), own_files=("app.py",),
-                     rules={"VERIFY BEFORE YOU FINISH: run verify": CHECK_RULE})
+    spec = CheckSpec(
+        base=_fake_base(tmp_path / "base", budget),
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=("app.py",),
+        rules={"VERIFY BEFORE YOU FINISH: run verify": CHECK_RULE},
+    )
     seen: list[list[dict[str, Any]]] = []
     src = tmp_path / "src"
     src.mkdir()
@@ -334,13 +405,17 @@ def _run_loop(
 def test_done_is_refused_on_red_and_allowed_on_green(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, seen, calls = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "done", "summary": "built it"},
-        {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
-        {"action": "check"},
-        {"action": "done", "summary": "built it"},
-    ])
+    result, seen, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "built it"},
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "built it"},
+        ],
+    )
     opening = str(seen[0][0]["content"])
     assert "GATE CHECK ON THE STARTING TREE" in opening and CHECK_RULE in opening
     obs = _observations(seen)
@@ -357,12 +432,16 @@ def test_done_is_refused_on_red_and_allowed_on_green(
 def test_a_red_done_is_refused_at_most_twice(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, seen, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "done", "summary": "a"},
-        {"action": "done", "summary": "b"},
-        {"action": "done", "summary": "c"},
-    ])
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "a"},
+            {"action": "done", "summary": "b"},
+            {"action": "done", "summary": "c"},
+        ],
+    )
     obs = _observations(seen)
     assert all("ERROR: not done — the gates fail" in o for o in obs[1:3])
     assert "call done again" in obs[2]
@@ -373,16 +452,21 @@ def test_a_red_done_is_refused_at_most_twice(
 def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, seen, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "check"},
-        {"action": "write_file", "path": "app.py", "content": "x = 2\n"},
-        {"action": "check"},
-        {"action": "check"},
-        {"action": "done", "summary": "a"},
-        {"action": "done", "summary": "b"},
-        {"action": "done", "summary": "gave up"},
-    ], budget=2)
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "write_file", "path": "app.py", "content": "x = 2\n"},
+            {"action": "check"},
+            {"action": "check"},
+            {"action": "done", "summary": "a"},
+            {"action": "done", "summary": "b"},
+            {"action": "done", "summary": "gave up"},
+        ],
+        budget=2,
+    )
     obs = _observations(seen)
     assert "CHECK FAILED" in obs[4] and "cached" in obs[4]  # no budget, same tree
     stop = session_stop_reason(result.triage)
@@ -392,13 +476,18 @@ def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(
 def test_an_edit_after_the_last_check_is_not_reported_red(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, seen, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "check"},
-        {"action": "write_file", "path": "app.py", "content": "x = 2  # OK\n"},
-        {"action": "check"},
-        {"action": "done", "summary": "fixed, unchecked"},
-    ], budget=1)
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "write_file", "path": "app.py", "content": "x = 2  # OK\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "fixed, unchecked"},
+        ],
+        budget=1,
+    )
     assert "ERROR: no checks left" in _observations(seen)[3]
     # No check left to judge the final tree: done is accepted, and nothing says red.
     assert session_stop_reason(result.triage) is None, result.triage
@@ -408,13 +497,18 @@ def test_an_edit_after_the_last_check_is_not_reported_red(
 def test_a_refusal_with_no_check_left_does_not_ask_for_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _, seen, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "check"},
-        {"action": "done", "summary": "a"},
-        {"action": "done", "summary": "b"},
-        {"action": "done", "summary": "c"},
-    ], budget=1)
+    _, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "a"},
+            {"action": "done", "summary": "b"},
+            {"action": "done", "summary": "c"},
+        ],
+        budget=1,
+    )
     refusal = _observations(seen)[2]
     assert "ERROR: not done" in refusal and "No checks are left" in refusal
     assert "call check" not in refusal
@@ -427,6 +521,7 @@ def _errors_after_opening(calls: list[Any]) -> Any:
     def _run(spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()) -> Any:
         calls.append(dict(files))
         return (GateOutcome("build", GateStatus.PASS, ()),) if not files else _ERRORED
+
     return _run
 
 
@@ -435,8 +530,14 @@ def test_a_check_no_gate_could_judge_is_not_cached_and_spends_only_past_a_bound(
 ) -> None:
     calls: list[Any] = []
     monkeypatch.setattr(self_check, "run_check", _errors_after_opening(calls))
-    session = SessionCheck(CheckSpec(base=_fake_base(tmp_path, budget=3), scope=frozenset(),
-                                     own_refs=frozenset(), own_files=("app.py",)))
+    session = SessionCheck(
+        CheckSpec(
+            base=_fake_base(tmp_path, budget=3),
+            scope=frozenset(),
+            own_refs=frozenset(),
+            own_files=("app.py",),
+        )
+    )
     session.opening()
     tree = {"app.py": "a"}
     assert session.check(tree, ()).errors
@@ -452,10 +553,15 @@ def test_an_unjudged_final_tree_is_unverified_and_done_keeps_its_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[Any] = []
-    result, _, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-        {"action": "done", "summary": "built it", "triage": ["the cache is untested"]},
-    ], run=_errors_after_opening(calls))
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "built it", "triage": ["the cache is untested"]},
+        ],
+        run=_errors_after_opening(calls),
+    )
     notes = [t.explanation for t in result.triage]
     assert notes[:2] == ["built it", "the cache is untested"], notes
     assert any(n.startswith(CHECK_UNVERIFIED) and "could not judge" in n for n in notes), notes
@@ -465,9 +571,14 @@ def test_an_unjudged_final_tree_is_unverified_and_done_keeps_its_summary(
 def test_a_session_out_of_turns_with_checks_left_says_why_it_is_unverified(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    result, _, _ = _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
-    ], turn_budget=1)
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+        ],
+        turn_budget=1,
+    )
     [note] = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_UNVERIFIED)]
     assert "ended without checking" in note and "no check" not in note, note
 
@@ -485,11 +596,16 @@ def test_the_session_end_walks_the_final_tree_once(
         return real(root)
 
     monkeypatch.setattr(proxy_agent, "walk_worktree", _walk)
-    _run_loop(tmp_path, monkeypatch, [
-        {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
-        {"action": "check"},
-        {"action": "done", "summary": "built it"},
-    ], budget=1)
+    _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "built it"},
+        ],
+        budget=1,
+    )
     # The start, the check, the done's check lookup, and one walk at the end.
     assert len(walks) == 4, walks
 
@@ -537,25 +653,37 @@ def _fake_run(outcomes: list[tuple[GateOutcome, ...]], calls: list[Any]) -> Any:
     def _run(spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()) -> Any:
         calls.append(dict(files))
         return next(it)
+
     return _run
 
 
 def _build(status: GateStatus, *lines: str) -> GateOutcome:
-    return GateOutcome("build", status, ("build command exited 1; last lines:", *lines)
-                       if status is GateStatus.FAIL else lines)
+    return GateOutcome(
+        "build",
+        status,
+        ("build command exited 1; last lines:", *lines) if status is GateStatus.FAIL else lines,
+    )
 
 
 def test_an_opening_error_takes_the_first_judging_result_as_its_baseline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[Any] = []
-    monkeypatch.setattr(self_check, "run_check", _fake_run([
-        (GateOutcome("build", GateStatus.ERROR, ("pip: connection reset",)),),
-        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
-        (_build(GateStatus.FAIL, "other.py:1: error: old", "other.py:9: error: new"),),
-    ], calls))
-    spec = CheckSpec(base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(),
-                     own_files=("app.py",))
+    monkeypatch.setattr(
+        self_check,
+        "run_check",
+        _fake_run(
+            [
+                (GateOutcome("build", GateStatus.ERROR, ("pip: connection reset",)),),
+                (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+                (_build(GateStatus.FAIL, "other.py:1: error: old", "other.py:9: error: new"),),
+            ],
+            calls,
+        ),
+    )
+    spec = CheckSpec(
+        base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(), own_files=("app.py",)
+    )
     session = SessionCheck(spec)
     opening = session.opening()
     assert opening.errors and not opening.red
@@ -569,14 +697,27 @@ def test_a_build_error_new_since_the_opening_is_the_sessions_even_in_another_fil
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls: list[Any] = []
-    monkeypatch.setattr(self_check, "run_check", _fake_run([
-        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
-        (_build(GateStatus.FAIL, "other.py:1: error: old",
-                "caller.py:5: error: too many arguments"),),
-        (_build(GateStatus.FAIL, "other.py:1: error: old"),),
-    ], calls))
-    spec = CheckSpec(base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(),
-                     own_files=("app.py",))
+    monkeypatch.setattr(
+        self_check,
+        "run_check",
+        _fake_run(
+            [
+                (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+                (
+                    _build(
+                        GateStatus.FAIL,
+                        "other.py:1: error: old",
+                        "caller.py:5: error: too many arguments",
+                    ),
+                ),
+                (_build(GateStatus.FAIL, "other.py:1: error: old"),),
+            ],
+            calls,
+        ),
+    )
+    spec = CheckSpec(
+        base=_fake_base(tmp_path), scope=frozenset(), own_refs=frozenset(), own_files=("app.py",)
+    )
     session = SessionCheck(spec)
     assert not session.opening().red
     broke = session.check({"app.py": "a"}, ())
@@ -592,15 +733,18 @@ def test_sessions_with_one_scope_share_one_opening_run(
     monkeypatch.setattr(self_check, "run_check", _red_unless("OK", calls))
     base = _fake_base(tmp_path)
     for files in (("app.py",), ("b.py",)):
-        SessionCheck(CheckSpec(base=base, scope=frozenset(), own_refs=frozenset(),
-                               own_files=files)).opening()
+        SessionCheck(
+            CheckSpec(base=base, scope=frozenset(), own_refs=frozenset(), own_files=files)
+        ).opening()
     SessionCheck(CheckSpec(base=base, scope=frozenset({"x"}), own_refs=frozenset())).opening()
     assert len(calls) == 2
 
 
 def test_report_paths_are_stable_across_processes() -> None:
-    line = ("File \"/private/var/folders/x/T/foundry-gate-pyenvs-ab12cd34/0a/venv/lib/x.py\""
-            " and /tmp/foundry-check-base-zz99yy88/tree/app.py")
+    line = (
+        'File "/private/var/folders/x/T/foundry-gate-pyenvs-ab12cd34/0a/venv/lib/x.py"'
+        " and /tmp/foundry-check-base-zz99yy88/tree/app.py"
+    )
     out = self_check._stable([line])[0]
     assert "ab12cd34" not in out and "zz99yy88" not in out and "/private/var" not in out
     assert "$TMP/foundry-gate-pyenvs-/0a/venv/lib/x.py" in out
@@ -609,21 +753,32 @@ def test_report_paths_are_stable_across_processes() -> None:
 @pytest.mark.skipif(shutil.which("go") is None, reason="no Go toolchain on this host")
 def test_a_build_error_on_a_sibling_tickets_unbuilt_package_does_not_block() -> None:
     stack = StackDecision(language="go", build="go build ./...", test="go test ./...")
-    built = {"go.mod": "module example.com/notes\n\ngo 1.21\n",
-             "main.go": "package main\n\nfunc main() { run() }\n"}
+    built = {
+        "go.mod": "module example.com/notes\n\ngo 1.21\n",
+        "main.go": "package main\n\nfunc main() { run() }\n",
+    }
     tickets = (
-        Ticket(id="T-store", title="store", specialty=Specialty.BACKEND,
-               files=("store/store.go",), seq=_seq("planner", 1)),
-        Ticket(id="T-cmd", title="cmd", specialty=Specialty.BACKEND,
-               files=("cmd.go",), seq=_seq("planner", 2)),
+        Ticket(
+            id="T-store",
+            title="store",
+            specialty=Specialty.BACKEND,
+            files=("store/store.go",),
+            seq=_seq("planner", 1),
+        ),
+        Ticket(
+            id="T-cmd",
+            title="cmd",
+            specialty=Specialty.BACKEND,
+            files=("cmd.go",),
+            seq=_seq("planner", 2),
+        ),
     )
-    cmd = ("package main\n\nimport \"example.com/notes/store\"\n\n"
-           "func run() { store.Open() }\n")
+    cmd = 'package main\n\nimport "example.com/notes/store"\n\nfunc run() { store.Open() }\n'
     with _spec(built, stack=stack, files=("cmd.go",), tickets=tickets) as spec:
         session = SessionCheck(spec)
         session.opening()
         waiting = session.check({"cmd.go": cmd}, ())
-        typo = session.check({"cmd.go": "package main\n\nfunc run() int { return \"x\" }\n"}, ())
+        typo = session.check({"cmd.go": 'package main\n\nfunc run() int { return "x" }\n'}, ())
     assert not waiting.red, waiting
     assert any("waits on a planned file" in line for line in waiting.pre_existing), waiting
     assert typo.red and any("cmd.go" in line for line in typo.yours), typo
@@ -647,8 +802,12 @@ def test_the_opening_check_runs_before_the_local_slot_is_taken(
         order.append("slot")
         yield
 
-    spec = CheckSpec(base=_fake_base(tmp_path / "base"), scope=frozenset(),
-                     own_refs=frozenset(), own_files=("app.py",))
+    spec = CheckSpec(
+        base=_fake_base(tmp_path / "base"),
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=("app.py",),
+    )
     seen: list[list[dict[str, Any]]] = []
     local = ProxyAgentAdapter(_scripted([{"action": "done", "summary": "x"}], seen))
     tiered = TieredAdapter(cloud=local, local=local, local_tiers={"T3"}, local_slot=_slot)
@@ -671,6 +830,16 @@ def test_the_check_can_be_kept_to_local_sessions(
     monkeypatch.setenv("FOUNDRY_SELF_CHECK", "0")
     with self_check.local_session():
         assert not self_check.wanted()
+
+
+def test_the_runs_self_check_mode_wins_over_the_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "0")
+    assert not SelfCheckSettings().enabled()
+    assert SelfCheckSettings(mode="local").enabled()
+    assert not self_check.wanted("local") and self_check.wanted("on")
+    monkeypatch.delenv("FOUNDRY_SELF_CHECK")
+    assert not SelfCheckSettings(mode="off").enabled()
+    assert not self_check.wanted("off")
 
 
 def test_concurrent_builds_reuse_a_failed_install_and_never_delete_a_held_venv(

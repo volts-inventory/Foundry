@@ -48,8 +48,8 @@ def _config(run_id: str) -> RunnableConfig:
 
 def _run(capabilities: list[str]) -> tuple[FactoryState, MockTransport]:
     rt, tx = _runtime(capabilities)
-    final: FactoryState = build_planner_subgraph(rt).compile().invoke(
-        {"request": "todo app"}, _config("run")
+    final: FactoryState = (
+        build_planner_subgraph(rt).compile().invoke({"request": "todo app"}, _config("run"))
     )
     return final, tx
 
@@ -61,8 +61,11 @@ def _kinds(state: FactoryState) -> set[str]:
 @pytest.mark.parametrize(
     ("caps", "present", "absent"),
     [
-        ([], {"system_design", "ownership_map", "adr", "interface_contract", "prd"},
-         {"domain_addendum", "ux_spec"}),
+        (
+            [],
+            {"system_design", "ownership_map", "adr", "interface_contract", "prd"},
+            {"domain_addendum", "ux_spec"},
+        ),
         (["regulated"], {"system_design", "domain_addendum"}, {"ux_spec"}),
         (["frontend"], {"ux_spec"}, {"domain_addendum"}),
         (["regulated", "ui"], {"system_design", "domain_addendum", "ux_spec"}, set()),

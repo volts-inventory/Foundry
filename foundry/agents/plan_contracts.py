@@ -116,7 +116,7 @@ def _py_normalize(signature: str) -> str:
         if _PY_DEF.match(line.rstrip()):
             line = line.rstrip() + ": ..."
         elif _PY_BLOCK.match(line) and not line.lstrip().startswith("@"):
-            rest = [ln for ln in lines[i + 1:] if ln.strip()]
+            rest = [ln for ln in lines[i + 1 :] if ln.strip()]
             if not rest or _indent(rest[0]) <= _indent(line):
                 line = line.rstrip() + " ..."
         out.append(line)
@@ -126,8 +126,13 @@ def _py_normalize(signature: str) -> str:
 # Statements a contract may consist of; anything else (prose that happens to parse,
 # `this is prose`) is not a declaration.
 _PY_DECLARATIONS = (
-    ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef, ast.Import, ast.ImportFrom,
-    ast.Assign, ast.AnnAssign,
+    ast.ClassDef,
+    ast.FunctionDef,
+    ast.AsyncFunctionDef,
+    ast.Import,
+    ast.ImportFrom,
+    ast.Assign,
+    ast.AnnAssign,
 )
 
 
@@ -150,17 +155,17 @@ def assemble_python(contracts: Sequence[tuple[str, str]]) -> _Source:
             )
             continue
         owner = name.rpartition(".")[0]
-        if owner and body and all(
-            isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) for n in body
+        if (
+            owner
+            and body
+            and all(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) for n in body)
         ):
             methods.setdefault(owner, []).extend((name, n) for n in body)
         else:
             top.append((name, body))
 
     def member_names(cls: ast.ClassDef) -> set[str]:
-        return {
-            n.name for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+        return {n.name for n in cls.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
     for name, body in top:
         for node in body:
@@ -217,17 +222,36 @@ def _python_cmd(strict: bool) -> list[str] | None:
     if shutil.which("python3") is None:
         return None
     return [
-        "python3", "-m", "mypy", "--no-error-summary", "--show-error-codes",
-        "--hide-error-context", "--no-color-output", "--no-incremental",
-        "--cache-dir", os.devnull, "--ignore-missing-imports",
+        "python3",
+        "-m",
+        "mypy",
+        "--no-error-summary",
+        "--show-error-codes",
+        "--hide-error-context",
+        "--no-color-output",
+        "--no-incremental",
+        "--cache-dir",
+        os.devnull,
+        "--ignore-missing-imports",
         *(f"--disable-error-code={c}" for c in _PY_IGNORED_CODES),
-        *(["--strict"] if strict else []), "contracts.py",
+        *(["--strict"] if strict else []),
+        "contracts.py",
     ]
 
 
 def _typescript_cmd() -> list[str] | None:
-    flags = ["--noEmit", "--strict", "--skipLibCheck", "--pretty", "false",
-             "--target", "es2022", "--module", "esnext", "contracts.ts"]
+    flags = [
+        "--noEmit",
+        "--strict",
+        "--skipLibCheck",
+        "--pretty",
+        "false",
+        "--target",
+        "es2022",
+        "--module",
+        "esnext",
+        "contracts.ts",
+    ]
     if shutil.which("tsc"):
         return ["tsc", *flags]
     if shutil.which("npx"):  # offline: only a tsc already installed resolves
@@ -236,7 +260,10 @@ def _typescript_cmd() -> list[str] | None:
 
 
 def check_contracts(
-    contracts: Sequence[tuple[str, str]], language: str, *, strict: bool = False,
+    contracts: Sequence[tuple[str, str]],
+    language: str,
+    *,
+    strict: bool = False,
 ) -> CompileResult:
     """``contracts`` are ``(name, signature)`` of the code-kind contracts. Python
     runs ``python3 -m mypy`` (``--strict`` when the stack's own typecheck is
@@ -262,15 +289,19 @@ def check_contracts(
         try:
             rc, out = _run(cmd, "contracts.py" if python else "contracts.ts", src.text())
         except Exception as exc:  # unavailable sandbox/tool, timeout: never a finding
-            return CompileResult(concerns=(
-                *concerns, f"Contracts not compiled at plan time: {tool} did not run ({exc}).",
-            ))
+            return CompileResult(
+                concerns=(
+                    *concerns,
+                    f"Contracts not compiled at plan time: {tool} did not run ({exc}).",
+                )
+            )
         errors, unparsed = (_parse_mypy if python else _parse_tsc)(out, src)
         if unparsed and not errors:
             # tsc stops at syntax errors: check the rest without those signatures.
             concerns += [
                 f"Contract {name}: {tool} could not parse its signature, so it was not "
-                "compiled at plan time." for name in unparsed
+                "compiled at plan time."
+                for name in unparsed
             ]
             pairs = [(n, s) for n, s in pairs if n not in unparsed]
             continue
@@ -279,19 +310,31 @@ def check_contracts(
         return CompileResult(concerns=tuple(concerns), ran=True)
     if not errors:
         detail = out.strip().splitlines()
-        return CompileResult(concerns=(
-            *concerns, f"Contracts not compiled at plan time: {tool} exited {rc}"
-            + (f" ({detail[-1][:200]})" if detail else "") + ".",
-        ))
-    concerns += [f"Contract {name}: {msg} (the contracts ticket resolves imports)"
-                 for name, msg in errors if _SOFT.search(msg)]
-    findings = [f"Contract {name} does not compile ({tool}): {msg}"
-                for name, msg in errors if not _SOFT.search(msg)]
+        return CompileResult(
+            concerns=(
+                *concerns,
+                f"Contracts not compiled at plan time: {tool} exited {rc}"
+                + (f" ({detail[-1][:200]})" if detail else "")
+                + ".",
+            )
+        )
+    concerns += [
+        f"Contract {name}: {msg} (the contracts ticket resolves imports)"
+        for name, msg in errors
+        if _SOFT.search(msg)
+    ]
+    findings = [
+        f"Contract {name} does not compile ({tool}): {msg}"
+        for name, msg in errors
+        if not _SOFT.search(msg)
+    ]
     if not findings:
         return CompileResult(concerns=tuple(concerns), ran=True)
     if len(findings) > _MAX_FINDINGS:
-        findings = [*findings[:_MAX_FINDINGS],
-                    f"... and {len(findings) - _MAX_FINDINGS} more {tool} error(s)."]
+        findings = [
+            *findings[:_MAX_FINDINGS],
+            f"... and {len(findings) - _MAX_FINDINGS} more {tool} error(s).",
+        ]
     return CompileResult(findings=tuple(findings), concerns=tuple(concerns), ran=True)
 
 

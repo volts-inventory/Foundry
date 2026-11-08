@@ -42,18 +42,21 @@ _CFG: RunnableConfig = {"configurable": {}}
 _NO_RESTART = FixPolicy(restarts=False)
 
 
-def _gate(name: str, tree: str, local: int, status: GateStatus,
-          *findings: str) -> GateResult:
+def _gate(name: str, tree: str, local: int, status: GateStatus, *findings: str) -> GateResult:
     return GateResult(
-        name=name, status=status, decision_deterministic=True,
-        execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
-        findings=findings, run_against=tree, seq=Seq("run", 1, local, "gate", 0),
+        name=name,
+        status=status,
+        decision_deterministic=True,
+        execution_deterministic=True,
+        verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+        findings=findings,
+        run_against=tree,
+        seq=Seq("run", 1, local, "gate", 0),
     )
 
 
 def _state(*gates: GateResult, attempts: int = 2) -> FactoryState:
-    return {"gates": list(gates),
-            "budget": BudgetLedger(fix_attempts_since_all_green=attempts)}
+    return {"gates": list(gates), "budget": BudgetLedger(fix_attempts_since_all_green=attempts)}
 
 
 _FAIL_A = "FAILED tests/test_app.py::test_add - assert 1 == 2"
@@ -65,31 +68,45 @@ _RED = GateStatus.FAIL
 
 def test_failing_ids_names_pytest_nodes_and_bdd_scenarios() -> None:
     assert failing_ids([_FAIL_A, "E   assert 1 == 2", _BDD, _FAIL_A]) == (
-        "tests/test_app.py::test_add", "features/T-001.feature::AC-1")
+        "tests/test_app.py::test_add",
+        "features/T-001.feature::AC-1",
+    )
 
 
 def test_the_same_failing_tests_after_a_fix_is_no_progress() -> None:
     # The output around the failure may differ; the failing set is what counts.
-    state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, "x"),
-                   _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_A, "y"))
+    state = _state(
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A, "x"),
+        _gate("build", "t2", 3, _OK),
+        _gate("test", "t2", 4, _RED, _FAIL_A, "y"),
+    )
     assert no_fix_progress(state, _CFG, boundary=BUILD_TEST_BOUNDARY)
 
 
 def test_a_changed_failing_set_is_progress() -> None:
-    state = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A, _FAIL_B),
-                   _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_A))
+    state = _state(
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A, _FAIL_B),
+        _gate("build", "t2", 3, _OK),
+        _gate("test", "t2", 4, _RED, _FAIL_A),
+    )
     assert not no_fix_progress(state, _CFG, boundary=BUILD_TEST_BOUNDARY)
 
 
 def test_an_error_or_a_fresh_budget_is_never_no_progress() -> None:
-    same = (_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
-            _gate("build", "t2", 3, _OK))
+    same = (
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _OK),
+    )
     errored = _gate("test", "t2", 4, GateStatus.ERROR, _FAIL_A)
     assert not no_fix_progress(_state(*same, errored), _CFG, boundary=BUILD_TEST_BOUNDARY)
     # A resumed run's first re-check (budget reseeded) has had no fix pass yet.
     failed = _gate("test", "t2", 4, _RED, _FAIL_A)
-    assert not no_fix_progress(_state(*same, failed, attempts=1), _CFG,
-                               boundary=BUILD_TEST_BOUNDARY)
+    assert not no_fix_progress(
+        _state(*same, failed, attempts=1), _CFG, boundary=BUILD_TEST_BOUNDARY
+    )
 
 
 def _fix_diff_state(*gates: GateResult, cut_off: bool) -> tuple[FactoryState, ArtifactStore]:
@@ -99,17 +116,28 @@ def _fix_diff_state(*gates: GateResult, cut_off: bool) -> tuple[FactoryState, Ar
     from foundry.schemas.implementation import FeatureDiff
 
     store = ArtifactStore()
-    blob = store.put_blob(json.dumps({"kind": "full-file-snapshot",
-                                      "files": {"services/_db.py": "X = 1\n"}}).encode())
+    blob = store.put_blob(
+        json.dumps({"kind": "full-file-snapshot", "files": {"services/_db.py": "X = 1\n"}}).encode()
+    )
     seq = Seq("run", 1, 9, "fixer", 0)
-    diff = FeatureDiff(diff_uri=blob, task_id="fix-1", branch="task/fix-1",
-                       base_tree_sha="b", seq=seq)
+    diff = FeatureDiff(
+        diff_uri=blob, task_id="fix-1", branch="task/fix-1", base_tree_sha="b", seq=seq
+    )
     art = emit_artifact(diff, "feature_diff", "fixer", seq, store=store).model_copy(
-        update={"task_id": "fix-1"})
-    report = ("turn budget exhausted before 'done' — partial work recorded" if cut_off
-              else "moved the connection to services/_db.py")
-    note = GateTriage(name="adapter-report", run_against="task/fix-1", explanation=report,
-                      produced_by="proxy-agent", seq=Seq("run", 0, 0, "proxy-agent", 0))
+        update={"task_id": "fix-1"}
+    )
+    report = (
+        "turn budget exhausted before 'done' — partial work recorded"
+        if cut_off
+        else "moved the connection to services/_db.py"
+    )
+    note = GateTriage(
+        name="adapter-report",
+        run_against="task/fix-1",
+        explanation=report,
+        produced_by="proxy-agent",
+        seq=Seq("run", 0, 0, "proxy-agent", 0),
+    )
     return {**_state(*gates), "artifacts": [art], "gate_triage": [note]}, store
 
 
@@ -120,33 +148,50 @@ def test_a_cut_off_pass_that_broke_a_passing_gate_is_named_unfinished() -> None:
     # The local shop run: fix-6 moved the DB helpers to services/_db.py, ran out of
     # turns before it updated the tests importing them, and broke a passing build.
     state, store = _fix_diff_state(
-        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
-        _gate("build", "t2", 3, _RED, _MYPY), cut_off=True)
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _RED, _MYPY),
+        cut_off=True,
+    )
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
-    assert ("previous fix pass (fix-1) touched services/_db.py and broke the build gate(s), "
-            "which passed before it (it ran out of turns before it finished): its change is "
-            "incomplete. Finish it first — update every caller and test of what it renamed, "
-            "moved or removed — or undo it") in summary
+    assert (
+        "previous fix pass (fix-1) touched services/_db.py and broke the build gate(s), "
+        "which passed before it (it ran out of turns before it finished): its change is "
+        "incomplete. Finish it first — update every caller and test of what it renamed, "
+        "moved or removed — or undo it"
+    ) in summary
     assert not any("try a different approach" in line for line in summary)
 
 
 def test_a_cut_off_pass_without_a_regression_is_checked_before_a_new_approach() -> None:
     state, store = _fix_diff_state(
-        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
-        _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_B), cut_off=True)
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _OK),
+        _gate("test", "t2", 4, _RED, _FAIL_B),
+        cut_off=True,
+    )
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
-    assert ("previous fix pass (fix-1) touched services/_db.py and ran out of turns before "
-            "it finished, leaving the gates above failing: check whether its edits are "
-            "complete before trying a different approach") in summary
+    assert (
+        "previous fix pass (fix-1) touched services/_db.py and ran out of turns before "
+        "it finished, leaving the gates above failing: check whether its edits are "
+        "complete before trying a different approach"
+    ) in summary
 
 
 def test_a_finished_pass_that_failed_still_tries_a_different_approach() -> None:
     state, store = _fix_diff_state(
-        _gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
-        _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _FAIL_B), cut_off=False)
+        _gate("build", "t1", 1, _OK),
+        _gate("test", "t1", 2, _RED, _FAIL_A),
+        _gate("build", "t2", 3, _OK),
+        _gate("test", "t2", 4, _RED, _FAIL_B),
+        cut_off=False,
+    )
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
-    assert ("previous fix pass (fix-1) touched services/_db.py and left the gates above "
-            "failing: try a different approach") in summary
+    assert (
+        "previous fix pass (fix-1) touched services/_db.py and left the gates above "
+        "failing: try a different approach"
+    ) in summary
 
 
 def test_the_summary_names_the_failing_gates_and_tests() -> None:
@@ -163,14 +208,23 @@ def test_the_summary_names_the_failing_gates_and_tests() -> None:
 def test_each_fix_pass_gets_the_failure_and_the_previous_pass_summarized(
     tmp_path: Path,
 ) -> None:
-    rec = _Recorder(writes={
-        "T-001": {"app.py": "def broken(:\n"},
-        "fix-1": {"app.py": "def broken_1(:\n"},
-        "fix-2": {"app.py": "def fixed():\n    return 1\n"},
-    })
+    rec = _Recorder(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "fix-1": {"app.py": "def broken_1(:\n"},
+            "fix-2": {"app.py": "def fixed():\n    return 1\n"},
+        }
+    )
     _out, ran, _ = _wave_run(tmp_path, rec, fix_policy=_NO_RESTART)
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
-                   "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+    ]
     first = rec.packets["fix-1"].prior_failures
     assert first[:2] == ("[fix summary]", "failed gates: build")
     assert first[2].startswith("failing tests/scenarios: none named")
@@ -181,7 +235,8 @@ def test_each_fix_pass_gets_the_failure_and_the_previous_pass_summarized(
     assert "(build broken)" in line
     assert "the fixer wrote outside" in line and "rogue.txt" in line.split("reported: ")[1]
     assert second[second.index(line) + 1] == (
-        "do not repeat an approach marked WORSE or no-change from this tree.")
+        "do not repeat an approach marked WORSE or no-change from this tree."
+    )
     tail = second.index("gate output (tail):")
     assert second[tail + 1] == "[build gate FAILED]"
     assert any("broken_1" in line for line in second[tail:])  # this pass's output
@@ -201,12 +256,12 @@ def test_a_fix_pass_with_no_progress_halts_the_wave(tmp_path: Path) -> None:
 def test_a_fix_that_changes_nothing_is_no_progress() -> None:
     # The re-check on the same tree replaces the earlier verdict in state, so only
     # the check itself (old state + new verdicts) can see the unchanged tree.
-    before = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A),
-                    attempts=1)
+    before = _state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _FAIL_A), attempts=1)
     recheck = {"gates": [_gate("build", "t1", 3, _OK), _gate("test", "t1", 4, _RED, _FAIL_A)]}
     assert _unchanged_tree_recheck(before, recheck, _CFG, boundary=BUILD_TEST_BOUNDARY)
-    errored = {"gates": [_gate("build", "t1", 3, _OK),
-                         _gate("test", "t1", 4, GateStatus.ERROR, _FAIL_A)]}
+    errored = {
+        "gates": [_gate("build", "t1", 3, _OK), _gate("test", "t1", 4, GateStatus.ERROR, _FAIL_A)]
+    }
     assert not _unchanged_tree_recheck(before, errored, _CFG, boundary=BUILD_TEST_BOUNDARY)
     fresh = _state(*before["gates"], attempts=0)  # resumed run: no fix pass yet
     assert not _unchanged_tree_recheck(fresh, recheck, _CFG, boundary=BUILD_TEST_BOUNDARY)
@@ -218,10 +273,13 @@ def test_an_empty_fix_diff_halts_the_wave(tmp_path: Path) -> None:
     broken = {"app.py": "def broken(:\n"}
     rec = _Recorder(writes={"T-001": broken, "fix-1": broken})  # fixer changes nothing
     # T-001 owns rogue.txt too, so the recorder's out-of-scope write is no change.
-    tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
-               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
-    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=tickets,
-                            fix_policy=_NO_RESTART)
+    tickets = [
+        _ticket("T-001", 0, files=("app.py", "rogue.txt")),
+        _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+    ]
+    out, ran, _ = _wave_run(
+        tmp_path, rec, max_fix_attempts=4, tickets=tickets, fix_policy=_NO_RESTART
+    )
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate"]
     assert len({g.run_against for g in out["gates"]}) == 1
     assert {g.status for g in out["gates"]} == {GateStatus.FAIL}
@@ -236,18 +294,24 @@ def test_an_empty_fix_diff_halts_the_wave_after_earlier_waves_spent_fixes(
     # skipped the no-progress note, and the wave spent its last pass on the same tree.
     broken = {"app.py": "def broken(:\n"}
     rec = _Recorder(writes={"T-001": broken, "fix-1": broken})
-    tickets = [_ticket("T-001", 0, files=("app.py", "rogue.txt")),
-               _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
-    out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=tickets,
-                            budget=BudgetLedger(fix_attempts_total=4),
-                            fix_policy=_NO_RESTART)
+    tickets = [
+        _ticket("T-001", 0, files=("app.py", "rogue.txt")),
+        _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+    ]
+    out, ran, _ = _wave_run(
+        tmp_path,
+        rec,
+        max_fix_attempts=4,
+        tickets=tickets,
+        budget=BudgetLedger(fix_attempts_total=4),
+        fix_policy=_NO_RESTART,
+    )
     assert ran == ["engineering", "wave_gate", "fixer", "wave_gate"]
     assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
 
 
 def test_raw_findings_compare_without_addresses_or_timings() -> None:
-    first = _state(_gate("build", "t1", 1, _RED, "<Obj at 0x7f3a1c> broke in 1.23s"),
-                   attempts=2)
+    first = _state(_gate("build", "t1", 1, _RED, "<Obj at 0x7f3a1c> broke in 1.23s"), attempts=2)
     second = _gate("build", "t2", 2, _RED, "<Obj at 0x7f9e00> broke in 0.98s")
     assert no_fix_progress(_state(*first["gates"], second), _CFG, boundary=BUILD_BOUNDARY)
 
@@ -262,29 +326,42 @@ def test_the_failing_test_summary_survives_the_findings_cap() -> None:
 
 
 def test_a_mass_failure_keeps_its_exception_message() -> None:
-    cause = ("E   sqlalchemy.exc.InvalidRequestError: Mapper 'Mapper[User(user)]' has "
-             "no property 'cart_items'")
-    detail = "\n".join(f"_____ test_{i} _____\n>   session.query(User)\n{cause}"
-                       for i in range(80))
-    tail = "\n".join(f"FAILED tests/test_app.py::test_{i} - sqlalchemy.exc.Inv..."
-                     for i in range(80))
+    cause = (
+        "E   sqlalchemy.exc.InvalidRequestError: Mapper 'Mapper[User(user)]' has "
+        "no property 'cart_items'"
+    )
+    detail = "\n".join(f"_____ test_{i} _____\n>   session.query(User)\n{cause}" for i in range(80))
+    tail = "\n".join(
+        f"FAILED tests/test_app.py::test_{i} - sqlalchemy.exc.Inv..." for i in range(80)
+    )
     findings = failure_findings(f"{detail}\n=== short test summary info ===\n{tail}\n")
     assert findings.count(cause) == 1
     assert len(failing_ids(findings)) == 50
 
 
-_PIP = ("pip install command exited 1 (the project's declared dependencies cannot be "
-        "installed — FAIL: fix requirements.txt / pyproject.toml); last 2 output line(s):",
-        "ERROR: Could not find a version that satisfies the requirement sqlite3==2.6.0",
-        "ERROR: No matching distribution found for sqlite3==2.6.0")
+_PIP = (
+    "pip install command exited 1 (the project's declared dependencies cannot be "
+    "installed — FAIL: fix requirements.txt / pyproject.toml); last 2 output line(s):",
+    "ERROR: Could not find a version that satisfies the requirement sqlite3==2.6.0",
+    "ERROR: No matching distribution found for sqlite3==2.6.0",
+)
 
 
 def test_failure_files_names_the_manifest_and_the_erroring_sources() -> None:
     assert failure_files([_gate("build", "t1", 1, _RED, *_PIP)]) == PIP_MANIFESTS
-    build = _gate("build", "t1", 1, _RED, "app/models.py:12: error: bad type",
-                  "./main.go:3:2: undefined: x", "src/a.ts(4,5): error TS2322",
-                  '  File "./app.py", line 1', ".venv/lib/x.py:9: note",
-                  "/usr/lib/python3/y.py:2: oops", "../out.py:1: no")
+    build = _gate(
+        "build",
+        "t1",
+        1,
+        _RED,
+        "app/models.py:12: error: bad type",
+        "./main.go:3:2: undefined: x",
+        "src/a.ts(4,5): error TS2322",
+        '  File "./app.py", line 1',
+        ".venv/lib/x.py:9: note",
+        "/usr/lib/python3/y.py:2: oops",
+        "../out.py:1: no",
+    )
     assert failure_files([build]) == ("app/models.py", "main.go", "src/a.ts", "app.py")
     # A test traceback names the test file, not where the fix goes.
     assert failure_files([_gate("test", "t1", 1, _RED, "tests/test_a.py:3: AssertionError")]) == ()
@@ -293,13 +370,26 @@ def test_failure_files_names_the_manifest_and_the_erroring_sources() -> None:
 def test_a_step_binding_error_names_the_step_module_to_edit_first() -> None:
     # pytest-bdd's error names the generated test, not a file:line: two local fix
     # passes got no "Edit these files first" for the step module they had to fix.
-    test = _gate("test", "t1", 1, _RED,
-                 "BDD criterion S-4: scenario features/T3.feature::S-4 failed",
-                 "E       fixture 'note_for_delete' not found",
-                 "FAILED tests/test_t3.py::test_s4", "FAILED tests/test_t3.py::test_s5")
+    test = _gate(
+        "test",
+        "t1",
+        1,
+        _RED,
+        "BDD criterion S-4: scenario features/T3.feature::S-4 failed",
+        "E       fixture 'note_for_delete' not found",
+        "FAILED tests/test_t3.py::test_s4",
+        "FAILED tests/test_t3.py::test_s5",
+    )
     assert failure_files([test]) == ("tests/test_t3.py",)
-    missing = _gate("test", "t1", 1, _RED, "E   pytest_bdd.exceptions.StepDefinitionNotFoundError:"
-                    ' Step definition is not found: Given "x"', "FAILED tests/test_t1.py::test_a")
+    missing = _gate(
+        "test",
+        "t1",
+        1,
+        _RED,
+        "E   pytest_bdd.exceptions.StepDefinitionNotFoundError:"
+        ' Step definition is not found: Given "x"',
+        "FAILED tests/test_t1.py::test_a",
+    )
     assert failure_files([missing]) == ("tests/test_t1.py",)
     tree = {"tests/test_t3.py": "from pytest_bdd import given\n"}
     summary = _fix_summary(_state(test), lambda a: None, lambda u: b"", attempt=1, tree=tree)
@@ -335,9 +425,13 @@ class _CappedFixer(_Recorder):
         tid = str(packet.task["id"])
         if not tid.startswith("fix-"):
             return result
-        note = GateTriage(name="adapter-report", run_against=f"task/{tid}",
-                          explanation="turn budget exhausted before 'done' — partial work",
-                          produced_by="recorder", seq=Seq("run", 0, 0, "recorder", 0))
+        note = GateTriage(
+            name="adapter-report",
+            run_against=f"task/{tid}",
+            explanation="turn budget exhausted before 'done' — partial work",
+            produced_by="recorder",
+            seq=Seq("run", 0, 0, "recorder", 0),
+        )
         return result.model_copy(update={"triage": (note,)})
 
 
@@ -345,11 +439,21 @@ def test_a_capped_pass_that_missed_the_failing_file_does_not_halt(tmp_path: Path
     rec = _CappedFixer(writes={"T-001": {"app.py": "def broken(:\n"}})
     out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, fix_policy=_NO_RESTART)
     # Every pass is allowed, but the wave's fix budget (3 passes) still bounds it.
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
-                   "fixer", "wave_gate"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+    ]
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
-    assert ("the last fix pass (fix-1) never edited app.py, the file(s) the failure names: "
-            "edit them before anything else") in rec.packets["fix-2"].prior_failures
+    assert (
+        "the last fix pass (fix-1) never edited app.py, the file(s) the failure names: "
+        "edit them before anything else"
+    ) in rec.packets["fix-2"].prior_failures
 
 
 class _LocalRecorder(_Recorder):
@@ -379,35 +483,50 @@ def _unbound_state(store: ArtifactStore) -> FactoryState:
 
     # The local notes run: E4-T04 ran out of turns after writing only its routes
     # module, so its scenarios were never bound and its step module never existed.
-    ticket = _ticket("E4-T04", 0, files=("routes/notes.py", "templates/notes.html",
-                                         "tests/test_e4_t04.py"),
-                     scenario_ids=("E4-AC10", "E4-AC11"))
+    ticket = _ticket(
+        "E4-T04",
+        0,
+        files=("routes/notes.py", "templates/notes.html", "tests/test_e4_t04.py"),
+        scenario_ids=("E4-AC10", "E4-AC11"),
+    )
     other = _ticket("E4-T05", 1, files=("smoke.py",), scenario_ids=("E4-AC16",))
     seq = Seq("run", 1, 9, "junior_engineer", 0)
-    blob = store.put_blob(json.dumps({"kind": "full-file-snapshot",
-                                      "files": {"routes/notes.py": "x = 1\n"}}).encode())
+    blob = store.put_blob(
+        json.dumps({"kind": "full-file-snapshot", "files": {"routes/notes.py": "x = 1\n"}}).encode()
+    )
     diff = emit_artifact(
-        FeatureDiff(diff_uri=blob, task_id="E4-T04", branch="task/E4-T04",
-                    base_tree_sha="b", seq=seq),
-        "feature_diff", "junior_engineer", seq, store=store,
+        FeatureDiff(
+            diff_uri=blob, task_id="E4-T04", branch="task/E4-T04", base_tree_sha="b", seq=seq
+        ),
+        "feature_diff",
+        "junior_engineer",
+        seq,
+        store=store,
     ).model_copy(update={"task_id": "E4-T04"})
-    unbound = [f"BDD criterion E4-AC1{i}: scenario features/E4-T04.feature::E4-AC1{i} was "
-               "not executed — bind that exact gate-owned file" for i in (0, 1)]
-    return {**_ticket_state(store, [ticket, other], artifacts=[diff]),
-            **_state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, *unbound),
-                     attempts=1)}
+    unbound = [
+        f"BDD criterion E4-AC1{i}: scenario features/E4-T04.feature::E4-AC1{i} was "
+        "not executed — bind that exact gate-owned file"
+        for i in (0, 1)
+    ]
+    return {
+        **_ticket_state(store, [ticket, other], artifacts=[diff]),
+        **_state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, *unbound), attempts=1),
+    }
 
 
 def test_a_fix_pass_is_told_to_create_the_files_an_unfinished_ticket_never_wrote() -> None:
     store = ArtifactStore()
     tree: dict[str, str | None] = {"routes/notes.py": "x = 1\n", "smoke.py": None}
-    summary = _fix_summary(_unbound_state(store), store.resolve, store.resolve_blob,
-                           attempt=1, tree=tree)
-    assert ("Create these files first: templates/notes.html, tests/test_e4_t04.py. Ticket "
-            "E4-T04 owns them and its failing scenarios need them, but its session ended "
-            "before it wrote them: writing them is this fix, not a later ticket's work "
-            '(bind the scenarios in tests/test_e4_t04.py: '
-            'scenarios("../features/E4-T04.feature"))') in summary
+    summary = _fix_summary(
+        _unbound_state(store), store.resolve, store.resolve_blob, attempt=1, tree=tree
+    )
+    assert (
+        "Create these files first: templates/notes.html, tests/test_e4_t04.py. Ticket "
+        "E4-T04 owns them and its failing scenarios need them, but its session ended "
+        "before it wrote them: writing them is this fix, not a later ticket's work "
+        "(bind the scenarios in tests/test_e4_t04.py: "
+        'scenarios("../features/E4-T04.feature"))'
+    ) in summary
     # E4-T05 is not built and fails nothing: its missing files are a later wave's.
     assert not any("smoke.py" in line for line in summary)
 
@@ -423,20 +542,37 @@ def test_an_empty_fix_pass_is_not_blamed_for_the_wave_that_broke_a_gate() -> Non
     store = ArtifactStore()
     blob = store.put_blob(json.dumps({"kind": "full-file-snapshot", "files": {}}).encode())
     seq = Seq("run", 1, 9, "fixer", 0)
-    art = emit_artifact(FeatureDiff(diff_uri=blob, task_id="fix-1", branch="task/fix-1",
-                                    base_tree_sha="b", seq=seq),
-                        "feature_diff", "fixer", seq, store=store
-                        ).model_copy(update={"task_id": "fix-1"})
-    note = GateTriage(name="adapter-report", run_against="task/fix-1",
-                      explanation="turn budget exhausted before 'done' — partial work recorded",
-                      produced_by="proxy-agent", seq=Seq("run", 0, 0, "proxy-agent", 0))
+    art = emit_artifact(
+        FeatureDiff(
+            diff_uri=blob, task_id="fix-1", branch="task/fix-1", base_tree_sha="b", seq=seq
+        ),
+        "feature_diff",
+        "fixer",
+        seq,
+        store=store,
+    ).model_copy(update={"task_id": "fix-1"})
+    note = GateTriage(
+        name="adapter-report",
+        run_against="task/fix-1",
+        explanation="turn budget exhausted before 'done' — partial work recorded",
+        produced_by="proxy-agent",
+        seq=Seq("run", 0, 0, "proxy-agent", 0),
+    )
     state: FactoryState = {
-        **_state(_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _OK),
-                 _gate("build", "t2", 3, _OK), _gate("test", "t2", 4, _RED, _BDD)),
-        "artifacts": [art], "gate_triage": [note]}
+        **_state(
+            _gate("build", "t1", 1, _OK),
+            _gate("test", "t1", 2, _OK),
+            _gate("build", "t2", 3, _OK),
+            _gate("test", "t2", 4, _RED, _BDD),
+        ),
+        "artifacts": [art],
+        "gate_triage": [note],
+    }
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=2)
-    assert ("previous fix pass (fix-1) changed no file (it ran out of turns before its first "
-            "edit): reading files changes nothing; make the edits this time") in summary
+    assert (
+        "previous fix pass (fix-1) changed no file (it ran out of turns before its first "
+        "edit): reading files changes nothing; make the edits this time"
+    ) in summary
     assert not any("broke" in line or "different approach" in line for line in summary)
 
 
@@ -445,8 +581,12 @@ def test_a_fix_pass_with_no_ticket_diff_yet_starts_the_epochs(tmp_path: Path) ->
     # is the first one and has no epoch to lift past.
     store = ArtifactStore()
     rec = _Recorder(writes={"fix-1": {"app.py": "def fixed():\n    return 1\n"}})
-    fixer = make_fixer_node(_runtime(rec, store), source_dir=str(tmp_path),
-                            resolve=store.resolve, resolve_blob=store.resolve_blob)
+    fixer = make_fixer_node(
+        _runtime(rec, store),
+        source_dir=str(tmp_path),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+    )
     state = _ticket_state(store, [_ticket("T-001", 0, files=("app.py",))])
     state["gates"] = [_gate("build", "t1", 1, _RED, "SyntaxError in app.py")]
     out = fixer(state, _config())
@@ -457,8 +597,9 @@ def test_a_fix_pass_with_no_ticket_diff_yet_starts_the_epochs(tmp_path: Path) ->
 # ---- keeping the fix loop's best tree -------------------------------------------
 
 
-def _score(*gates: GateResult, names: frozenset[str] = frozenset({"build", "test"})
-           ) -> tuple[int, int, int] | None:
+def _score(
+    *gates: GateResult, names: frozenset[str] = frozenset({"build", "test"})
+) -> tuple[int, int, int] | None:
     from foundry.graph.gate_wiring import fix_score
 
     return fix_score({g.name: g for g in gates}, names)
@@ -518,7 +659,8 @@ def test_a_quoted_annotation_name_defined_error_gets_the_type_checking_hint(
     # Order is used unquoted (a runtime use): a type-checking-only import would not do.
     assert hints == [
         "app/models/user.py:19: `CartItem` is used only in a quoted annotation: import it "
-        "under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) in that module"]
+        "under `if TYPE_CHECKING:` (from typing import TYPE_CHECKING) in that module"
+    ]
     # A compile error stops the `&&` chain before mypy: not a typecheck-only build.
     compile_err = build_findings(1, "SyntaxError: invalid syntax\n", "", tmp_path)
     assert not typecheck_only(_gate("build", "t", 1, _RED, *compile_err))
@@ -526,8 +668,13 @@ def test_a_quoted_annotation_name_defined_error_gets_the_type_checking_hint(
 
 def test_a_typecheck_only_build_is_scored_by_how_far_the_tests_got(tmp_path: Path) -> None:
     def tests(tree: str, n: int) -> GateResult:
-        return _gate("test", tree, 2, _RED,
-                     *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)))
+        return _gate(
+            "test",
+            tree,
+            2,
+            _RED,
+            *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)),
+        )
 
     start = _score(_gate("build", "t0", 1, _OK), tests("t0", 82))
     fixed = _score(_typecheck_build("t1", tmp_path), tests("t1", 40))
@@ -552,27 +699,55 @@ def test_a_type_error_alone_does_not_revert_a_pass_that_fixed_tests(tmp_path: Pa
         ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
         state: FactoryState = {"artifacts": [ticket]}
         window = fix_window(state, BUILD_TEST_BOUNDARY, frozenset())
-        snap = store.put_blob(json.dumps({"kind": "full-file-snapshot",
-                                          "files": {"app.py": "x = 0\n"}}).encode())
+        snap = store.put_blob(
+            json.dumps({"kind": "full-file-snapshot", "files": {"app.py": "x = 0\n"}}).encode()
+        )
         failing = tuple(f"test:tests/test_cart.py::test_{i}" for i in range(3))
-        best = FixPass(window=window, boundary=BUILD_TEST_BOUNDARY, pass_no=0,
-                       tree="t-best", score=(-1, 1, 3), failing=failing, outcome="initial",
-                       snapshot_uri=snap, seq=Seq("run", 1, 0, "fix_pass", 0))
-        state = {**state, "fix_passes": [best],
-                 "budget": BudgetLedger(fix_attempts_since_all_green=1)}
-        out: dict[str, Any] = {"gates": [
-            _typecheck_build("t-new", tmp_path),
-            _gate("test", "t-new", 6, _RED,
-                  *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)))]}
+        best = FixPass(
+            window=window,
+            boundary=BUILD_TEST_BOUNDARY,
+            pass_no=0,
+            tree="t-best",
+            score=(-1, 1, 3),
+            failing=failing,
+            outcome="initial",
+            snapshot_uri=snap,
+            seq=Seq("run", 1, 0, "fix_pass", 0),
+        )
+        state = {
+            **state,
+            "fix_passes": [best],
+            "budget": BudgetLedger(fix_attempts_since_all_green=1),
+        }
+        out: dict[str, Any] = {
+            "gates": [
+                _typecheck_build("t-new", tmp_path),
+                _gate(
+                    "test",
+                    "t-new",
+                    6,
+                    _RED,
+                    *(f"FAILED tests/test_cart.py::test_{i} - assert" for i in range(n)),
+                ),
+            ]
+        }
         reran: list[FactoryState] = []
 
         def rerun(s: FactoryState) -> dict[str, Any]:
             reran.append(s)
             return {}
 
-        keep_best(state, _config(), out, boundary=BUILD_TEST_BOUNDARY, scope=frozenset(),
-                  rt=_runtime(None, store), resolve=store.resolve,
-                  resolve_blob=store.resolve_blob, rerun=rerun)
+        keep_best(
+            state,
+            _config(),
+            out,
+            boundary=BUILD_TEST_BOUNDARY,
+            scope=frozenset(),
+            rt=_runtime(None, store),
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+            rerun=rerun,
+        )
         return out["fix_passes"], reran
 
     # Two of three failing tests fixed, one new type error: the new best, kept.
@@ -583,23 +758,40 @@ def test_a_type_error_alone_does_not_revert_a_pass_that_fixed_tests(tmp_path: Pa
     assert entry.outcome == "worse" and reran
 
 
-def _entry(window: str, pass_no: int, tree: str, score: tuple[int, int, int] | None,
-           epoch: int) -> FixPass:
-    return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=pass_no, tree=tree,
-                   score=score, outcome="initial", seq=Seq("run", epoch, 0, "fix_pass", 0))
+def _entry(
+    window: str, pass_no: int, tree: str, score: tuple[int, int, int] | None, epoch: int
+) -> FixPass:
+    return FixPass(
+        window=window,
+        boundary=BUILD_BOUNDARY,
+        pass_no=pass_no,
+        tree=tree,
+        score=score,
+        outcome="initial",
+        seq=Seq("run", epoch, 0, "fix_pass", 0),
+    )
 
 
 def test_the_best_pass_is_the_lowest_score_and_a_tie_goes_to_the_newest() -> None:
-    passes = [_entry("w", 0, "t1", (0, 1, 5), 1), _entry("w", 1, "t2", (0, 1, 3), 2),
-              _entry("w", 2, "t3", None, 3), _entry("w", 3, "t4", (0, 1, 3), 4),
-              _entry("other", 0, "t5", (-1, 0, 0), 5)]
+    passes = [
+        _entry("w", 0, "t1", (0, 1, 5), 1),
+        _entry("w", 1, "t2", (0, 1, 3), 2),
+        _entry("w", 2, "t3", None, 3),
+        _entry("w", 3, "t4", (0, 1, 3), 4),
+        _entry("other", 0, "t5", (-1, 0, 0), 5),
+    ]
     best = best_entry(passes, "w")
     assert best is not None and best.tree == "t4"
     assert best_entry([], "w") is None
 
 
-def _diff_art(store: ArtifactStore, task_id: str, epoch: int, files: dict[str, str],
-              deleted: tuple[str, ...] = ()) -> Artifact:
+def _diff_art(
+    store: ArtifactStore,
+    task_id: str,
+    epoch: int,
+    files: dict[str, str],
+    deleted: tuple[str, ...] = (),
+) -> Artifact:
     import json
 
     from foundry.agents._common import emit_artifact
@@ -611,9 +803,13 @@ def _diff_art(store: ArtifactStore, task_id: str, epoch: int, files: dict[str, s
     blob = store.put_blob(json.dumps(body).encode())
     seq = Seq("run", epoch, 0, "junior_engineer", 0)
     return emit_artifact(
-        FeatureDiff(diff_uri=blob, task_id=task_id, branch=f"task/{task_id}",
-                    base_tree_sha="b", seq=seq),
-        "feature_diff", "junior_engineer", seq, store=store,
+        FeatureDiff(
+            diff_uri=blob, task_id=task_id, branch=f"task/{task_id}", base_tree_sha="b", seq=seq
+        ),
+        "feature_diff",
+        "junior_engineer",
+        seq,
+        store=store,
     ).model_copy(update={"task_id": task_id})
 
 
@@ -623,12 +819,17 @@ def test_the_window_is_one_boundary_over_one_set_of_ticket_diffs() -> None:
     state: FactoryState = {"artifacts": [ticket]}
     window = fix_window(state, BUILD_BOUNDARY, frozenset())
     assert fix_window(dict(state), BUILD_BOUNDARY, frozenset()) == window  # a resume
-    fixed: FactoryState = {"artifacts": [
-        ticket, _diff_art(store, "fix-1", 2, {"app.py": "x = 2\n"}),
-        _diff_art(store, "revert-1", 3, {"app.py": "x = 1\n"})]}
+    fixed: FactoryState = {
+        "artifacts": [
+            ticket,
+            _diff_art(store, "fix-1", 2, {"app.py": "x = 2\n"}),
+            _diff_art(store, "revert-1", 3, {"app.py": "x = 1\n"}),
+        ]
+    }
     assert fix_window(fixed, BUILD_BOUNDARY, frozenset()) == window
-    rebuilt: FactoryState = {"artifacts": [ticket, _diff_art(store, "T-001", 4,
-                                                             {"app.py": "x = 3\n"})]}
+    rebuilt: FactoryState = {
+        "artifacts": [ticket, _diff_art(store, "T-001", 4, {"app.py": "x = 3\n"})]
+    }
     assert fix_window(rebuilt, BUILD_BOUNDARY, frozenset()) != window  # escalation
     wave: FactoryState = {"artifacts": [ticket, _diff_art(store, "T-002", 5, {"b.py": "y\n"})]}
     assert fix_window(wave, BUILD_BOUNDARY, frozenset()) != window
@@ -649,31 +850,57 @@ def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
     (base / "README.md").write_text("base readme\n")
     (base / "keep.py").write_text("KEEP = 1\n")
     store = ArtifactStore()
-    tickets = [_ticket("contracts", 0, files=("api.py",)),
-               _ticket("T-001", 1, files=("app.py",), deps=("contracts",))]
+    tickets = [
+        _ticket("contracts", 0, files=("api.py",)),
+        _ticket("T-001", 1, files=("app.py",), deps=("contracts",)),
+    ]
     best_diffs = [
         _diff_art(store, "contracts", 1, {"api.py": "API = 1\n"}),
         # A later ticket's edit to the contract never reaches the tree.
         _diff_art(store, "T-001", 2, {"app.py": "a = 1\n", "api.py": "API = 'ticket'\n"}),
         _diff_art(store, "fix-1", 3, {"api.py": "API = 2\n", "app.py": "a = 2\n"}),
     ]
-    good: FactoryState = {**_ticket_state(store, tickets, artifacts=best_diffs),
-                          "base_dir": str(base)}
-    worse: FactoryState = {**good, "artifacts": [*good["artifacts"], _diff_art(
-        store, "fix-2", 4, {"api.py": "API = 3\n", "app.py": "a = 3\n", "new.py": "n = 1\n"},
-        deleted=("README.md",))]}
+    good: FactoryState = {
+        **_ticket_state(store, tickets, artifacts=best_diffs),
+        "base_dir": str(base),
+    }
+    worse: FactoryState = {
+        **good,
+        "artifacts": [
+            *good["artifacts"],
+            _diff_art(
+                store,
+                "fix-2",
+                4,
+                {"api.py": "API = 3\n", "app.py": "a = 3\n", "new.py": "n = 1\n"},
+                deleted=("README.md",),
+            ),
+        ],
+    }
 
     def digest(state: FactoryState, name: str) -> str:
-        return materialize_workdir(state, tmp_path / name, resolve=store.resolve,
-                                   resolve_blob=store.resolve_blob)
+        return materialize_workdir(
+            state, tmp_path / name, resolve=store.resolve, resolve_blob=store.resolve_blob
+        )
 
-    snapshot = store.put_blob(_snapshot_blob(integrated_files(
-        good, resolve=store.resolve, resolve_blob=store.resolve_blob)))
+    snapshot = store.put_blob(
+        _snapshot_blob(
+            integrated_files(good, resolve=store.resolve, resolve_blob=store.resolve_blob)
+        )
+    )
     best = _entry("w", 0, digest(good, "good"), (0, 1, 1), 1).model_copy(
-        update={"snapshot_uri": snapshot})
+        update={"snapshot_uri": snapshot}
+    )
     assert digest(worse, "worse") != best.tree
-    revert = restore_diff(worse, best, _config(), tree="t-worse", rt=_runtime(None, store),
-                          resolve=store.resolve, resolve_blob=store.resolve_blob)
+    revert = restore_diff(
+        worse,
+        best,
+        _config(),
+        tree="t-worse",
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+    )
     assert revert is not None and revert.task_id == "revert-1"
     assert revert.seq.emission_epoch == 5  # applied after every diff
     restored: FactoryState = {**worse, "artifacts": [*worse["artifacts"], revert]}
@@ -689,11 +916,11 @@ def _keep_best_state(store: ArtifactStore) -> FactoryState:
     ticket = _diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})
     state: FactoryState = {"artifacts": [ticket]}
     window = fix_window(state, BUILD_BOUNDARY, frozenset())
-    snap = store.put_blob(json.dumps({"kind": "full-file-snapshot",
-                                      "files": {"app.py": "x = 0\n"}}).encode())
+    snap = store.put_blob(
+        json.dumps({"kind": "full-file-snapshot", "files": {"app.py": "x = 0\n"}}).encode()
+    )
     best = _entry(window, 0, "t-best", (0, 1, 1), 1).model_copy(update={"snapshot_uri": snap})
-    return {**state, "fix_passes": [best],
-            "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+    return {**state, "fix_passes": [best], "budget": BudgetLedger(fix_attempts_since_all_green=1)}
 
 
 def test_a_restore_whose_digest_is_not_the_best_tree_is_dropped() -> None:
@@ -701,10 +928,17 @@ def test_a_restore_whose_digest_is_not_the_best_tree_is_dropped() -> None:
 
     store = ArtifactStore()
     out: dict[str, Any] = {"gates": [_gate("build", "t-new", 5, _RED, "a", "b", "c")]}
-    reverted = keep_best(_keep_best_state(store), _config(), out, boundary=BUILD_BOUNDARY,
-                         scope=frozenset(), rt=_runtime(None, store), resolve=store.resolve,
-                         resolve_blob=store.resolve_blob,
-                         rerun=lambda s: {"gates": [_gate("build", "t-other", 6, _RED, "a")]})
+    reverted = keep_best(
+        _keep_best_state(store),
+        _config(),
+        out,
+        boundary=BUILD_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=lambda s: {"gates": [_gate("build", "t-other", 6, _RED, "a")]},
+    )
     assert not reverted
     assert "artifacts" not in out and [g.run_against for g in out["gates"]] == ["t-new"]
     assert [t.name for t in out["gate_triage"]] == [REVERT_SKIPPED_TRIAGE]
@@ -723,31 +957,60 @@ def test_an_errored_check_is_never_reverted_from() -> None:
         reran.append(s)
         return {}
 
-    assert not keep_best(_keep_best_state(store), _config(), out, boundary=BUILD_BOUNDARY,
-                         scope=frozenset(), rt=_runtime(None, store), resolve=store.resolve,
-                         resolve_blob=store.resolve_blob, rerun=rerun)
+    assert not keep_best(
+        _keep_best_state(store),
+        _config(),
+        out,
+        boundary=BUILD_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=rerun,
+    )
     assert not reran and [p.outcome for p in out["fix_passes"]] == ["error"]
 
 
 _BROKEN = {"a.py": "def a(:\n", "b.py": "def b(:\n"}
 _ONE_BROKEN = {"a.py": "def a():\n    return 1\n"}  # b.py still broken
 _WORSE = {"c.py": "def c(:\n", "d.py": "def d(:\n"}  # b, c and d broken
-_FIX_TICKETS = [_ticket("T-001", 0, files=("a.py", "b.py")),
-                _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+_FIX_TICKETS = [
+    _ticket("T-001", 0, files=("a.py", "b.py")),
+    _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+]
 
 
 def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
     tmp_path: Path,
 ) -> None:
-    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE,
-                            "fix-3": {"b.py": "def b():\n    return 2\n"}})
+    rec = _Recorder(
+        writes={
+            "T-001": _BROKEN,
+            "fix-1": _ONE_BROKEN,
+            "fix-2": _WORSE,
+            "fix-3": {"b.py": "def b():\n    return 2\n"},
+        }
+    )
     out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=4, tickets=_FIX_TICKETS)
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
-                   "fixer", "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+    ]
     passes = sorted(out["fix_passes"], key=lambda p: p.seq)
     assert [(p.outcome, p.fix_task) for p in passes] == [
-        ("initial", None), ("improved", "fix-1"), ("worse", "fix-2"),
-        ("restored", "revert-1"), ("improved", "fix-3")]
+        ("initial", None),
+        ("improved", "fix-1"),
+        ("worse", "fix-2"),
+        ("restored", "revert-1"),
+        ("improved", "fix-3"),
+    ]
     assert passes[3].tree == passes[1].tree
     assert passes[2].touched == ("c.py", "d.py", "rogue.txt")
     # The next fixer worked on fix-1's tree, not fix-2's.
@@ -757,8 +1020,12 @@ def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
     # The restore is the fix loop's diff, not the fixer's: the log names fix-2 reverted.
     summary = rec.packets["fix-3"].prior_failures
-    assert any(line.startswith("pass 2 (fix-2): edited c.py, d.py, rogue.txt — WORSE, "
-                               "reverted (build broken)") for line in summary)
+    assert any(
+        line.startswith(
+            "pass 2 (fix-2): edited c.py, d.py, rogue.txt — WORSE, reverted (build broken)"
+        )
+        for line in summary
+    )
     assert not any("revert-1" in line for line in summary)
     # The gates judged the restored tree: fix-2 was undone, so nothing it left
     # unedited is on the tree any more.
@@ -766,16 +1033,26 @@ def test_a_pass_that_makes_the_tree_worse_is_reverted_to_the_best_tree(
     # A worse pass and its restore are told apart by Seq, not by insertion order.
     assert len({p.seq.emission_epoch for p in passes}) == len(passes)
     assert {"T-001", "fix-1", "fix-2", "revert-1", "fix-3", "T-002"} <= {
-        a.task_id for a in out["artifacts"] if a.kind == "feature_diff"}
+        a.task_id for a in out["artifacts"] if a.kind == "feature_diff"
+    }
 
 
 def test_a_fix_pass_that_rebuilds_a_reverted_tree_is_no_progress(tmp_path: Path) -> None:
     # fix-3 makes fix-2's worse tree again: reverted again, and the wave stops.
-    rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE,
-                            "fix-3": _WORSE})
+    rec = _Recorder(
+        writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE, "fix-3": _WORSE}
+    )
     out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_FIX_TICKETS)
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
-                   "fixer", "wave_gate"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+    ]
     passes = sorted(out["fix_passes"], key=lambda p: p.seq)
     assert [p.outcome for p in passes][-2:] == ["worse", "restored"]
     assert passes[-2].tree == passes[2].tree
@@ -794,32 +1071,64 @@ def test_the_draft_is_the_final_loops_best_after_many_waves() -> None:
     state: FactoryState = {"artifacts": [], "fix_passes": []}
     local = iter(range(1, 1000))
 
-    def check(state: FactoryState, boundary: str, step: int, tree: str,
-              *gates: tuple[str, GateStatus, tuple[str, ...]]) -> FactoryState:
-        cfg: RunnableConfig = {"configurable": {"thread_id": "run"},
-                               "metadata": {"langgraph_step": step}}
-        out: dict[str, Any] = {"gates": [_gate(n, tree, next(local), s, *f)
-                                         for n, s, f in gates]}
-        keep_best(state, cfg, out, boundary=boundary, scope=frozenset(), rt=rt,
-                  resolve=store.resolve, resolve_blob=store.resolve_blob,
-                  rerun=lambda s: {})
+    def check(
+        state: FactoryState,
+        boundary: str,
+        step: int,
+        tree: str,
+        *gates: tuple[str, GateStatus, tuple[str, ...]],
+    ) -> FactoryState:
+        cfg: RunnableConfig = {
+            "configurable": {"thread_id": "run"},
+            "metadata": {"langgraph_step": step},
+        }
+        out: dict[str, Any] = {"gates": [_gate(n, tree, next(local), s, *f) for n, s, f in gates]}
+        keep_best(
+            state,
+            cfg,
+            out,
+            boundary=boundary,
+            scope=frozenset(),
+            rt=rt,
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+            rerun=lambda s: {},
+        )
         return {**state, "fix_passes": [*state["fix_passes"], *out["fix_passes"]]}
 
     for wave in range(5):
-        state["artifacts"] = [*state["artifacts"], _diff_art(
-            store, f"T-00{wave}", wave + 1, {f"w{wave}.py": "x = 1\n"})]
-        state = check(state, BUILD_BOUNDARY, 40 + 4 * wave, f"w{wave}a",
-                      ("build", _RED, ("SyntaxError",)))
+        state["artifacts"] = [
+            *state["artifacts"],
+            _diff_art(store, f"T-00{wave}", wave + 1, {f"w{wave}.py": "x = 1\n"}),
+        ]
+        state = check(
+            state, BUILD_BOUNDARY, 40 + 4 * wave, f"w{wave}a", ("build", _RED, ("SyntaxError",))
+        )
         state = check(state, BUILD_BOUNDARY, 42 + 4 * wave, f"w{wave}b", ("build", _OK, ()))
     final = BUILD_TEST_SMOKE_BOUNDARY
-    state = check(state, final, 6, "f0", ("build", _OK, ()),
-                  ("test", _RED, (_FAIL_A, _FAIL_B)), ("smoke", _OK, ()))
+    state = check(
+        state,
+        final,
+        6,
+        "f0",
+        ("build", _OK, ()),
+        ("test", _RED, (_FAIL_A, _FAIL_B)),
+        ("smoke", _OK, ()),
+    )
     state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-1", 10, {"a.py": "1\n"})]
-    state = check(state, final, 9, "f1", ("build", _OK, ()), ("test", _RED, (_FAIL_A,)),
-                  ("smoke", _OK, ()))
+    state = check(
+        state, final, 9, "f1", ("build", _OK, ()), ("test", _RED, (_FAIL_A,)), ("smoke", _OK, ())
+    )
     state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-2", 11, {"a.py": "(\n"})]
-    state = check(state, final, 12, "f2", ("build", _RED, ("SyntaxError",)),
-                  ("test", _RED, ()), ("smoke", _RED, ()))
+    state = check(
+        state,
+        final,
+        12,
+        "f2",
+        ("build", _RED, ("SyntaxError",)),
+        ("test", _RED, ()),
+        ("smoke", _RED, ()),
+    )
     best = draft_best(state, store.resolve)
     assert best is not None and (best.boundary, best.tree) == (final, "f1")
 
@@ -832,18 +1141,29 @@ def test_the_restored_tree_is_the_newest_checked_and_the_draft(tmp_path: Path) -
     best = sorted(out["fix_passes"], key=lambda p: p.seq)[1]
     builds = sorted((g for g in out["gates"] if g.name == "build"), key=lambda g: g.seq)
     assert builds[-1].run_against == best.tree
-    check = WaveBuildCheck(_runtime(rec, store), None,  # type: ignore[arg-type]
-                           store.resolve, store.resolve_blob)
+    check = WaveBuildCheck(
+        _runtime(rec, store),
+        None,  # type: ignore[arg-type]
+        store.resolve,
+        store.resolve_blob,
+    )
     assert not check.capped_off_target(out)
 
     # A stop with an ungated fix diff on top still hands back the best tree.
     from foundry import cli
 
-    ungated: FactoryState = {**out, "artifacts": [*out["artifacts"], _diff_art(
-        store, "fix-3", 99, {"e.py": "def e(:\n"})]}
-    draft = cli._write_draft_on_halt(ungated, str(tmp_path / "draft"), gate_findings={},
-                                     resolve=store.resolve, resolve_blob=store.resolve_blob,
-                                     stopped="token cap")
+    ungated: FactoryState = {
+        **out,
+        "artifacts": [*out["artifacts"], _diff_art(store, "fix-3", 99, {"e.py": "def e(:\n"})],
+    }
+    draft, _ = cli._write_draft_on_halt(
+        ungated,
+        str(tmp_path / "draft"),
+        gate_findings={},
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        stopped="token cap",
+    )
     assert draft is not None
     root = Path(draft)
     assert sorted(p.name for p in root.glob("*.py")) == ["a.py", "b.py"]
@@ -857,8 +1177,16 @@ def test_a_pass_that_changes_nothing_after_a_restore_halts(tmp_path: Path) -> No
     rec = _Recorder(writes={"T-001": _BROKEN, "fix-1": _ONE_BROKEN, "fix-2": _WORSE})
     out, ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=5, tickets=_FIX_TICKETS)
     # fix-3 writes only what fix-1's tree already holds: the restored tree, unchanged.
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "fixer", "wave_gate",
-                   "fixer", "wave_gate"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+    ]
     assert sorted(out["fix_passes"], key=lambda p: p.seq)[-1].outcome == "no-change"
     assert any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out["gate_triage"])
 
@@ -879,21 +1207,35 @@ def test_the_final_gate_reverts_a_pass_that_breaks_the_build(tmp_path: Path) -> 
     records = GlobalRecords()
     (tmp_path / "src").mkdir()
     graph = build_supervisor_graph(
-        _runtime(_Recorder(), store), runner=_runner(records), resolve=store.resolve,
-        resolve_blob=store.resolve_blob, source_dir=str(tmp_path / "src"))
+        _runtime(_Recorder(), store),
+        runner=_runner(records),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        source_dir=str(tmp_path / "src"),
+    )
     gate = graph.nodes["build_test_gate"].runnable
-    tests = ("def test_a():\n    assert False\n\n\ndef test_b():\n    assert {}\n\n\n"
-             "def test_c():\n    assert True\n").format
-    state: FactoryState = _ticket_state(store, [_ticket("T-001", 0)], artifacts=[_diff_art(
-        store, "T-001", 1, {"app.py": "X = 1\n", "test_app.py": tests("False")})])
+    tests = (
+        "def test_a():\n    assert False\n\n\ndef test_b():\n    assert {}\n\n\n"
+        "def test_c():\n    assert True\n"
+    ).format
+    state: FactoryState = _ticket_state(
+        store,
+        [_ticket("T-001", 0)],
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"app.py": "X = 1\n", "test_app.py": tests("False")})
+        ],
+    )
 
     def check(state: FactoryState, *diffs: Artifact) -> tuple[FactoryState, dict[str, Any]]:
         state = {**state, "artifacts": [*state["artifacts"], *diffs]}
         out = gate.invoke(state, _config())
-        return {**state, "artifacts": [*state["artifacts"], *out.get("artifacts", [])],
-                "gates": merge_gates(state.get("gates"), out["gates"]),
-                "fix_passes": union_fix_passes(state.get("fix_passes"), out["fix_passes"]),
-                "budget": out.get("budget") or state.get("budget")}, out
+        return {
+            **state,
+            "artifacts": [*state["artifacts"], *out.get("artifacts", [])],
+            "gates": merge_gates(state.get("gates"), out["gates"]),
+            "fix_passes": union_fix_passes(state.get("fix_passes"), out["fix_passes"]),
+            "budget": out.get("budget") or state.get("budget"),
+        }, out
 
     token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
     try:
@@ -937,60 +1279,91 @@ def _log_state(store: ArtifactStore, upto: int) -> FactoryState:
     state: FactoryState = {"artifacts": [ticket, fix1]}
     window = fix_window(state, BUILD_BOUNDARY, frozenset())
 
-    def entry(n: int, tree: str, outcome: Any, failing: tuple[str, ...],
-              fix: str | None = None, touched: tuple[str, ...] = ()) -> FixPass:
-        return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=n, tree=tree,
-                       fix_task=fix, score=(-1, 1, len(failing)),
-                       failing=tuple(_T + f for f in failing), outcome=outcome,
-                       touched=touched, seq=Seq("run", n + 1, 0, "fix_pass", 0))
+    def entry(
+        n: int,
+        tree: str,
+        outcome: Any,
+        failing: tuple[str, ...],
+        fix: str | None = None,
+        touched: tuple[str, ...] = (),
+    ) -> FixPass:
+        return FixPass(
+            window=window,
+            boundary=BUILD_BOUNDARY,
+            pass_no=n,
+            tree=tree,
+            fix_task=fix,
+            score=(-1, 1, len(failing)),
+            failing=tuple(_T + f for f in failing),
+            outcome=outcome,
+            touched=touched,
+            seq=Seq("run", n + 1, 0, "fix_pass", 0),
+        )
 
     passes = [
         entry(0, "t0", "initial", ("test_a", "test_b", "test_c")),
-        entry(1, "t1", "worse", ("test_c", "test_d", "test_e", "test_f"), "fix-1",
-              ("api.py", "models.py")),
+        entry(
+            1,
+            "t1",
+            "worse",
+            ("test_c", "test_d", "test_e", "test_f"),
+            "fix-1",
+            ("api.py", "models.py"),
+        ),
         entry(2, "t0", "restored", ("test_a", "test_b", "test_c"), "revert-1"),
         entry(3, "t0", "no-change", ("test_a", "test_b", "test_c"), "fix-2"),
         entry(4, "t3", "lateral", ("test_a", "test_b", "test_d"), "fix-3", ("app.py",)),
     ][:upto]
     tree = passes[-1].tree
-    note = GateTriage(name="adapter-report", run_against="task/fix-1",
-                      explanation="renamed  Model\nto Item", produced_by="recorder",
-                      seq=Seq("run", 1, 0, "recorder", 0))
-    return {**state, "fix_passes": passes, "gate_triage": [note],
-            "gates": [_gate("build", tree, 1, _OK),
-                      _gate("test", tree, 2, _RED, _FAIL_A)],
-            "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+    note = GateTriage(
+        name="adapter-report",
+        run_against="task/fix-1",
+        explanation="renamed  Model\nto Item",
+        produced_by="recorder",
+        seq=Seq("run", 1, 0, "recorder", 0),
+    )
+    return {
+        **state,
+        "fix_passes": passes,
+        "gate_triage": [note],
+        "gates": [_gate("build", tree, 1, _OK), _gate("test", tree, 2, _RED, _FAIL_A)],
+        "budget": BudgetLedger(fix_attempts_since_all_green=1),
+    }
 
 
 def _log(state: FactoryState, store: ArtifactStore) -> list[str]:
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=1)
     start = summary.index("[fix passes so far in this loop]")
-    return list(summary[start + 1:summary.index("gate output (tail):")])
+    return list(summary[start + 1 : summary.index("gate output (tail):")])
 
 
 def test_the_fix_log_names_what_each_pass_fixed_broke_and_whether_it_was_reverted() -> None:
     store = ArtifactStore()
     log = _log(_log_state(store, 5), store)
-    assert log[0] == ("pass 1 (fix-1): edited api.py, models.py — WORSE, reverted: fixed "
-                      "test_a,test_b; broke test_d,test_e,test_f (build ok) — reported: "
-                      "renamed Model to Item")
+    assert log[0] == (
+        "pass 1 (fix-1): edited api.py, models.py — WORSE, reverted: fixed "
+        "test_a,test_b; broke test_d,test_e,test_f (build ok) — reported: "
+        "renamed Model to Item"
+    )
     assert log[1] == "pass 3 (fix-2): no file edited"
-    assert log[2] == ("pass 4 (fix-3): edited app.py — lateral: 3→3, now failing test_d "
-                      "instead of test_c (build ok)")
+    assert log[2] == (
+        "pass 4 (fix-3): edited app.py — lateral: 3→3, now failing test_d "
+        "instead of test_c (build ok)"
+    )
     # The worse pass fixed two tests: its patch rides along to reapply that part.
-    assert log[3].startswith("fix-1's change fixed test_a,test_b but was worse overall: "
-                             "reapply this part without breaking test_d,test_e,test_f:\n"
-                             "--- models.py\nclass Model:")
+    assert log[3].startswith(
+        "fix-1's change fixed test_a,test_b but was worse overall: "
+        "reapply this part without breaking test_d,test_e,test_f:\n"
+        "--- models.py\nclass Model:"
+    )
     assert log[4] == "do not repeat an approach marked WORSE or no-change from this tree."
     assert not any(line.startswith("previous fix pass") for line in log)
 
 
 def test_two_passes_from_the_same_best_tree_get_different_prompts() -> None:
     store = ArtifactStore()
-    after_revert = _fix_summary(_log_state(store, 3), store.resolve, store.resolve_blob,
-                                attempt=2)
-    after_no_edit = _fix_summary(_log_state(store, 4), store.resolve, store.resolve_blob,
-                                 attempt=3)
+    after_revert = _fix_summary(_log_state(store, 3), store.resolve, store.resolve_blob, attempt=2)
+    after_no_edit = _fix_summary(_log_state(store, 4), store.resolve, store.resolve_blob, attempt=3)
     assert after_revert != after_no_edit
     assert "pass 3 (fix-2): no file edited" in after_no_edit
     assert "pass 3 (fix-2): no file edited" not in after_revert
@@ -1000,10 +1373,21 @@ def test_the_fix_log_is_capped_and_counts_the_passes_it_leaves_out() -> None:
     store = ArtifactStore()
     state = _log_state(store, 2)
     [initial, worse] = state["fix_passes"]
-    many = [initial, *(worse.model_copy(update={
-        "pass_no": n, "fix_task": f"fix-{n}", "outcome": "lateral",
-        "touched": tuple(f"pkg/module_{n}_{i}.py" for i in range(12)),
-        "seq": Seq("run", n + 1, 0, "fix_pass", 0)}) for n in range(1, 13))]
+    many = [
+        initial,
+        *(
+            worse.model_copy(
+                update={
+                    "pass_no": n,
+                    "fix_task": f"fix-{n}",
+                    "outcome": "lateral",
+                    "touched": tuple(f"pkg/module_{n}_{i}.py" for i in range(12)),
+                    "seq": Seq("run", n + 1, 0, "fix_pass", 0),
+                }
+            )
+            for n in range(1, 13)
+        ),
+    ]
     log = _log({**state, "fix_passes": many}, store)
     assert log[0].startswith("(") and log[0].endswith("earlier pass(es) not shown)")
     shown = [line for line in log if line.startswith("pass ")]
@@ -1024,9 +1408,17 @@ def test_a_fix_pass_records_its_wall_time_off_the_run_meter() -> None:
     def check(state: FactoryState, tree: str, at: float) -> FactoryState:
         meter._elapsed_base = at - (meter.elapsed_s - meter._elapsed_base)
         out: dict[str, Any] = {"gates": [_gate("build", tree, 1, _RED, "SyntaxError")]}
-        keep_best(state, _config(), out, boundary=BUILD_BOUNDARY, scope=frozenset(), rt=rt,
-                  resolve=store.resolve, resolve_blob=store.resolve_blob,
-                  rerun=lambda s: {})
+        keep_best(
+            state,
+            _config(),
+            out,
+            boundary=BUILD_BOUNDARY,
+            scope=frozenset(),
+            rt=rt,
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+            rerun=lambda s: {},
+        )
         return {**state, "fix_passes": [*(state.get("fix_passes") or ()), *out["fix_passes"]]}
 
     state = check(state, "t0", 100.0)
@@ -1049,17 +1441,25 @@ _C9 = "FAILED tests/test_c.py::test_9 - assert 9"
 
 
 def _plan_entry(n: int, outcome: Any, cluster: str | None) -> FixPass:
-    return FixPass(window="w", boundary=BUILD_TEST_BOUNDARY, pass_no=n, tree=f"t{n}",
-                   outcome=outcome, cluster=cluster, score=(-1, 1, 3),
-                   seq=Seq("run", n + 1, 0, "fix_pass", 0))
+    return FixPass(
+        window="w",
+        boundary=BUILD_TEST_BOUNDARY,
+        pass_no=n,
+        tree=f"t{n}",
+        outcome=outcome,
+        cluster=cluster,
+        score=(-1, 1, 3),
+        seq=Seq("run", n + 1, 0, "fix_pass", 0),
+    )
 
 
 def test_failures_cluster_build_first_then_the_biggest_cluster() -> None:
     from foundry.graph.gate_wiring import failure_clusters
 
-    gates = [_gate("build", "t", 1, _RED, "a.py:3: error: Name 'x' is not defined"),
-             _gate("test", "t", 2, _RED, _BDD.replace("T-001.feature", "f.feature"),
-                   _B1, _B2, _C9)]
+    gates = [
+        _gate("build", "t", 1, _RED, "a.py:3: error: Name 'x' is not defined"),
+        _gate("test", "t", 2, _RED, _BDD.replace("T-001.feature", "f.feature"), _B1, _B2, _C9),
+    ]
     clusters = failure_clusters(gates, _CLUSTER_TICKETS, {"T-001", "T-002"})
     assert [(c.key, c.tickets) for c in clusters] == [
         ("build", ("T-001",)),  # a.py is T-001's
@@ -1070,8 +1470,12 @@ def test_failures_cluster_build_first_then_the_biggest_cluster() -> None:
     assert clusters[1].items == ("test:tests/test_b.py::test_1", "test:tests/test_b.py::test_2")
     # An unbuilt ticket owns nothing yet; an ERROR is no failure to aim at.
     assert failure_clusters(gates, _CLUSTER_TICKETS, {"T-001"})[1].key == "file:tests/test_b.py"
-    assert failure_clusters([_gate("test", "t", 3, GateStatus.ERROR, _B1)],
-                            _CLUSTER_TICKETS, {"T-002"}) == ()
+    assert (
+        failure_clusters(
+            [_gate("test", "t", 3, GateStatus.ERROR, _B1)], _CLUSTER_TICKETS, {"T-002"}
+        )
+        == ()
+    )
 
 
 def test_a_pass_aims_at_one_cluster_and_rotates_after_two_tries() -> None:
@@ -1080,10 +1484,12 @@ def test_a_pass_aims_at_one_cluster_and_rotates_after_two_tries() -> None:
     a = FailureCluster(key="A", stage=1, items=("test:a::1", "test:a::2"), tickets=("T-001",))
     b = FailureCluster(key="B", stage=1, items=("test:b::1",))
 
-    def plan(*passes: FixPass, clusters: tuple[FailureCluster, ...] = (a, b),
-             **kw: Any) -> tuple[str | None, tuple[str, ...]]:
-        return plan_next_pass(list(passes), clusters, restart_after=2,
-                              restartable=lambda c: (), **kw)
+    def plan(
+        *passes: FixPass, clusters: tuple[FailureCluster, ...] = (a, b), **kw: Any
+    ) -> tuple[str | None, tuple[str, ...]]:
+        return plan_next_pass(
+            list(passes), clusters, restart_after=2, restartable=lambda c: (), **kw
+        )
 
     start = _plan_entry(0, "initial", None)
     assert plan(start) == ("A", ())
@@ -1106,8 +1512,9 @@ def test_a_restart_comes_after_two_passes_that_did_not_improve_the_cluster() -> 
     b = FailureCluster(key="B", stage=1, items=("test:b::1",))
 
     def plan(*passes: FixPass, after: int = 2, **kw: Any) -> tuple[str | None, tuple[str, ...]]:
-        return plan_next_pass(list(passes), (a, b), restart_after=after,
-                              restartable=lambda c: c.tickets, **kw)
+        return plan_next_pass(
+            list(passes), (a, b), restart_after=after, restartable=lambda c: c.tickets, **kw
+        )
 
     start = _plan_entry(0, "initial", None)
     once, twice = _plan_entry(1, "lateral", "A"), _plan_entry(2, "no-change", "A")
@@ -1126,7 +1533,8 @@ def test_a_tree_that_breaks_a_passing_check_is_worse_even_with_fewer_failures() 
     from foundry.graph.gate_wiring import _outcome, regressions
 
     best = _entry("w", 0, "t0", (-1, 1, 2), 1).model_copy(
-        update={"failing": (_T + "test_a", _T + "test_b")})
+        update={"failing": (_T + "test_a", _T + "test_b")}
+    )
     prior = [best]
     # One failure instead of two, but test_c passed on the best tree.
     assert regressions(best.failing, (_T + "test_c",)) == (_T + "test_c",)
@@ -1154,37 +1562,70 @@ def test_keep_best_reverts_a_pass_that_fixed_two_tests_and_broke_one() -> None:
     store = ArtifactStore()
     state: FactoryState = {"artifacts": [_diff_art(store, "T-001", 1, {"app.py": "x = 1\n"})]}
     window = fix_window(state, BUILD_TEST_BOUNDARY, frozenset())
-    snap = store.put_blob(json.dumps({"kind": "full-file-snapshot",
-                                      "files": {"app.py": "x = 0\n"}}).encode())
-    best = _entry(window, 0, "t-best", (-1, 1, 2), 1).model_copy(update={
-        "snapshot_uri": snap, "failing": ("test:tests/test_app.py::test_add",
-                                          "test:tests/test_app.py::test_list")})
+    snap = store.put_blob(
+        json.dumps({"kind": "full-file-snapshot", "files": {"app.py": "x = 0\n"}}).encode()
+    )
+    best = _entry(window, 0, "t-best", (-1, 1, 2), 1).model_copy(
+        update={
+            "snapshot_uri": snap,
+            "failing": ("test:tests/test_app.py::test_add", "test:tests/test_app.py::test_list"),
+        }
+    )
     state = {**state, "fix_passes": [best], "budget": BudgetLedger(fix_attempts_since_all_green=1)}
     new = "FAILED tests/test_app.py::test_new - assert 0"
-    out: dict[str, Any] = {"gates": [_gate("build", "t-new", 5, _OK),
-                                     _gate("test", "t-new", 6, _RED, new)]}
+    out: dict[str, Any] = {
+        "gates": [_gate("build", "t-new", 5, _OK), _gate("test", "t-new", 6, _RED, new)]
+    }
     restored = keep_best(
-        state, _config(), out, boundary=BUILD_TEST_BOUNDARY, scope=frozenset(),
-        rt=_runtime(None, store), resolve=store.resolve, resolve_blob=store.resolve_blob,
-        rerun=lambda s: {"gates": [_gate("build", "t-best", 7, _OK),
-                                   _gate("test", "t-best", 8, _RED, _FAIL_A, _FAIL_B)]})
+        state,
+        _config(),
+        out,
+        boundary=BUILD_TEST_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=lambda s: {
+            "gates": [
+                _gate("build", "t-best", 7, _OK),
+                _gate("test", "t-best", 8, _RED, _FAIL_A, _FAIL_B),
+            ]
+        },
+    )
     assert restored
     assert [p.outcome for p in out["fix_passes"]] == ["worse", "restored"]
 
 
 def _scoped_state(store: ArtifactStore, target: str | None) -> FactoryState:
-    state = _ticket_state(store, _CLUSTER_TICKETS, artifacts=[
-        _diff_art(store, "T-001", 1, {"a.py": "x\n"}),
-        _diff_art(store, "T-002", 2, {"tests/test_b.py": "y\n"})])
+    state = _ticket_state(
+        store,
+        _CLUSTER_TICKETS,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"a.py": "x\n"}),
+            _diff_art(store, "T-002", 2, {"tests/test_b.py": "y\n"}),
+        ],
+    )
     window = fix_window(state, BUILD_TEST_SMOKE_BOUNDARY, frozenset())
-    entry = FixPass(window=window, boundary=BUILD_TEST_SMOKE_BOUNDARY, pass_no=0, tree="t1",
-                    score=(-1, 1, 3), outcome="initial", target=target,
-                    seq=Seq("run", 1, 0, "fix_pass", 0))
+    entry = FixPass(
+        window=window,
+        boundary=BUILD_TEST_SMOKE_BOUNDARY,
+        pass_no=0,
+        tree="t1",
+        score=(-1, 1, 3),
+        outcome="initial",
+        target=target,
+        seq=Seq("run", 1, 0, "fix_pass", 0),
+    )
     detail_a = ["____ test_alpha ____", "E   assert 0 == 1"]
-    return {**state, "fix_passes": [entry],
-            "gates": [_gate("build", "t1", 1, _OK),
-                      _gate("test", "t1", 2, _RED, *detail_a, _A1, _B1, _B2)],
-            "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+    return {
+        **state,
+        "fix_passes": [entry],
+        "gates": [
+            _gate("build", "t1", 1, _OK),
+            _gate("test", "t1", 2, _RED, *detail_a, _A1, _B1, _B2),
+        ],
+        "budget": BudgetLedger(fix_attempts_since_all_green=1),
+    }
 
 
 def test_a_fix_pass_summary_lists_only_its_cluster() -> None:
@@ -1206,8 +1647,10 @@ def test_a_fix_pass_summary_lists_only_its_cluster() -> None:
     # Before a plan (or for an escalation's context) nothing is cut.
     whole = _scoped_state(store, None)
     assert _A1 in fix_failures(whole, store.resolve)
-    assert not any("ONE failure cluster" in line for line in _fix_summary(
-        state, store.resolve, store.resolve_blob, attempt=1, scoped=False))
+    assert not any(
+        "ONE failure cluster" in line
+        for line in _fix_summary(state, store.resolve, store.resolve_blob, attempt=1, scoped=False)
+    )
 
 
 def test_a_planned_restart_is_pending_until_the_ticket_is_restarted() -> None:
@@ -1216,11 +1659,18 @@ def test_a_planned_restart_is_pending_until_the_ticket_is_restarted() -> None:
     store = ArtifactStore()
     state = _scoped_state(store, "ticket:T-002")
     [entry] = state["fix_passes"]
-    planned: FactoryState = {**state, "fix_passes": [entry.model_copy(
-        update={"restart_tickets": ("T-002",)})]}
+    planned: FactoryState = {
+        **state,
+        "fix_passes": [entry.model_copy(update={"restart_tickets": ("T-002",)})],
+    }
     assert pending_restarts(planned, store.resolve) == ("T-002",)  # also after a resume
-    spent = GateTriage(name=RESTARTED_TRIAGE, run_against="task/T-002", explanation="x",
-                       produced_by="engineering", seq=Seq("run", 5, 0, "engineering", 0))
+    spent = GateTriage(
+        name=RESTARTED_TRIAGE,
+        run_against="task/T-002",
+        explanation="x",
+        produced_by="engineering",
+        seq=Seq("run", 5, 0, "engineering", 0),
+    )
     assert pending_restarts({**planned, "gate_triage": [spent]}, store.resolve) == ()
 
 
@@ -1238,8 +1688,10 @@ class _RestartRecorder(_Recorder):
         return super().run(packet, sandbox)
 
 
-_RESTART_TICKETS = [_ticket("T-001", 0, files=("a.py", "b.py")),
-                    _ticket("T-002", 1, files=("app.py",), deps=("T-001",))]
+_RESTART_TICKETS = [
+    _ticket("T-001", 0, files=("a.py", "b.py")),
+    _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+]
 
 
 def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
@@ -1249,11 +1701,19 @@ def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
 
     rec = _RestartRecorder(
         writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
-        again={"T-001": {"a.py": "def a():\n    return 1\n"}})
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}},
+    )
     out, ran, store = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
     # The legacy budget's second pass is the restart: T-001 again, then wave 2.
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering",
-                   "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+        "wave_gate",
+        "engineering",
+    ]
     assert rec.calls == ["T-001", "fix-1", "T-001", "T-002"]
     # It started from the tree before T-001 (no a.py, no b.py), with a memo.
     seen = rec.seen["T-001"]
@@ -1264,13 +1724,17 @@ def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
     assert any(line.startswith("pass 1 (fix-1): edited a.py") for line in memo)
     passes = sorted(out["fix_passes"], key=lambda p: p.seq)
     assert [(p.outcome, p.fix_task) for p in passes] == [
-        ("initial", None), ("lateral", "fix-1"), ("improved", "restart-T-001")]
+        ("initial", None),
+        ("lateral", "fix-1"),
+        ("improved", "restart-T-001"),
+    ]
     assert passes[1].restart_tickets == ("T-001",) and passes[2].cluster == "build"
     assert passes[2].touched == ("a.py", "b.py")
     diffs = [a.task_id for a in out["artifacts"] if a.kind == "feature_diff"]
     assert diffs.count("T-001") == 1 and "reset-T-001" in diffs and "restart-T-001" in diffs
     assert [t.run_against for t in out["gate_triage"] if t.name == RESTARTED_TRIAGE] == [
-        "task/T-001"]
+        "task/T-001"
+    ]
     assert out["budget"].fix_attempts_total == 2  # the restart is a pass like any other
     tree = tmp_path / "tree"
     materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
@@ -1287,13 +1751,15 @@ def test_a_restarts_gate_check_runs_on_the_reset_tree(tmp_path: Path) -> None:
             spec = current_check()
             if packet.task["id"] == "T-001" and "T-001" in self.calls and spec is not None:
                 root = spec.base.tree()[0]
-                checked.append({p.relative_to(root).as_posix()
-                                for p in root.rglob("*.py") if p.is_file()})
+                checked.append(
+                    {p.relative_to(root).as_posix() for p in root.rglob("*.py") if p.is_file()}
+                )
             return super().run(packet, sandbox)
 
     rec = _Peek(
         writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
-        again={"T-001": {"a.py": "def a():\n    return 1\n"}})
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}},
+    )
     _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
     # The session starts with no a.py or b.py (reset): neither does its check's tree.
     assert len(checked) == 1 and not checked[0] & {"a.py", "b.py"}, checked
@@ -1304,13 +1770,16 @@ def test_a_ticket_restarts_once_and_a_worse_restart_is_reverted(tmp_path: Path) 
 
     rec = _RestartRecorder(
         writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
-        again={"T-001": {"a.py": "def a(:\n", "b.py": "def b(:\n"}})
+        again={"T-001": {"a.py": "def a(:\n", "b.py": "def b(:\n"}},
+    )
     out, _ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_RESTART_TICKETS)
     assert rec.calls.count("T-001") == 2
     assert len([t for t in out["gate_triage"] if t.name == RESTARTED_TRIAGE]) == 1
     passes = sorted(out["fix_passes"], key=lambda p: p.seq)
     assert [(p.outcome, p.fix_task) for p in passes][2:4] == [
-        ("worse", "restart-T-001"), ("restored", "revert-1")]
+        ("worse", "restart-T-001"),
+        ("restored", "revert-1"),
+    ]
     assert passes[3].tree == passes[1].tree  # back on fix-1's tree
     assert not any(p.restart_tickets for p in passes[2:])
     assert "fix-2" in rec.calls  # the loop goes on with the fixer
@@ -1320,35 +1789,67 @@ def test_a_build_fix_that_newly_fails_a_test_is_improved_and_targets_it() -> Non
     from foundry.graph.gate_wiring import _outcome, keep_best
 
     best = _entry("w", 0, "t0", (0, 2, 2), 1).model_copy(
-        update={"failing": ("build:a.py:1: error", _T + "test_a")})
+        update={"failing": ("build:a.py:1: error", _T + "test_a")}
+    )
     newly = (_T + "test_a", _T + "test_new")
     # The build now passes: a stage further, whatever the tests did.
     assert _outcome([best], "t1", (-1, 1, 2), best, newly) == "improved"
     # Reaching as far, the superset rule still applies; reaching less is worse.
-    assert _outcome([best], "t1", (0, 2, 2), best,
-                    ("build:a.py:2: error", _T + "test_new")) == "worse"
+    assert (
+        _outcome([best], "t1", (0, 2, 2), best, ("build:a.py:2: error", _T + "test_new")) == "worse"
+    )
     built = best.model_copy(update={"score": (-1, 1, 1)})
     assert _outcome([built], "t1", (0, 2, 2), built, ()) == "worse"
 
     store = ArtifactStore()
-    tickets = [_ticket("T-001", 0, files=("tests/test_app.py",)),
-               _ticket("T-002", 1, files=("tests/test_new.py",))]
-    state = _ticket_state(store, tickets, artifacts=[
-        _diff_art(store, "T-001", 1, {"tests/test_app.py": "x\n"}),
-        _diff_art(store, "T-002", 2, {"tests/test_new.py": "y\n"})])
+    tickets = [
+        _ticket("T-001", 0, files=("tests/test_app.py",)),
+        _ticket("T-002", 1, files=("tests/test_new.py",)),
+    ]
+    state = _ticket_state(
+        store,
+        tickets,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"tests/test_app.py": "x\n"}),
+            _diff_art(store, "T-002", 2, {"tests/test_new.py": "y\n"}),
+        ],
+    )
     window = fix_window(state, BUILD_TEST_BOUNDARY, frozenset())
-    first = _entry(window, 0, "t0", (0, 2, 3), 1).model_copy(update={"failing": (
-        "build:a.py:1: error", "test:tests/test_app.py::test_a",
-        "test:tests/test_app.py::test_b")})
-    state = {**state, "fix_passes": [first],
-             "budget": BudgetLedger(fix_attempts_since_all_green=1)}
-    out: dict[str, Any] = {"gates": [
-        _gate("build", "t1", 5, _OK),
-        _gate("test", "t1", 6, _RED, "FAILED tests/test_app.py::test_a - x",
-              "FAILED tests/test_app.py::test_b - x", "FAILED tests/test_new.py::test_n - y")]}
-    keep_best(state, _config(), out, boundary=BUILD_TEST_BOUNDARY, scope=frozenset(),
-              rt=_runtime(None, store), resolve=store.resolve,
-              resolve_blob=store.resolve_blob, rerun=lambda s: {})
+    first = _entry(window, 0, "t0", (0, 2, 3), 1).model_copy(
+        update={
+            "failing": (
+                "build:a.py:1: error",
+                "test:tests/test_app.py::test_a",
+                "test:tests/test_app.py::test_b",
+            )
+        }
+    )
+    state = {**state, "fix_passes": [first], "budget": BudgetLedger(fix_attempts_since_all_green=1)}
+    out: dict[str, Any] = {
+        "gates": [
+            _gate("build", "t1", 5, _OK),
+            _gate(
+                "test",
+                "t1",
+                6,
+                _RED,
+                "FAILED tests/test_app.py::test_a - x",
+                "FAILED tests/test_app.py::test_b - x",
+                "FAILED tests/test_new.py::test_n - y",
+            ),
+        ]
+    }
+    keep_best(
+        state,
+        _config(),
+        out,
+        boundary=BUILD_TEST_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=lambda s: {},
+    )
     [entry] = out["fix_passes"]
     assert entry.outcome == "improved" and entry.snapshot_uri is not None  # kept as best
     # The newly failing test goes first, before the bigger cluster.
@@ -1362,27 +1863,50 @@ def _restart_ledger_state(store: ArtifactStore) -> FactoryState:
     """T-001 owns ``lib/`` and requirements.txt; after it, T-002 (a later wave)
     added lib/b.py and a requirement, fix-1 (another cluster) lib/c.py, fix-2 (the
     restarted cluster's) rewrote lib/a.py and added lib/d.py."""
-    tickets = [_ticket("T-001", 0, files=("lib/", "requirements.txt")),
-               _ticket("T-002", 1, files=("lib/b.py", "requirements.txt"), deps=("T-001",)),
-               _ticket("T-003", 2, files=("tests/test_x.py",))]
-    state = _ticket_state(store, tickets, artifacts=[
-        _diff_art(store, "T-001", 1, {"lib/a.py": "a\n", "requirements.txt": "a\n"}),
-        _diff_art(store, "T-002", 2, {"lib/b.py": "b\n", "requirements.txt": "a\nb\n"}),
-        _diff_art(store, "T-003", 3, {"tests/test_x.py": "x\n"}),
-        _diff_art(store, "fix-1", 4, {"lib/c.py": "c\n"}),
-        _diff_art(store, "fix-2", 5, {"lib/a.py": "a2\n", "lib/d.py": "d\n"})])
+    tickets = [
+        _ticket("T-001", 0, files=("lib/", "requirements.txt")),
+        _ticket("T-002", 1, files=("lib/b.py", "requirements.txt"), deps=("T-001",)),
+        _ticket("T-003", 2, files=("tests/test_x.py",)),
+    ]
+    state = _ticket_state(
+        store,
+        tickets,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"lib/a.py": "a\n", "requirements.txt": "a\n"}),
+            _diff_art(store, "T-002", 2, {"lib/b.py": "b\n", "requirements.txt": "a\nb\n"}),
+            _diff_art(store, "T-003", 3, {"tests/test_x.py": "x\n"}),
+            _diff_art(store, "fix-1", 4, {"lib/c.py": "c\n"}),
+            _diff_art(store, "fix-2", 5, {"lib/a.py": "a2\n", "lib/d.py": "d\n"}),
+        ],
+    )
     window = fix_window(state, BUILD_BOUNDARY, frozenset())
 
     def entry(n: int, **kw: Any) -> FixPass:
-        return FixPass(window=window, boundary=BUILD_BOUNDARY, pass_no=n, tree=f"t{n}",
-                       score=(0, 1, 1), outcome="lateral" if n else "initial",
-                       seq=Seq("run", 10 + n, 0, "fix_pass", 0), **kw)
+        return FixPass(
+            window=window,
+            boundary=BUILD_BOUNDARY,
+            pass_no=n,
+            tree=f"t{n}",
+            score=(0, 1, 1),
+            outcome="lateral" if n else "initial",
+            seq=Seq("run", 10 + n, 0, "fix_pass", 0),
+            **kw,
+        )
 
-    return {**state, "fix_passes": [
-        entry(0, target="other"),
-        entry(1, fix_task="fix-1", cluster="other", target="ticket:T-001"),
-        entry(2, fix_task="fix-2", cluster="ticket:T-001", target="ticket:T-001",
-              restart_tickets=("T-001",))]}
+    return {
+        **state,
+        "fix_passes": [
+            entry(0, target="other"),
+            entry(1, fix_task="fix-1", cluster="other", target="ticket:T-001"),
+            entry(
+                2,
+                fix_task="fix-2",
+                cluster="ticket:T-001",
+                target="ticket:T-001",
+                restart_tickets=("T-001",),
+            ),
+        ],
+    }
 
 
 def test_a_restart_resets_only_what_its_ticket_and_its_cluster_wrote() -> None:
@@ -1392,8 +1916,9 @@ def test_a_restart_resets_only_what_its_ticket_and_its_cluster_wrote() -> None:
     store = ArtifactStore()
     state = _restart_ledger_state(store)
     [t1] = [t for t in read_tickets(state, store.resolve) if t.id == "T-001"]
-    writes, deleted = ticket_reset(state, [t1], resolve=store.resolve,
-                                   resolve_blob=store.resolve_blob)
+    writes, deleted = ticket_reset(
+        state, [t1], resolve=store.resolve, resolve_blob=store.resolve_blob
+    )
     # Its own file and its cluster's repair go; another ticket's file in its
     # directory, another cluster's fix and the shared manifest stay.
     assert writes == {}
@@ -1415,11 +1940,18 @@ def test_a_shared_manifest_does_not_block_a_restart() -> None:
     from foundry.graph.gate_wiring import restart_set
 
     store = ArtifactStore()
-    tickets = [_ticket("T-001", 0, files=("app/a.py", "requirements.txt")),
-               _ticket("T-002", 1, files=("app/b.py", "requirements.txt"), deps=("T-001",))]
-    state = _ticket_state(store, tickets, artifacts=[
-        _diff_art(store, "T-001", 1, {"app/a.py": "a\n", "requirements.txt": "a\n"}),
-        _diff_art(store, "T-002", 2, {"app/b.py": "b\n", "requirements.txt": "a\nb\n"})])
+    tickets = [
+        _ticket("T-001", 0, files=("app/a.py", "requirements.txt")),
+        _ticket("T-002", 1, files=("app/b.py", "requirements.txt"), deps=("T-001",)),
+    ]
+    state = _ticket_state(
+        store,
+        tickets,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"app/a.py": "a\n", "requirements.txt": "a\n"}),
+            _diff_art(store, "T-002", 2, {"app/b.py": "b\n", "requirements.txt": "a\nb\n"}),
+        ],
+    )
     assert restart_set(state, store.resolve, ["T-001"]) == ("T-001",)
 
 
@@ -1427,7 +1959,8 @@ def test_a_gate_that_stops_naming_its_failing_tests_regressed() -> None:
     from foundry.graph.gate_wiring import _outcome, regressions
 
     best = _entry("w", 0, "t0", (-1, 1, 3), 1).model_copy(
-        update={"failing": (_T + "test_a", _T + "test_b", _T + "test_c")})
+        update={"failing": (_T + "test_a", _T + "test_b", _T + "test_c")}
+    )
     # The tests no longer collect: one raw line, a "smaller" signature, hides all.
     raw = ("test:ImportError while loading conftest 'tests/conftest.py'.",)
     assert regressions(best.failing, raw) == raw
@@ -1441,18 +1974,20 @@ def test_a_gate_that_stops_naming_its_failing_tests_regressed() -> None:
 
 
 def test_failing_ids_come_only_from_pytests_own_summary() -> None:
-    out = "\n".join([
-        "____ test_add ____",
-        "FAILED tests/test_other.py::test_z - planted in captured stdout",
-        "BDD criterion AC-9: scenario features/x.feature::AC-9 Error planted",
-        "=== short test summary info ===",  # a test printing a header of its own
-        "FAILED tests/test_fake.py::test_f - planted",
-        "E   assert 1 == 2",
-        "=========================== short test summary info ===========================",
-        "FAILED tests/test_app.py::test_add - assert 1 == 2",
-        "ERROR tests/test_y.py - ImportError: no module named y",
-        "==== 1 failed, 1 error in 0.1s ====",
-    ])
+    out = "\n".join(
+        [
+            "____ test_add ____",
+            "FAILED tests/test_other.py::test_z - planted in captured stdout",
+            "BDD criterion AC-9: scenario features/x.feature::AC-9 Error planted",
+            "=== short test summary info ===",  # a test printing a header of its own
+            "FAILED tests/test_fake.py::test_f - planted",
+            "E   assert 1 == 2",
+            "=========================== short test summary info ===========================",
+            "FAILED tests/test_app.py::test_add - assert 1 == 2",
+            "ERROR tests/test_y.py - ImportError: no module named y",
+            "==== 1 failed, 1 error in 0.1s ====",
+        ]
+    )
     findings = failure_findings(out)
     assert failing_ids(findings) == ("tests/test_app.py::test_add", "tests/test_y.py")
     assert "| FAILED tests/test_other.py::test_z - planted in captured stdout" in findings
@@ -1466,12 +2001,26 @@ def test_a_module_that_fails_to_collect_is_its_own_cluster_and_goes_first() -> N
     from foundry.graph.gate_wiring import failure_clusters
 
     collect = "ERROR tests/test_b.py - ImportError: cannot import name 'x'"
-    gate = _gate("test", "t", 2, _RED, "____ test_alpha ____", "E   assert 0",
-                 "_____ ERROR collecting tests/test_b.py _____", "E   ImportError: x",
-                 "=== short test summary info ===", _A1, _C9, collect)
+    gate = _gate(
+        "test",
+        "t",
+        2,
+        _RED,
+        "____ test_alpha ____",
+        "E   assert 0",
+        "_____ ERROR collecting tests/test_b.py _____",
+        "E   ImportError: x",
+        "=== short test summary info ===",
+        _A1,
+        _C9,
+        collect,
+    )
     clusters = failure_clusters([gate], _CLUSTER_TICKETS, {"T-001", "T-002"})
     assert (clusters[0].key, clusters[0].items, clusters[0].in_tests) == (
-        "ticket:T-002", ("test:tests/test_b.py",), True)
+        "ticket:T-002",
+        ("test:tests/test_b.py",),
+        True,
+    )
     assert not clusters[1].in_tests
     [scoped] = scope_gates([gate], clusters[0])
     assert collect in scoped.findings and "E   ImportError: x" in scoped.findings
@@ -1483,14 +2032,23 @@ def test_a_restart_standing_in_for_an_escalation_is_credited_to_its_cluster() ->
     from foundry.graph.gate_wiring import restart_cluster
 
     store = ArtifactStore()
-    state = _ticket_state(store, _CLUSTER_TICKETS, artifacts=[
-        _diff_art(store, "T-001", 1, {"a.py": "x\n"}),
-        _diff_art(store, "T-002", 2, {"tests/test_b.py": "y\n"})])
+    state = _ticket_state(
+        store,
+        _CLUSTER_TICKETS,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"a.py": "x\n"}),
+            _diff_art(store, "T-002", 2, {"tests/test_b.py": "y\n"}),
+        ],
+    )
     gates = [_gate("build", "t", 1, _OK), _gate("test", "t", 2, _RED, _B1, _B2, _A1)]
-    assert restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY,
-                           ("T-001",)) == "ticket:T-001"
-    assert restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY,
-                           ("T-009",)) == "ticket:T-009"
+    assert (
+        restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY, ("T-001",))
+        == "ticket:T-001"
+    )
+    assert (
+        restart_cluster(state, store.resolve, gates, BUILD_TEST_BOUNDARY, ("T-009",))
+        == "ticket:T-009"
+    )
 
 
 class _ScriptedRestart(_Recorder):
@@ -1517,11 +2075,19 @@ def test_a_restart_whose_first_session_fails_retries_once_in_the_same_pass(
 ) -> None:
     rec = _ScriptedRestart(
         writes={"fix-1": {"a.py": "def a_1(:\n"}},
-        script={"T-001": [{"a.py": "def a(:\n"}, None, {"a.py": "def a():\n    return 1\n"}]})
+        script={"T-001": [{"a.py": "def a(:\n"}, None, {"a.py": "def a():\n    return 1\n"}]},
+    )
     out, ran, _ = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
     assert rec.calls == ["T-001", "fix-1", "T-001", "T-001", "T-002"]
-    assert ran == ["engineering", "wave_gate", "fixer", "wave_gate", "engineering",
-                   "wave_gate", "engineering"]
+    assert ran == [
+        "engineering",
+        "wave_gate",
+        "fixer",
+        "wave_gate",
+        "engineering",
+        "wave_gate",
+        "engineering",
+    ]
     retry = rec.history[3].prior_failures
     assert retry[0] == "[fresh restart]"
     assert retry[-1].startswith("the restart's first attempt failed (fix this first)")
@@ -1534,7 +2100,8 @@ def test_a_restart_that_never_lands_does_not_halt_the_loop_as_no_progress(
 ) -> None:
     rec = _ScriptedRestart(
         writes={"fix-1": {"a.py": "def a_1(:\n"}, "fix-2": {"a.py": "def a():\n    pass\n"}},
-        script={"T-001": [{"a.py": "def a(:\n"}, None, None]})
+        script={"T-001": [{"a.py": "def a(:\n"}, None, None]},
+    )
     out, _ran, _ = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=_RESTART_TICKETS)
     assert rec.calls[:5] == ["T-001", "fix-1", "T-001", "T-001", "fix-2"]
     assert not any(a.task_id == "restart-T-001" for a in out["artifacts"])

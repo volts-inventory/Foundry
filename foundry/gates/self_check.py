@@ -85,14 +85,15 @@ class SelfCheckSettings:
     profile: VerificationProfile | None = None
     budget: int = CHECK_BUDGET
     timeout_s: float = CHECK_TIMEOUT_S
+    # The run's ``FOUNDRY_SELF_CHECK`` value; None reads the env.
+    mode: str | None = None
 
-    @staticmethod
-    def enabled() -> bool:
-        return _mode() not in _OFF
+    def enabled(self) -> bool:
+        return _mode(self.mode) not in _OFF
 
 
-def _mode() -> str:
-    return os.environ.get(DISABLE_ENV, "").strip().lower()
+def _mode(mode: str | None = None) -> str:
+    return (os.environ.get(DISABLE_ENV, "") if mode is None else mode).strip().lower()
 
 
 _LOCAL: ContextVar[bool] = ContextVar("foundry_local_session", default=False)
@@ -108,9 +109,9 @@ def local_session() -> Iterator[None]:
         _LOCAL.reset(token)
 
 
-def wanted() -> bool:
-    """Does the session running now get the check (``FOUNDRY_SELF_CHECK``)?"""
-    mode = _mode()
+def wanted(mode: str | None = None) -> bool:
+    """Does the session running now get the check (``mode``, else ``FOUNDRY_SELF_CHECK``)?"""
+    mode = _mode(mode)
     if mode in _OFF:
         return False
     return _LOCAL.get() if mode == "local" else True
@@ -151,20 +152,24 @@ class CheckBase:
         """(the materialized tree, every ticket's planned files). Raises
         :class:`~foundry.graph.gate_wiring.MaterializationError` when the tree
         cannot be built."""
+        from foundry.fs import apply_overlay
         from foundry.graph.gate_wiring import materialize_workdir, planned_files
 
         with self._lock:
             if self._built is None:
                 root = self._tmp / "tree"
                 shutil.rmtree(root, ignore_errors=True)
-                materialize_workdir(self.state, root, resolve=self._resolve,
-                                    resolve_blob=self._resolve_blob, scaffold_manifest=False)
+                materialize_workdir(
+                    self.state,
+                    root,
+                    resolve=self._resolve,
+                    resolve_blob=self._resolve_blob,
+                    scaffold_manifest=False,
+                )
                 files, deleted = self._reset
                 if files or deleted:
-                    from foundry.agents.implementation.junior_engineer import _apply_overlay
-
                     overlay: dict[str, str | None] = {**files, **dict.fromkeys(deleted)}
-                    _apply_overlay(root, overlay)
+                    apply_overlay(root, overlay)
                 self._built = (root, tuple(planned_files(self.state, self._resolve)))
             return self._built
 
@@ -193,8 +198,15 @@ def check_base(
     """The :class:`CheckBase` for ``state`` with ``reset`` (files rewritten,
     files deleted: a restart's) applied, removed on exit."""
     with tempfile.TemporaryDirectory(prefix="foundry-check-base-") as tmp:
-        yield CheckBase(state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob, rt=rt,
-                        settings=settings, reset=reset)
+        yield CheckBase(
+            state,
+            Path(tmp),
+            resolve=resolve,
+            resolve_blob=resolve_blob,
+            rt=rt,
+            settings=settings,
+            reset=reset,
+        )
 
 
 @dataclass(frozen=True)
@@ -256,8 +268,9 @@ def _unattested(
             line = line.replace(root + "/", "./").replace(root, ".")
         return line
 
-    return GateOutcome(out.name, out.status, tuple(rel(f) for f in out.findings),
-                       out.scenarios, unbuilt)
+    return GateOutcome(
+        out.name, out.status, tuple(rel(f) for f in out.findings), out.scenarios, unbuilt
+    )
 
 
 def _outcome(gate: GateImpl, workdir: Path) -> GateOutcome:
@@ -273,11 +286,13 @@ def _outcome(gate: GateImpl, workdir: Path) -> GateOutcome:
     try:
         status = gate.decide(obs)
     except Exception as exc:
-        return GateOutcome(gate.name, GateStatus.ERROR,
-                           (*obs.findings, f"{type(exc).__name__}: {exc}"))
+        return GateOutcome(
+            gate.name, GateStatus.ERROR, (*obs.findings, f"{type(exc).__name__}: {exc}")
+        )
     scenarios = obs.structured.get(BDD_KEY)
-    return GateOutcome(gate.name, status, obs.findings,
-                       dict(scenarios) if isinstance(scenarios, dict) else {})
+    return GateOutcome(
+        gate.name, status, obs.findings, dict(scenarios) if isinstance(scenarios, dict) else {}
+    )
 
 
 def run_check(
@@ -314,11 +329,13 @@ def run_check(
         stack, _ = wave_stack(base.state, planned, work)
         profile = gate_profile({**base.state, "stack": stack}, base.settings.profile)
         timeout = base.settings.timeout_s
-        unbuilt = tuple(sorted(p for p in planned_paths(planned)
-                               if not _contained_target(work, p).exists()))
+        unbuilt = tuple(
+            sorted(p for p in planned_paths(planned) if not _contained_target(work, p).exists())
+        )
         with _build_env(profile, work, base.rt) as pyenv:
             gates: list[GateImpl] = [
-                _build_gate(profile, None, pyenv, planned=planned, timeout_s=timeout)]
+                _build_gate(profile, None, pyenv, planned=planned, timeout_s=timeout)
+            ]
             if spec.scope:
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)
                 if test is not None:
@@ -357,8 +374,9 @@ def _path_rx(paths: Iterable[str]) -> re.Pattern[str] | None:
     alts = [re.escape(f.rstrip("/")) for f in paths if f]
     if not alts:
         return None
-    return re.compile(r"(?<![\w.-])(?:\./)?(?:" + "|".join(sorted(alts, key=len, reverse=True))
-                      + r")(?![\w-])")
+    return re.compile(
+        r"(?<![\w.-])(?:\./)?(?:" + "|".join(sorted(alts, key=len, reverse=True)) + r")(?![\w-])"
+    )
 
 
 def _mentions(lines: Iterable[str], files: Iterable[str]) -> bool:
@@ -406,8 +424,11 @@ def _split_build(
     is a line already failing at ``start`` that names other files."""
     everything = spec.own_refs is None or spec.own_build
     own_files = spec.own_files
-    unbuilt = [p for p in g.unbuilt
-               if not any(p == f or (f.endswith("/") and p.startswith(f)) for f in own_files)]
+    unbuilt = [
+        p
+        for p in g.unbuilt
+        if not any(p == f or (f.endswith("/") and p.startswith(f)) for f in own_files)
+    ]
     waits = _unbuilt_rx(unbuilt)
     was = {_norm(x) for x in start.findings} if start.status is GateStatus.FAIL else set()
     head, body = (g.findings[0], g.findings[1:]) if g.findings else ("", ())
@@ -417,8 +438,11 @@ def _split_build(
     for line in body:
         if waits is not None and waits.search(line):
             other.append(f"(waits on a planned file not built yet) {line}")
-        elif everything or _mentions([line], own_files) or (
-                _norm(line) not in was and (not was or _sourced(line))):
+        elif (
+            everything
+            or _mentions([line], own_files)
+            or (_norm(line) not in was and (not was or _sourced(line)))
+        ):
             own.append(line)
         elif _sourced(line):
             other.append(line)
@@ -471,11 +495,14 @@ def judge(
             continue
         start_red = _red_refs(before)
         red = {r for r, o in g.scenarios.items() if o != "passed"}
-        mine = {r for r in red
-                if everything or r in (spec.own_refs or ()) or r not in start_red}
+        mine = {r for r in red if everything or r in (spec.own_refs or ()) or r not in start_red}
         theirs = red - mine
-        if not red and before.status is GateStatus.FAIL and not everything \
-                and not _mentions(g.findings, spec.own_files):
+        if (
+            not red
+            and before.status is GateStatus.FAIL
+            and not everything
+            and not _mentions(g.findings, spec.own_files)
+        ):
             # Red with no scenario to blame (a module failing to collect) and red at
             # the baseline too: not the session's unless it names the session's files.
             pre += [head, *g.findings]
@@ -528,25 +555,42 @@ def render(v: CheckVerdict, *, left: int, cached: bool = False, opening: bool = 
     """The observation a session reads for one check."""
     ran = " + ".join(v.checked) or "nothing"
     if opening:
-        head = (f"GATE CHECK ON THE STARTING TREE ({ran}, run as the gates run them on a "
-                f"gate-shaped copy of this tree). You have {left} `check` "
-                "call(s) this session; call `check` after your edits, and finish when it "
-                "reports nothing as yours.")
+        head = (
+            f"GATE CHECK ON THE STARTING TREE ({ran}, run as the gates run them on a "
+            f"gate-shaped copy of this tree). You have {left} `check` "
+            "call(s) this session; call `check` after your edits, and finish when it "
+            "reports nothing as yours."
+        )
     else:
-        status = ("FAILED" if v.red else "PASSED" if v.green
-                  else "COULD NOT JUDGE (infra, not a verdict about your code)")
+        status = (
+            "FAILED"
+            if v.red
+            else "PASSED"
+            if v.green
+            else "COULD NOT JUDGE (infra, not a verdict about your code)"
+        )
         how = " (unchanged tree, cached result)" if cached else ""
         head = f"CHECK {status}: {ran}, run as the gates run them{how}; {left} check(s) left."
     parts = [head]
     if v.yours:
-        parts.append(_section("YOURS (fix these):" if not opening else
-                              "YOURS (failing now; your work must make these pass):",
-                              v.yours, _SECTION_CAP))
+        parts.append(
+            _section(
+                "YOURS (fix these):"
+                if not opening
+                else "YOURS (failing now; your work must make these pass):",
+                v.yours,
+                _SECTION_CAP,
+            )
+        )
     if v.pre_existing:
-        parts.append(_section(
-            "PRE-EXISTING (failing before this session; not yours unless your files cause "
-            "them — leave them and name them in a TRIAGE line):",
-            v.pre_existing, _SECTION_CAP // 2))
+        parts.append(
+            _section(
+                "PRE-EXISTING (failing before this session; not yours unless your files cause "
+                "them — leave them and name them in a TRIAGE line):",
+                v.pre_existing,
+                _SECTION_CAP // 2,
+            )
+        )
     if v.errors:
         parts.append(_section("COULD NOT RUN:", v.errors, _SECTION_CAP // 2))
     return "\n".join(parts)
@@ -583,8 +627,9 @@ class SessionCheck:
         self, files: dict[str, str], deleted: list[str], key: str, *, opening: bool = False
     ) -> CheckVerdict:
         t0 = time.monotonic()
-        gates = (self.spec.base.opening(self.spec) if opening
-                 else run_check(self.spec, files, deleted))
+        gates = (
+            self.spec.base.opening(self.spec) if opening else run_check(self.spec, files, deleted)
+        )
         verdict = judge(self.spec, gates, self._start, time.monotonic() - t0)
         for g in gates:
             if g.status in (GateStatus.PASS, GateStatus.FAIL):
@@ -597,9 +642,11 @@ class SessionCheck:
             self._unjudged.add(key)
         self.last = verdict
         status = "red" if verdict.red else "green" if verdict.green else "error"
-        progress.log(f"self-check {self.label or '-'}: {status} ({len(verdict.yours)} own, "
-                     f"{len(verdict.pre_existing)} pre-existing line(s); "
-                     f"{verdict.seconds:.1f}s; {self.left} left)")
+        progress.log(
+            f"self-check {self.label or '-'}: {status} ({len(verdict.yours)} own, "
+            f"{len(verdict.pre_existing)} pre-existing line(s); "
+            f"{verdict.seconds:.1f}s; {self.left} left)"
+        )
         return verdict
 
     def opening(self) -> CheckVerdict:

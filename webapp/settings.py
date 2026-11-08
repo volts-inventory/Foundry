@@ -40,7 +40,19 @@ MAX_FIX_ATTEMPTS = 20
 MAX_TIME_CAP_MIN = 7 * 24 * 60
 MAX_COST_USD = 100_000
 _URL_MAX = 500
-SETTINGS_KEYS = ("model_mode", "levels", "ticket_tiers", "local_url", "local_model")
+MAX_SLOTS = 32
+# The Advanced run switches: "auto" leaves each to the env / the mode's default.
+ADVANCED_CHOICES: dict[str, tuple[str, ...]] = {
+    "local_thinking": ("auto", "on", "agent", "off"),
+    "self_check": ("auto", "on", "local", "off"),
+    "native_tools": ("auto", "on", "off"),
+    "fix_until_cap": ("auto", "on", "off"),
+}
+ADVANCED_KEYS = (*ADVANCED_CHOICES, "max_slots")
+MODEL_KEYS = ("model_mode", "levels", "local_url", "local_model")
+SETTINGS_KEYS = (*MODEL_KEYS, "ticket_tiers", *ADVANCED_KEYS)
+# A resume continues the plan in its checkpoint: what shaped that plan can't change.
+RESUME_FIXED = ("request", "scope", "spec", "spec_name", "profile", "base_id")
 
 
 def _cloud_models(backend: str) -> dict[str, str]:
@@ -59,21 +71,82 @@ def presets(backend: str, local_url: str, local_model: str) -> dict[str, dict[st
     """Each mode's level table, as the Settings panel prefills it."""
     models = _cloud_models(backend)
     return {
-        mode: {t: lvl.as_dict() for t, lvl in preset_levels(
-            mode, cloud_backend=backend, cloud_models=models,
-            local_url=local_url, local_model=local_model).items()}
+        mode: {
+            t: lvl.as_dict()
+            for t, lvl in preset_levels(
+                mode,
+                cloud_backend=backend,
+                cloud_models=models,
+                local_url=local_url,
+                local_model=local_model,
+            ).items()
+        }
         for mode in MODEL_MODES
     }
 
 
+def _env_local() -> tuple[str, str]:
+    """The local server and model the CLI would use (``cli.env_local_url`` /
+    ``env_local_model``); a value that isn't valid falls back to the built-in
+    default rather than failing every settings read."""
+    from foundry.cli import env_local_model, env_local_url
+
+    try:
+        url = _local_url(env_local_url())
+    except ValueError:
+        url = DEFAULT_LOCAL_URL
+    model = env_local_model()
+    if not _MODEL_ID.match(model):
+        model = DEFAULT_LOCAL_MODEL
+    return url, model
+
+
+def default_slots() -> int:
+    """The IC-pool ceiling when the settings leave it blank: the CLI's
+    (``cli.env_max_slots``), at least 1."""
+    from foundry.cli import env_max_slots
+
+    return max(1, env_max_slots())
+
+
 def defaults(backend: str) -> dict[str, Any]:
+    url, model = _env_local()
     return {
         "model_mode": "cloud",
-        "levels": presets(backend, DEFAULT_LOCAL_URL, DEFAULT_LOCAL_MODEL)["cloud"],
+        "levels": presets(backend, url, model)["cloud"],
         "ticket_tiers": dict(DEFAULT_TICKET_TIERS),
-        "local_url": DEFAULT_LOCAL_URL,
-        "local_model": DEFAULT_LOCAL_MODEL,
+        "local_url": url,
+        "local_model": model,
+        **{k: "auto" for k in ADVANCED_CHOICES},
+        "max_slots": None,
     }
+
+
+def _slots(raw: Any) -> int | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, str) and raw.strip().isdigit():
+        raw = int(raw)
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 1 <= raw <= MAX_SLOTS:
+        raise ValueError(f"max_slots must be a whole number, 1 to {MAX_SLOTS} (blank = default)")
+    return raw
+
+
+def parse_advanced(raw: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
+    """The Advanced run switches ``raw`` sets, over ``base``. Raises ValueError."""
+    out = {k: base.get(k) or "auto" for k in ADVANCED_CHOICES}
+    out["max_slots"] = base.get("max_slots")
+    for key, choices in ADVANCED_CHOICES.items():
+        if key in raw:
+            value = raw[key]
+            if value is None or value == "":
+                value = "auto"
+            if value not in choices:
+                raise ValueError(f"{key} must be one of {', '.join(choices)}")
+            out[key] = value
+    if "max_slots" in raw:
+        out["max_slots"] = _slots(raw["max_slots"])
+    return out
 
 
 def _local_url(raw: Any) -> str:
@@ -105,18 +178,24 @@ def validate(raw: Any, backend: str) -> dict[str, Any]:
         if not isinstance(levels, Mapping) or set(levels) != set(LEVEL_TIERS):
             raise ValueError(f"levels must set exactly {', '.join(LEVEL_TIERS)}")
         # One local server: every local level points at local_url.
-        levels = {t: ({k: v for k, v in lv.items() if k != "base_url"}
-                      if isinstance(lv, Mapping) else lv) for t, lv in levels.items()}
+        levels = {
+            t: ({k: v for k, v in lv.items() if k != "base_url"} if isinstance(lv, Mapping) else lv)
+            for t, lv in levels.items()
+        }
         table = parse_levels(levels, cloud_backends=_backends(), local_url=out["local_url"])
         out["levels"] = {t: table[t].as_dict() for t in LEVEL_TIERS}
     else:
         out["levels"] = presets(backend, out["local_url"], out["local_model"])[mode]
     if "ticket_tiers" in raw:
         tiers = raw["ticket_tiers"]
-        if (not isinstance(tiers, Mapping) or set(tiers) != set(DIFFICULTIES)
-                or any(v not in LEVEL_TIERS for v in tiers.values())):
+        if (
+            not isinstance(tiers, Mapping)
+            or set(tiers) != set(DIFFICULTIES)
+            or any(v not in LEVEL_TIERS for v in tiers.values())
+        ):
             raise ValueError("ticket_tiers must map trivial, standard and complex to T1-T3")
         out["ticket_tiers"] = {d: str(tiers[d]) for d in DIFFICULTIES}
+    out.update(parse_advanced(raw, out))
     return out
 
 
@@ -155,6 +234,8 @@ def client_view(settings: Mapping[str, Any], backend: str) -> dict[str, Any]:
         "scopes": list(SCOPES),
         "fix_defaults": dict(DEFAULT_FIX_ATTEMPTS),
         "spec_max_bytes": SPEC_MAX_BYTES,
+        "advanced": {k: list(v) for k, v in ADVANCED_CHOICES.items()},
+        "max_slots": {"max": MAX_SLOTS, "default": default_slots()},
     }
 
 
@@ -179,8 +260,8 @@ def parse_build_options(
 
     Returns ``run_kwargs`` (passed to ``run`` as-is), ``view`` (what the floor's
     HUD shows, also enough to rebuild ``run_kwargs`` after a restart),
-    ``max_fix_attempts``, ``profile`` and ``ticket_tiers`` (the Project's own
-    fields) and ``spec`` (text or None). Raises ValueError."""
+    ``max_fix_attempts``, ``profile``, ``ticket_tiers`` and ``max_slots`` (the
+    Project's own fields) and ``spec`` (text or None). Raises ValueError."""
     overrides = {k: body[k] for k in SETTINGS_KEYS if k in body}
     eff = validate({**saved, **overrides}, backend)
     mode = eff["model_mode"]
@@ -239,6 +320,7 @@ def parse_build_options(
         "cost_cap_microusd": cost_micro,
         "spec": spec is not None,
         "spec_name": spec_name if spec is not None else "",
+        **{k: eff[k] for k in ADVANCED_KEYS},
     }
     return {
         "run_kwargs": run_kwargs(view),
@@ -246,8 +328,41 @@ def parse_build_options(
         "max_fix_attempts": max_fix,
         "profile": profile,
         "ticket_tiers": eff["ticket_tiers"],
+        "max_slots": eff["max_slots"] or default_slots(),
         "spec": spec,
     }
+
+
+def resume_view(view: Mapping[str, Any], body: Mapping[str, Any], backend: str) -> dict[str, Any]:
+    """A floor's view with the model setup and Advanced switches a resume body
+    changes. A key that shaped the plan (scope, spec, stack) is refused: the plan
+    in the checkpoint is what resumes. Raises ValueError."""
+    fixed = [k for k in RESUME_FIXED if k in body]
+    if fixed:
+        raise ValueError(
+            f"{', '.join(fixed)} can't change on a resume: the plan in the checkpoint "
+            "was made with them. Start a new build to change them."
+        )
+    out = dict(view)
+    if any(k in body for k in MODEL_KEYS):
+        mode = body.get("model_mode", view.get("model_mode") or "cloud")
+        env_url, env_model = _env_local()
+        raw: dict[str, Any] = {
+            "model_mode": mode,
+            "local_url": body.get("local_url", view.get("local_url") or env_url),
+            "local_model": body.get("local_model", view.get("local_model") or env_model),
+        }
+        if "levels" in body:
+            raw["levels"] = body["levels"]
+        elif mode == view.get("model_mode") and view.get("levels_custom") and view.get("levels"):
+            raw["levels"] = view["levels"]  # the same mode keeps its edited table
+        eff = validate(raw, backend)
+        out.update({k: eff[k] for k in MODEL_KEYS})
+        out["levels_custom"] = (
+            eff["levels"] != presets(backend, eff["local_url"], eff["local_model"])[mode]
+        )
+    out.update(parse_advanced(body, view))
+    return out
 
 
 def run_kwargs(view: Mapping[str, Any]) -> dict[str, Any]:
@@ -261,7 +376,24 @@ def run_kwargs(view: Mapping[str, Any]) -> dict[str, Any]:
         "time_cap_minutes": view.get("time_cap_minutes"),
         "scope": view.get("scope") or "auto",
         "cost_cap_microusd": view.get("cost_cap_microusd"),
+        **advanced_kwargs(view),
     }
+
+
+_ON_OFF = {"on": True, "off": False}
+
+
+def advanced_kwargs(view: Mapping[str, Any]) -> dict[str, Any]:
+    """The Advanced switches as ``run`` arguments. One left on auto is not sent, so
+    the env (and the mode's default) decides it, as it does for the CLI."""
+    out: dict[str, Any] = {}
+    for key in ("local_thinking", "self_check"):
+        if view.get(key) not in (None, "auto"):
+            out[key] = view[key]
+    for key in ("native_tools", "fix_until_cap"):
+        if view.get(key) in _ON_OFF:
+            out[key] = _ON_OFF[view[key]]
+    return out
 
 
 def write_spec(inputs: Path, text: str) -> Path:

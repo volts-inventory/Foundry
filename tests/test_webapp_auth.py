@@ -14,6 +14,7 @@ def _h(**kw: str) -> dict[str, str]:
 
 # --- CSRF / same-origin (always enforced) ------------------------------------- #
 
+
 def test_same_origin_post_allowed() -> None:
     h = _h(Origin="http://127.0.0.1:8765", Host="127.0.0.1:8765")
     assert _authorize_mutation(h, token=None) is None
@@ -31,6 +32,7 @@ def test_no_origin_header_allowed() -> None:
 
 
 # --- shared token (enforced when configured) ---------------------------------- #
+
 
 def test_token_required_when_configured() -> None:
     h = _h(Host="h:1")  # no token header

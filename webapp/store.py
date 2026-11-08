@@ -58,9 +58,20 @@ CREATE TABLE IF NOT EXISTS seen_uris (
 """
 
 _COLS = (
-    "id", "floor", "request", "mode", "backend", "adapter", "slots", "status",
-    "passed", "gates", "out_base", "created_at",
+    "id",
+    "floor",
+    "request",
+    "mode",
+    "backend",
+    "adapter",
+    "slots",
+    "status",
+    "passed",
+    "gates",
+    "out_base",
+    "created_at",
 )
+
 
 class BuildStore:
     """A single SQLite file cataloguing builds. Thread-safe (one lock, WAL)."""
@@ -130,9 +141,7 @@ class BuildStore:
 
     def get(self, build_id: str) -> dict[str, Any] | None:
         with self._lock:
-            r = self._conn.execute(
-                "SELECT * FROM builds WHERE id = ?", (build_id,)
-            ).fetchone()
+            r = self._conn.execute("SELECT * FROM builds WHERE id = ?", (build_id,)).fetchone()
         return self._decode(r) if r else None
 
     def max_floor(self) -> int:

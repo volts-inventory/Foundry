@@ -13,6 +13,13 @@ const MODES = [
   ["local", "Local", "Every level on your local server."],
 ];
 const TIER_ROLE = {T1:"planner · complex · fixer", T2:"standard · reviewer", T3:"trivial"};
+// The Advanced run switches; "auto" leaves each to the server's env and the mode's default.
+const ADV = [
+  ["local_thinking", "Thinking", "local models", {auto:"auto — per model", on:"on", agent:"agent only — coding sessions", off:"off"}],
+  ["self_check", "Self-check", "agents run the checks before handing back", {auto:"auto — env default", on:"on", local:"local sessions only", off:"off"}],
+  ["native_tools", "Native tools", "tool calls instead of JSON actions", {auto:"auto — env default", on:"on", off:"off"}],
+  ["fix_until_cap", "Fix until cap", "keep fixing until a cap stops it", {auto:"auto — on for local", on:"on", off:"off"}],
+];
 let CFG = null;        // GET /api/settings
 let CHANGE = null;     // the shipped floor the form is changing, or null
 let SPEC = null;       // {text, name} attached to the form
@@ -133,6 +140,16 @@ function buildPanel(){
           h("button", {type:"button", id:"local-check-btn", text:"⟳ Check", onclick: checkLocal}),
           h("span", {id:"local-status", class:"local-status", role:"status", "aria-live":"polite"})),
         h("div", {id:"local-models", class:"local-models"})),
+      h("details", {class:"fset fold", id:"adv-run"},
+        h("summary", {}, h("span", {class:"fset-h", text:"Advanced"})),
+        h("div", {class:"fset-body"},
+          h("div", {class:"adv-grid"},
+            ...ADV.map(([key, label, hint, opts]) => h("div", {class:"field"},
+              h("label", {for:"run-"+key, text:label+" "}, h("span", {class:"hint", text:"— "+hint})),
+              h("select", {id:"run-"+key}, ...Object.entries(opts).map(([v, t]) => h("option", {value:v, text:t}))))),
+            h("div", {class:"field"},
+              h("label", {for:"run-max_slots", text:"Max slots "}, h("span", {class:"hint", text:"— tickets built at once"})),
+              h("input", {id:"run-max_slots", type:"number", min:"1", step:"1", inputmode:"numeric"}))))),
       h("div", {class:"dialog-actions build-actions"},
         h("button", {type:"button", id:"settings-save", class:"primary", text:"Save defaults",
           onclick: saveSettings}),
@@ -187,6 +204,10 @@ function openPanel(){
     pickMode(s.model_mode, false);
     fillLevels(s.levels);
     for (const d of DIFFS) $("diff-"+d).value = s.ticket_tiers[d];
+    for (const [key] of ADV) $("run-"+key).value = s[key] || "auto";
+    const slots = $("run-max_slots");
+    slots.value = s.max_slots == null ? "" : String(s.max_slots);
+    if (cfg.max_slots){ slots.max = String(cfg.max_slots.max); slots.placeholder = "default ("+cfg.max_slots.default+")"; }
     $("local-status").textContent = ""; $("local-models").innerHTML = "";
     panel.classList.remove("hidden");
     panel.querySelector(".mode-opt[aria-pressed=true]").focus();
@@ -206,6 +227,10 @@ async function saveSettings(){
   for (const d of DIFFS) ticket_tiers[d] = $("diff-"+d).value;
   const body = {model_mode:curMode(), levels, ticket_tiers,
     local_url:$("local-url").value.trim(), local_model:$("local-model").value.trim()};
+  for (const [key] of ADV) body[key] = $("run-"+key).value;
+  const slots = $("run-max_slots").value.trim();
+  if (slots !== "" && !/^\d+$/.test(slots)){ $("settings-err").textContent = "Max slots: a whole number (blank = default)."; return; }
+  body.max_slots = slots === "" ? null : Number(slots);
   const btn = $("settings-save"); btn.disabled = true;
   try {
     CFG = await postJSON("/api/settings", body);

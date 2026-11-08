@@ -217,9 +217,7 @@ def test_nonce_replay_dropped_but_refold_idempotent(signer, records, installed):
 # ---- 6. negative-verdict latch + nonce-bound release ---------------------------
 
 
-def test_negative_verdict_latch_blocks_older_approve_until_released(
-    signer, records, installed
-):
+def test_negative_verdict_latch_blocks_older_approve_until_released(signer, records, installed):
     request_changes = signer.with_judgment_binding(
         make_review(status=GateStatus.FAIL, nonce="n-fail", seq=make_seq("review_node", step=5))
     )

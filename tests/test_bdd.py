@@ -61,11 +61,19 @@ def _state(criteria: tuple[AcceptanceCriterion, ...], files: dict[str, str] | No
     blobs: dict[str, str] = {}
     if files is not None:
         diff = FeatureDiff(
-            diff_uri="cas://sha256/d1", task_id="T1", branch="task/T1",
-            base_tree_sha="base", seq=_seq("junior_engineer"),
+            diff_uri="cas://sha256/d1",
+            task_id="T1",
+            branch="task/T1",
+            base_tree_sha="base",
+            seq=_seq("junior_engineer"),
         )
-        h = Artifact(kind=FEATURE_DIFF_KIND, uri="cas://fd/T1", produced_by="junior_engineer",
-                     task_id="T1", seq=diff.seq)
+        h = Artifact(
+            kind=FEATURE_DIFF_KIND,
+            uri="cas://fd/T1",
+            produced_by="junior_engineer",
+            task_id="T1",
+            seq=diff.seq,
+        )
         artifacts.append(h)
         by_uri[h.uri] = diff
         blobs[diff.diff_uri] = _snapshot(files)
@@ -136,8 +144,14 @@ def test_foreign_profile_gets_advisory_triage(tmp_path: Path) -> None:
     state, resolve, blob = _state((_ac("AC-1"),), {"app.py": "X = 1\n"})
     profile = VerificationProfile(name="node-web", build_cmd=("true",), test_cmd=("true",))
     out = run_build_test_gates(
-        state, config, rt=rt, runner=runner, resolve=resolve, resolve_blob=blob,
-        workdir=tmp_path, profile=profile,
+        state,
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=blob,
+        workdir=tmp_path,
+        profile=profile,
     )
     assert [g.status for g in out["gates"]] == [GateStatus.PASS] * 3
     (triage,) = out["gate_triage"]
@@ -153,7 +167,7 @@ def test_no_ticketed_criteria_writes_no_features(tmp_path: Path) -> None:
 
 # ---- the gate over a real pytest-bdd project ----------------------------------
 
-_STEPS = '''\
+_STEPS = """\
 from pytest_bdd import given, parsers, scenarios, then, when
 
 scenarios("../features/T1.feature")
@@ -172,7 +186,7 @@ def _add(items, x):
 @then(parsers.parse("the list has {n:d} item"))
 def _count(items, n):
     assert len(items) == {expected}
-'''
+"""
 
 
 def _project(tmp_path: Path, steps: str | None) -> Path:
@@ -266,8 +280,10 @@ def test_a_step_text_defined_twice_is_named_on_any_failure(tmp_path: Path) -> No
     obs = gate.execute(_project(tmp_path, steps))
     assert gate.decide(obs) is GateStatus.FAIL
     hint = next(f for f in obs.findings if f.startswith("`@then("))
-    assert hint.startswith('`@then("the list has {n:d} item")` is defined 2 times in '
-                           "tests/test_t1.py (lines 16, 21): pytest-bdd runs only the LAST")
+    assert hint.startswith(
+        '`@then("the list has {n:d} item")` is defined 2 times in '
+        "tests/test_t1.py (lines 16, 21): pytest-bdd runs only the LAST"
+    )
     assert "define each step text once" in hint
 
 
@@ -284,9 +300,11 @@ def test_a_target_fixture_on_a_step_no_feature_line_reads_is_named(tmp_path: Pat
     hint = next(f for f in obs.findings if f.startswith("step argument `items`"))
     assert 'only `@given("an empty list for AC-1")` in tests/test_t1.py sets it' in hint
     assert 'no step line in features/T1.feature reads "an empty list for AC-1"' in hint
-    assert hint.endswith('the nearest step line is "an empty list", whose step definition '
-                         "sets `basket`: scenarios that share a step line share its one step "
-                         "definition, so take `basket` as the parameter instead")
+    assert hint.endswith(
+        'the nearest step line is "an empty list", whose step definition '
+        "sets `basket`: scenarios that share a step line share its one step "
+        "definition, so take `basket` as the parameter instead"
+    )
 
 
 def test_gate_fails_when_scenarios_are_never_bound(tmp_path: Path) -> None:
@@ -295,7 +313,8 @@ def test_gate_fails_when_scenarios_are_never_bound(tmp_path: Path) -> None:
     assert obs.exit_codes == (0,)
     assert gate.decide(obs) is GateStatus.FAIL
     assert [f.split(":")[0] for f in obs.findings[:2]] == [
-        "BDD criterion AC-1", "BDD criterion AC-2",
+        "BDD criterion AC-1",
+        "BDD criterion AC-2",
     ]
     assert all("not executed" in f for f in obs.findings[:2])
 
@@ -319,9 +338,7 @@ def test_foreign_harness_ignores_features(tmp_path: Path) -> None:
 
 # ---- adversarial: the gate must not be passable without running the scenarios --
 
-_BOTH_PASSED = (
-    '{"features/T1.feature::AC-1": "passed", "features/T1.feature::AC-2": "passed"}'
-)
+_BOTH_PASSED = '{"features/T1.feature::AC-1": "passed", "features/T1.feature::AC-2": "passed"}'
 
 
 def _attack(tmp_path: Path, files: dict[str, str]) -> tuple[TestGate, Any]:
@@ -334,7 +351,7 @@ def _attack(tmp_path: Path, files: dict[str, str]) -> tuple[TestGate, Any]:
 
 
 def test_forged_before_scenario_hook_does_not_count_as_execution(tmp_path: Path) -> None:
-    forge = '''\
+    forge = """\
 import os
 
 from pytest_bdd.feature import get_feature
@@ -359,7 +376,7 @@ def test_ac1(request):
 
 def test_ac2(request):
     _forge(request, "AC-2")
-'''
+"""
     gate, obs = _attack(tmp_path, {"tests/test_forge.py": forge})
     assert obs.exit_codes == (0,)
     assert gate.decide(obs) is GateStatus.FAIL
@@ -367,7 +384,7 @@ def test_ac2(request):
 
 
 def test_forged_stdout_report_line_is_ignored(tmp_path: Path) -> None:
-    conftest = f'''\
+    conftest = f"""\
 import atexit
 import sys
 
@@ -382,7 +399,7 @@ atexit.register(_forge)
 
 def pytest_unconfigure(config):
     _forge()
-'''
+"""
     gate, obs = _attack(tmp_path, {"conftest.py": conftest})
     assert gate.decide(obs) is GateStatus.FAIL
     assert set(obs.structured[BDD_KEY].values()) == {"missing"}
@@ -413,7 +430,7 @@ def test_plain_harness_cannot_be_shadowed_either(tmp_path: Path) -> None:
     assert gate.decide(obs) is GateStatus.PASS
 
 
-_CATCH_ALL = '''\
+_CATCH_ALL = """\
 from pytest_bdd import given, parsers, scenarios, then, when
 
 scenarios("../features/T1.feature")
@@ -432,7 +449,7 @@ def _when():
 @then(parsers.re({pattern!r}))
 def _then():
     pass
-'''
+"""
 
 
 @pytest.mark.parametrize("pattern", [".*", ".+"])
@@ -446,10 +463,7 @@ def test_catch_all_steps_fail(tmp_path: Path, pattern: str) -> None:
 
 def test_a_catch_all_then_alone_fails_and_probes_have_no_fixed_literal(tmp_path: Path) -> None:
     # Specific Given/When; the Then accepts anything but the old fixed probe literals.
-    then = (
-        '@then(parsers.re(r"^(?!.*Zq-9 !)(?!wV\\\\? ).*$"))\n'
-        "def _count():\n    pass\n"
-    )
+    then = '@then(parsers.re(r"^(?!.*Zq-9 !)(?!wV\\\\? ).*$"))\ndef _count():\n    pass\n'
     steps = _STEPS.split('@then(parsers.parse("the list has')[0] + then
     gate = TestGate()
     obs = gate.execute(_project(tmp_path, steps))
@@ -458,15 +472,15 @@ def test_a_catch_all_then_alone_fails_and_probes_have_no_fixed_literal(tmp_path:
 
 
 def test_feature_rewritten_at_run_time_does_not_count(tmp_path: Path) -> None:
-    conftest = '''\
+    conftest = """\
 import pathlib
 
 pathlib.Path("features/T1.feature").write_text(
     "Feature: T1\\n\\n  Scenario: AC-1\\n    Then ok\\n\\n  Scenario: AC-2\\n    Then ok\\n"
 )
-'''
+"""
     steps = (
-        'from pytest_bdd import scenarios, then\n\n'
+        "from pytest_bdd import scenarios, then\n\n"
         'scenarios("../features/T1.feature")\n\n\n'
         '@then("ok")\ndef _ok():\n    pass\n'
     )
@@ -519,8 +533,14 @@ def test_a_dropped_tickets_scenarios_are_neither_specified_nor_executed(tmp_path
     for t in (
         Ticket(id="T2", title="old", specialty=Specialty.BACKEND, seq=_seq("planner", 1)),
         # The re-plan's tombstone: a newer T2 record superseding its own id.
-        Ticket(id="T2", title="old", specialty=Specialty.BACKEND, supersedes="T2", version=2,
-               seq=_seq("planner", 2)),
+        Ticket(
+            id="T2",
+            title="old",
+            specialty=Specialty.BACKEND,
+            supersedes="T2",
+            version=2,
+            seq=_seq("planner", 2),
+        ),
     ):
         h = emit_artifact(t, "ticket", "planner", t.seq)
         state["artifacts"].append(h)
@@ -549,10 +569,16 @@ def test_a_scenario_a_replan_dropped_from_a_kept_ticket_is_neither_specified_nor
     by_uri: dict[str, Any] = {}
     replan = _seq("planner", 9)._replace(emission_epoch=2)
     for kind, body in (
-        ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1", "AC-2"),
-                    seq=_seq("planner"))),
-        ("ticket", Ticket(id="T1", title="t", specialty=Specialty.BACKEND,
-                          scenario_ids=("AC-1",), seq=replan)),
+        (
+            "prd",
+            PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1", "AC-2"), seq=_seq("planner")),
+        ),
+        (
+            "ticket",
+            Ticket(
+                id="T1", title="t", specialty=Specialty.BACKEND, scenario_ids=("AC-1",), seq=replan
+            ),
+        ),
         ("acceptance_criterion", _ac("AC-1").model_copy(update={"seq": replan})),
         ("prd", PRD(title="p", prd_uri="cas://p", criterion_ids=("AC-1",), seq=replan)),
     ):

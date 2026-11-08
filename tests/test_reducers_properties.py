@@ -197,9 +197,7 @@ def constraint_pool(draw) -> list[PinnedConstraint]:
     out = []
     for s in unique_seqs(draw):
         cid = draw(st.sampled_from(CONSTRAINT_IDS))
-        supersedes = draw(
-            st.none() | st.sampled_from([i for i in CONSTRAINT_IDS if i != cid])
-        )
+        supersedes = draw(st.none() | st.sampled_from([i for i in CONSTRAINT_IDS if i != cid]))
         out.append(
             PinnedConstraint(
                 id=cid,

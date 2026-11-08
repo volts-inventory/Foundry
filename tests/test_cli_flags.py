@@ -31,9 +31,9 @@ def test_state_dir_param_overrides_env(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FOUNDRY_STATE_DIR", str(tmp_path / "env"))
     explicit = tmp_path / "explicit"
     run("build a thing", state_dir=str(explicit))
-    assert (explicit / "checkpoints.db").is_file()      # checkpointer
-    assert (explicit / "global_records.db").is_file()   # trust ledgers
-    assert (explicit / "cas").is_dir()                  # content-addressed store
+    assert (explicit / "checkpoints.db").is_file()  # checkpointer
+    assert (explicit / "global_records.db").is_file()  # trust ledgers
+    assert (explicit / "cas").is_dir()  # content-addressed store
     assert not (tmp_path / "env").exists()
 
 
@@ -107,7 +107,7 @@ def test_a_value_error_inside_the_run_is_a_crash_not_a_usage_error(monkeypatch) 
     def _bug(*_a, **_k):
         raise ValueError("max() iterable argument is empty")
 
-    monkeypatch.setattr(cli, "_invoke", _bug)
+    monkeypatch.setattr(cli.invoke, "_invoke", _bug)
     with pytest.raises(cli.RunCrashed) as info:
         main(["build a thing"])
     assert isinstance(info.value.__cause__, ValueError)

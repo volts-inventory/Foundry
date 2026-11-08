@@ -21,8 +21,8 @@ cage is unchanged. ``complete_fn(messages, schema) -> (text, parsed)`` is the
 injected proxy seam (a closure over ``proxy.complete`` in production; a fake in
 tests), mirroring raw_react's ``complete_fn`` discipline.
 
-Opt-in native tool calls (``tool_complete_fn``, wired when FOUNDRY_NATIVE_TOOLS
-is set): the same actions are offered as tools (:data:`TOOLS`), one model turn
+Opt-in native tool calls (``tool_complete_fn``, wired by ``run(native_tools=)``,
+else FOUNDRY_NATIVE_TOOLS): the same actions are offered as tools (:data:`TOOLS`), one model turn
 may request several, and each runs through exactly the guards a JSON action
 does. A backend without a tool channel raises ``ToolsUnsupported`` and the
 adapter drops to JSON actions for that packet tier (its transport + model) from
@@ -119,17 +119,24 @@ _CHECK_SCHEMA: dict[str, Any] = {
     **ACTION_SCHEMA,
     "properties": {
         **ACTION_SCHEMA["properties"],
-        "action": {"type": "string",
-                   "enum": [*ACTION_SCHEMA["properties"]["action"]["enum"], "check"]},
+        "action": {
+            "type": "string",
+            "enum": [*ACTION_SCHEMA["properties"]["action"]["enum"], "check"],
+        },
     },
 }
-_CHECK_LINE = ('  {"action": "check"}   # run the gates on a gate-shaped copy of this tree '
-               "(build + your scenarios)\n")
-_CHECK_CLOSE = ("Write real, complete code (no placeholders). Call check after your edits "
-                "and fix what it reports as yours: done is refused while it is red.")
+_CHECK_LINE = (
+    '  {"action": "check"}   # run the gates on a gate-shaped copy of this tree '
+    "(build + your scenarios)\n"
+)
+_CHECK_CLOSE = (
+    "Write real, complete code (no placeholders). Call check after your edits "
+    "and fix what it reports as yours: done is refused while it is red."
+)
 _CHECK_EPILOGUE = (
-    _EPILOGUE[:_EPILOGUE.index('  {"action": "done"')] + _CHECK_LINE
-    + _EPILOGUE[_EPILOGUE.index('  {"action": "done"'):_EPILOGUE.index("Write real")]
+    _EPILOGUE[: _EPILOGUE.index('  {"action": "done"')]
+    + _CHECK_LINE
+    + _EPILOGUE[_EPILOGUE.index('  {"action": "done"') : _EPILOGUE.index("Write real")]
     + _CHECK_CLOSE
 )
 
@@ -166,24 +173,48 @@ _STR = {"type": "string"}
 _LINE = {"type": "integer", "minimum": 1}
 # Anthropic tool shape; the OpenAI-compatible transports convert it.
 TOOLS: tuple[dict[str, Any], ...] = (
-    _tool("read_file", "Read a worktree file; start_line/end_line (1-based, inclusive) "
-          "are optional: omit them to read the whole file.", ("path",),
-          path=_STR, start_line=_LINE, end_line=_LINE),
-    _tool("search", "Regex search over the worktree, optionally under a relative dir.",
-          ("pattern",), pattern=_STR, path=_STR),
-    _tool("write_file", "Write the FULL content of a worktree file.", ("path", "content"),
-          path=_STR, content=_STR),
+    _tool(
+        "read_file",
+        "Read a worktree file; start_line/end_line (1-based, inclusive) "
+        "are optional: omit them to read the whole file.",
+        ("path",),
+        path=_STR,
+        start_line=_LINE,
+        end_line=_LINE,
+    ),
+    _tool(
+        "search",
+        "Regex search over the worktree, optionally under a relative dir.",
+        ("pattern",),
+        pattern=_STR,
+        path=_STR,
+    ),
+    _tool(
+        "write_file",
+        "Write the FULL content of a worktree file.",
+        ("path", "content"),
+        path=_STR,
+        content=_STR,
+    ),
     _tool("delete_file", "Delete a worktree file.", ("path",), path=_STR),
     _tool("run", "Run a shell command (build/tests) inside the sandbox.", ("cmd",), cmd=_STR),
-    _tool("done", "Declare the task finished.", ("summary",), summary=_STR,
-          triage={"type": "array", "items": _STR}),
+    _tool(
+        "done",
+        "Declare the task finished.",
+        ("summary",),
+        summary=_STR,
+        triage={"type": "array", "items": _STR},
+    ),
 )
 _CHECK_TOOLS: tuple[dict[str, Any], ...] = (
     *TOOLS[:-1],
-    _tool("check", "Run the gates (the build and your acceptance scenarios) on a copy of "
-          "this tree shaped as the gate sees it: offline, only declared dependencies. "
-          "Reports failures that are yours and ones that were failing before you started.",
-          ()),
+    _tool(
+        "check",
+        "Run the gates (the build and your acceptance scenarios) on a copy of "
+        "this tree shaped as the gate sees it: offline, only declared dependencies. "
+        "Reports failures that are yours and ones that were failing before you started.",
+        (),
+    ),
     TOOLS[-1],
 )
 # Refusals of a red done per session: a failure the session cannot fix by editing
@@ -193,7 +224,8 @@ _CHECK_REFUSALS = 2
 # still red (tiered.session_stop_reason counts it like the turn cap).
 # (id of the packet, its opened check) from :meth:`ProxyAgentAdapter.prepared`.
 _OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] = ContextVar(
-    "foundry_opened_check", default=None)
+    "foundry_opened_check", default=None
+)
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 # The note of a session whose final tree no check judged.
 CHECK_UNVERIFIED = "unverified"
@@ -239,6 +271,16 @@ _LIST_MAX = 200
 # With this many turns left the observation says so: a session that never learns
 # its budget is cut off mid-change, before it re-runs the checks on its edits.
 _LOW_TURNS = 5
+_ACTIVITY: dict[str, tuple[str, str | None]] = {
+    "write_file": ("writing", "path"),
+    "read_file": ("reading", "path"),
+    "delete_file": ("deleting", "path"),
+    "run": ("running", "cmd"),
+    "search": ("searching for", "pattern"),
+    "check": ("checking the gates", None),
+    "done": ("done:", "summary"),
+}
+_ACTIVITY_MAX = 72
 
 
 @dataclass(frozen=True)
@@ -297,8 +339,10 @@ def _contained(worktree: Path, rel: str) -> Path:
     if not rel:
         # A local model sometimes drops "path" from a full-file write: say so, not
         # "escapes the worktree", so the next turn resends it with the path.
-        raise ValueError('no "path" given — nothing done; repeat the action with "path" '
-                         "set to the worktree-relative file")
+        raise ValueError(
+            'no "path" given — nothing done; repeat the action with "path" '
+            "set to the worktree-relative file"
+        )
     pure = PurePosixPath(rel)
     root = worktree.resolve()
     if pure.is_absolute() or ".." in pure.parts:
@@ -327,8 +371,10 @@ class ProxyAgentAdapter:
         run_timeout_s: float = 300.0,
         self_reported_model: str | None = None,
         tool_complete_fn: AgentToolCompleteFn | None = None,
+        activity_cb: Callable[[str], None] | None = None,
     ) -> None:
         self._complete = complete_fn
+        self._activity_cb = activity_cb
         self._tool_complete = tool_complete_fn
         # Packet tiers whose backend has no tool channel. Only ever added to, and
         # read once per session: a concurrent session's fallback never changes
@@ -365,17 +411,22 @@ class ProxyAgentAdapter:
         native = tool_fn is not None
         listing = _listing(before)
         opened = _OPENED.get()
-        checker, checked = (opened[1] if opened is not None and opened[0] == id(packet)
-                            else _open_check(packet))
+        checker, checked = (
+            opened[1] if opened is not None and opened[0] == id(packet) else _open_check(packet)
+        )
         if checker is not None and checker.spec.rules:
             packet = _with_rules(packet, checker.spec.rules)
         messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
-        st = _Loop(worktree, _tree_state(worktree),
-                   files=tuple(str(f) for f in files) if isinstance(files, list) else None,
-                   budget=max(1, packet.turn_budget),
-                   start=before if packet.prior_failures else None,
-                   checker=checker, origin=before)
+        st = _Loop(
+            worktree,
+            _tree_state(worktree),
+            files=tuple(str(f) for f in files) if isinstance(files, list) else None,
+            budget=max(1, packet.turn_budget),
+            start=before if packet.prior_failures else None,
+            checker=checker,
+            origin=before,
+        )
         turns = 0
         while turns < st.budget and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
@@ -388,8 +439,10 @@ class ProxyAgentAdapter:
                 self._native_turn(tool_fn, messages, st, sandbox)
             except ToolsUnsupported as exc:
                 # This tier on JSON actions from now on; the backend never ran a turn.
-                progress.log(f"proxy-agent: native tool calls unavailable on tier "
-                             f"{tier or '-'} ({exc}); using JSON actions")
+                progress.log(
+                    f"proxy-agent: native tool calls unavailable on tier "
+                    f"{tier or '-'} ({exc}); using JSON actions"
+                )
                 self._json_tiers.add(tier)
                 native = False
                 messages = _opening(packet, native=False, listing=listing, check=checked)
@@ -403,16 +456,22 @@ class ProxyAgentAdapter:
             last = c.cached(authored, deleted)
             if last is not None and last.red and c.left <= 0:
                 # Red on the final tree itself: an edit after the last check is unjudged.
-                st.triage.append(f"{CHECK_EXHAUSTED} — partial work recorded; its last "
-                                 "check: " + " | ".join(last.yours[:6])[:1500])
+                st.triage.append(
+                    f"{CHECK_EXHAUSTED} — partial work recorded; its last "
+                    "check: " + " | ".join(last.yours[:6])[:1500]
+                )
             elif last is None:
                 # Not a stop: the wave check judges the tree as for any session.
-                why = ("the gates could not judge them (infra)"
-                       if c.unjudged(authored, deleted) else
-                       "no check was left to run on them" if c.left <= 0 else
-                       "the session ended without checking them")
-                st.triage.append(f"{CHECK_UNVERIFIED}: the session's last edits were never "
-                                 f"checked ({why})")
+                why = (
+                    "the gates could not judge them (infra)"
+                    if c.unjudged(authored, deleted)
+                    else "no check was left to run on them"
+                    if c.left <= 0
+                    else "the session ended without checking them"
+                )
+                st.triage.append(
+                    f"{CHECK_UNVERIFIED}: the session's last edits were never checked ({why})"
+                )
         payload: dict[str, Any] = {"kind": "full-file-snapshot", "files": authored}
         if deleted:
             payload["deleted"] = deleted
@@ -528,7 +587,9 @@ class ProxyAgentAdapter:
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = True
+            self._activity(act)
             return None
+        self._activity(act)
         fp = _fingerprint(act)
         count, tree_then = st.repeats.get(fp, (0, st.tree))
         # Any tree change since the last identical action (a write, sed -i, a
@@ -584,8 +645,25 @@ class ProxyAgentAdapter:
             )
         return observation, read
 
+    def _activity(self, act: dict[str, Any]) -> None:
+        """Tell the listener what this action does. Advisory: a listener that raises
+        never affects the session."""
+        cb = self._activity_cb
+        known = _ACTIVITY.get(str(act.get("action")))
+        if cb is None or known is None:
+            return
+        verb, key = known
+        detail = " ".join(str(act.get(key) or "").split()) if key else ""
+        if len(detail) > _ACTIVITY_MAX:
+            detail = detail[: _ACTIVITY_MAX - 1] + "…"
+        with contextlib.suppress(Exception):
+            cb(f"{verb} {detail}" if detail else verb.rstrip(":"))
+
     def _execute(
-        self, act: dict[str, Any], sandbox: Sandbox, worktree: Path,
+        self,
+        act: dict[str, Any],
+        sandbox: Sandbox,
+        worktree: Path,
         files: tuple[str, ...] | None = None,
     ) -> str:
         action = act.get("action")
@@ -598,9 +676,12 @@ class ProxyAgentAdapter:
             raw = str(act.get("path", ""))
             rel = PurePosixPath(raw).as_posix() if raw else raw
             if rel and not in_write_scope(rel, files):
-                return (f"ERROR: not written — {rel} is outside this ticket's files, "
-                        "and changes there are discarded. Write only: "
-                        + (", ".join(files) or "files other than the spec inputs") + ".")
+                return (
+                    f"ERROR: not written — {rel} is outside this ticket's files, "
+                    "and changes there are discarded. Write only: "
+                    + (", ".join(files) or "files other than the spec inputs")
+                    + "."
+                )
         if action == "write_file":
             rel = str(act.get("path", ""))
             target = _contained(worktree, rel)
@@ -610,10 +691,11 @@ class ProxyAgentAdapter:
             # building on costs more turns than one it must redo now.
             error, note = _syntax_check(rel, content)
             if error is not None:
-                state = ("its previous content is kept" if target.is_file()
-                         else "it was not created")
-                return (f"ERROR: write rejected — {rel} {error}\nThe file is unchanged "
-                        f"({state}). Fix the error and write the full file again.")
+                state = "its previous content is kept" if target.is_file() else "it was not created"
+                return (
+                    f"ERROR: write rejected — {rel} {error}\nThe file is unchanged "
+                    f"({state}). Fix the error and write the full file again."
+                )
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             obs = f"wrote {rel} ({len(content)} chars){note}"
@@ -651,11 +733,16 @@ class ProxyAgentAdapter:
             if len(out) > _OBS_CAP:
                 status += f" (output truncated; last {_OBS_CAP} chars shown)"
             obs = f"{status}\n{tail}" + _step_hints(out, worktree)
-            if (report is not None and _BDD_CMD.search(cmd)
-                    and (not report.is_file() or report.stat().st_size == 0)):
-                obs += (f"\nNOTE: this run wrote no report to ${_BDD_REPORT_ENV}: the gate "
-                        "would see no scenario results. Make the bdd runner write its "
-                        f"report to ${_BDD_REPORT_ENV}.")
+            if (
+                report is not None
+                and _BDD_CMD.search(cmd)
+                and (not report.is_file() or report.stat().st_size == 0)
+            ):
+                obs += (
+                    f"\nNOTE: this run wrote no report to ${_BDD_REPORT_ENV}: the gate "
+                    "would see no scenario results. Make the bdd runner write its "
+                    f"report to ${_BDD_REPORT_ENV}."
+                )
             return obs
         return f"ERROR: unknown action {action!r}"
 
@@ -673,13 +760,15 @@ def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
         return None
     st.done_refused = True
     todo = "".join(f"\n- {t}" for t in triage[:8])
-    return ("ERROR: not done — no file in the worktree has changed yet, and done ends the "
-            "session: only file edits are kept, a summary or plan of what to change is "
-            "discarded, and so is a package installed in this sandbox (declare it, e.g. a "
-            "types-* stub, in the project's dependency manifest). "
-            "Make the changes now (write_file), re-run the build/typecheck and "
-            "the tests, then declare done. If the task truly needs no change, call done "
-            "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else ""))
+    return (
+        "ERROR: not done — no file in the worktree has changed yet, and done ends the "
+        "session: only file edits are kept, a summary or plan of what to change is "
+        "discarded, and so is a package installed in this sandbox (declare it, e.g. a "
+        "types-* stub, in the project's dependency manifest). "
+        "Make the changes now (write_file), re-run the build/typecheck and "
+        "the tests, then declare done. If the task truly needs no change, call done "
+        "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else "")
+    )
 
 
 def _undeclared_done(st: _Loop) -> str | None:
@@ -695,9 +784,12 @@ def _undeclared_done(st: _Loop) -> str | None:
     if not missing:
         return None
     st.install_refused = True
-    return ("ERROR: not done —" + "".join(f"\n- {_install_note(d)}" for d in missing)
-            + "\nDeclare them now (write_file), then declare done. If the project does not "
-            "import them, call done again.")
+    return (
+        "ERROR: not done —"
+        + "".join(f"\n- {_install_note(d)}" for d in missing)
+        + "\nDeclare them now (write_file), then declare done. If the project does not "
+        "import them, call done again."
+    )
 
 
 _PIP = re.compile(r"(?:.*/)?pip[\d.]*")
@@ -706,15 +798,50 @@ _ENV_ASSIGN = re.compile(r"[A-Za-z_]\w*=.*")
 _SHELL_SEP = re.compile(r"&&|\|\||[;|\n]")
 _REDIRECT = re.compile(r"\d*[<>]")
 # pip / uv pip install options whose value is the next argument.
-_PIP_VALUE_OPTS = frozenset({
-    "-r", "--requirement", "-c", "--constraint", "-e", "--editable", "-i", "--index-url",
-    "--extra-index-url", "-f", "--find-links", "-t", "--target", "--prefix", "--root",
-    "--src", "-p", "--python", "--platform", "--python-version", "--implementation",
-    "--abi", "--upgrade-strategy", "--progress-bar", "--no-binary", "--only-binary",
-    "--trusted-host", "--cache-dir", "--log", "--proxy", "--retries", "--timeout",
-    "--exists-action", "--cert", "--client-cert", "-C", "--config-settings",
-    "--global-option", "--index-strategy", "--extra",
-})
+_PIP_VALUE_OPTS = frozenset(
+    {
+        "-r",
+        "--requirement",
+        "-c",
+        "--constraint",
+        "-e",
+        "--editable",
+        "-i",
+        "--index-url",
+        "--extra-index-url",
+        "-f",
+        "--find-links",
+        "-t",
+        "--target",
+        "--prefix",
+        "--root",
+        "--src",
+        "-p",
+        "--python",
+        "--platform",
+        "--python-version",
+        "--implementation",
+        "--abi",
+        "--upgrade-strategy",
+        "--progress-bar",
+        "--no-binary",
+        "--only-binary",
+        "--trusted-host",
+        "--cache-dir",
+        "--log",
+        "--proxy",
+        "--retries",
+        "--timeout",
+        "--exists-action",
+        "--cert",
+        "--client-cert",
+        "-C",
+        "--config-settings",
+        "--global-option",
+        "--index-strategy",
+        "--extra",
+    }
+)
 
 
 def _pip_installs(cmd: str) -> list[str]:
@@ -731,51 +858,66 @@ def _pip_installs(cmd: str) -> list[str]:
             continue
         while toks and _ENV_ASSIGN.fullmatch(toks[0]):
             toks = toks[1:]
-        at = next((i for i, t in enumerate(toks)
-                   if t == "install" and i > 0 and _PIP.fullmatch(toks[i - 1])), None)
-        if at is None or not _pip_launcher(toks[:at - 1]):
+        at = next(
+            (
+                i
+                for i, t in enumerate(toks)
+                if t == "install" and i > 0 and _PIP.fullmatch(toks[i - 1])
+            ),
+            None,
+        )
+        if at is None or not _pip_launcher(toks[: at - 1]):
             continue
         skip = False
-        for tok in toks[at + 1:]:
+        for tok in toks[at + 1 :]:
             if skip:
                 skip = False
             elif _REDIRECT.match(tok):
                 skip = _REDIRECT.fullmatch(tok) is not None  # `> log`: its target too
             elif tok.startswith("-"):
                 skip = tok in _PIP_VALUE_OPTS
-            elif not (tok.startswith((".", "/", "~")) or "://" in tok
-                      or tok.endswith((".whl", ".tar.gz", ".zip"))) and (
-                    name := requirement_name(tok)):
+            elif not (
+                tok.startswith((".", "/", "~"))
+                or "://" in tok
+                or tok.endswith((".whl", ".tar.gz", ".zip"))
+            ) and (name := requirement_name(tok)):
                 names.append(name)
     return names
 
 
 def _pip_launcher(prefix: list[str]) -> bool:
     """``pip`` itself, ``python -m pip`` or ``uv pip`` (not ``echo pip install x``)."""
-    return (not prefix or prefix == ["uv"]
-            or (len(prefix) == 2 and _PYTHON.fullmatch(prefix[0]) is not None
-                and prefix[1] == "-m"))
+    return (
+        not prefix
+        or prefix == ["uv"]
+        or (len(prefix) == 2 and _PYTHON.fullmatch(prefix[0]) is not None and prefix[1] == "-m")
+    )
 
 
 def _install_note(dist: str) -> str:
-    return (f"`{dist}` is installed only in this sandbox; the gates install only what "
-            "requirements.txt / pyproject [project].dependencies declares, so add it there "
-            "(or a types-* stub for typing)")
+    return (
+        f"`{dist}` is installed only in this sandbox; the gates install only what "
+        "requirements.txt / pyproject [project].dependencies declares, so add it there "
+        "(or a types-* stub for typing)"
+    )
 
 
 def _install_notes(st: _Loop, cmd: str, observation: str) -> str:
     """A note per distribution a successful ``run`` pip-installed that the project's
     manifest does not declare; each is remembered for the done check."""
     dists = _pip_installs(cmd)
-    if not dists or not (observation.startswith("exit 0")
-                         or "Successfully installed" in observation
-                         or "already satisfied" in observation):
+    if not dists or not (
+        observation.startswith("exit 0")
+        or "Successfully installed" in observation
+        or "already satisfied" in observation
+    ):
         return ""
     from foundry.gates.pydeps import undeclared_distributions
 
     st.installed.extend(d for d in dists if d not in st.installed)
-    return "".join(f"\nNOTE: {_install_note(d)}"
-                   for d in undeclared_distributions(dists, st.worktree))
+    return "".join(
+        f"\nNOTE: {_install_note(d)}" for d in undeclared_distributions(dists, st.worktree)
+    )
 
 
 def _step_hints(out: str, worktree: Path) -> str:
@@ -791,10 +933,13 @@ def _step_hints(out: str, worktree: Path) -> str:
     from foundry.schemas.implementation import FEATURE_DIR
 
     root = worktree.resolve()
-    features = [p.relative_to(root).as_posix()
-                for p in sorted((root / FEATURE_DIR).rglob("*.feature"))]
-    hints = (*(step_argument_hints(out, root, features) if missing else ()),
-             *(duplicate_step_notes(root, features) if failed else ()))
+    features = [
+        p.relative_to(root).as_posix() for p in sorted((root / FEATURE_DIR).rglob("*.feature"))
+    ]
+    hints = (
+        *(step_argument_hints(out, root, features) if missing else ()),
+        *(duplicate_step_notes(root, features) if failed else ()),
+    )
     return "".join(f"\nNOTE: {h}" for h in hints)
 
 
@@ -823,14 +968,15 @@ def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
     from foundry.gates.self_check import SessionCheck, current_check, render, wanted
 
     spec = current_check()
-    if spec is None or not wanted():
+    if spec is None or not wanted(spec.base.settings.mode):
         return None, None
     checker = SessionCheck(spec, label=str(packet.task.get("id", "")))
     try:
         verdict = checker.opening()
     except Exception as exc:  # an aid, not a gate: a broken check leaves the session as before
-        progress.log(f"proxy-agent: no gate check for {packet.task.get('id')}: "
-                     f"{type(exc).__name__}: {exc}")
+        progress.log(
+            f"proxy-agent: no gate check for {packet.task.get('id')}: {type(exc).__name__}: {exc}"
+        )
         return None, None
     return checker, render(verdict, left=checker.left, opening=True)
 
@@ -840,9 +986,14 @@ def _with_rules(packet: TaskPacket, rewrites: Mapping[str, str]) -> TaskPacket:
     rules = packet.task.get("rules")
     if not isinstance(rules, list):
         return packet
-    return packet.model_copy(update={"task": {
-        **packet.task, "rules": [rewrites.get(r, r) if isinstance(r, str) else r
-                                 for r in rules]}})
+    return packet.model_copy(
+        update={
+            "task": {
+                **packet.task,
+                "rules": [rewrites.get(r, r) if isinstance(r, str) else r for r in rules],
+            }
+        }
+    )
 
 
 def _changes(st: _Loop) -> tuple[dict[str, str], list[str]]:
@@ -861,8 +1012,10 @@ def _check(st: _Loop) -> str:
     if (cached := c.cached(files, deleted)) is not None:
         return render(cached, left=c.left, cached=True)
     if c.left <= 0:
-        return ("ERROR: no checks left this session: run the commands in `verify` to test "
-                "further edits, then call done.")
+        return (
+            "ERROR: no checks left this session: run the commands in `verify` to test "
+            "further edits, then call done."
+        )
     try:
         return render(c.check(files, deleted), left=c.left)
     except Exception as exc:
@@ -892,12 +1045,20 @@ def _red_done(st: _Loop) -> str | None:
         return None
     st.check_refusals += 1
     last = st.check_refusals >= _CHECK_REFUSALS
-    return ("ERROR: not done — the gates fail on your work in this tree:\n"
-            + render(verdict, left=c.left)
-            + ("\nFix what is listed as yours, then call check and done. " if c.left > 0
-               else "\nNo checks are left: fix what is listed as yours, then call done. ")
-            + ("If it cannot be fixed by editing your files, call done again and name it "
-               "in triage." if last else ""))
+    return (
+        "ERROR: not done — the gates fail on your work in this tree:\n"
+        + render(verdict, left=c.left)
+        + (
+            "\nFix what is listed as yours, then call check and done. "
+            if c.left > 0
+            else "\nNo checks are left: fix what is listed as yours, then call done. "
+        )
+        + (
+            "If it cannot be fixed by editing your files, call done again and name it in triage."
+            if last
+            else ""
+        )
+    )
 
 
 def _listing(tree: dict[str, bytes]) -> str:
@@ -907,7 +1068,7 @@ def _listing(tree: dict[str, bytes]) -> str:
     if not paths:
         return ""
     more = f"\n... and {len(paths) - _LIST_MAX} more" if len(paths) > _LIST_MAX else ""
-    return (f"FILES IN THE WORKTREE ({len(paths)}):\n" + "\n".join(paths[:_LIST_MAX]) + more)
+    return f"FILES IN THE WORKTREE ({len(paths)}):\n" + "\n".join(paths[:_LIST_MAX]) + more
 
 
 def _countdown(st: _Loop) -> str:
@@ -916,13 +1077,17 @@ def _countdown(st: _Loop) -> str:
     if st.budget <= 2 * _LOW_TURNS or not 0 < st.left <= _LOW_TURNS:
         return ""
     if st.left == 1:
-        return ("\nTURN BUDGET: 1 turn left. Use it to declare done: say what you changed and "
-                "list in triage what is unfinished or still failing, so the next session can "
-                "continue from it.")
-    return (f"\nTURN BUDGET: {st.left} turns left. Stop exploring: finish the edit "
-            "in progress (update every caller of anything you renamed or moved), re-run the "
-            "build/typecheck and the tests on it, then declare done, listing in triage what "
-            "is still unfinished.")
+        return (
+            "\nTURN BUDGET: 1 turn left. Use it to declare done: say what you changed and "
+            "list in triage what is unfinished or still failing, so the next session can "
+            "continue from it."
+        )
+    return (
+        f"\nTURN BUDGET: {st.left} turns left. Stop exploring: finish the edit "
+        "in progress (update every caller of anything you renamed or moved), re-run the "
+        "build/typecheck and the tests on it, then declare done, listing in triage what "
+        "is still unfinished."
+    )
 
 
 def _mask(messages: list[dict[str, Any]], st: _Loop) -> None:
@@ -1000,15 +1165,19 @@ def _rereads_verbatim(
     try:
         lo = max(1, int(act.get("start_line") or 1))
         hi = int(act.get("end_line") or sys.maxsize)
-        total = len(_contained(worktree, rel).read_text(encoding="utf-8",
-                                                        errors="replace").splitlines())
+        total = len(
+            _contained(worktree, rel).read_text(encoding="utf-8", errors="replace").splitlines()
+        )
     except (TypeError, ValueError, OSError):
         return False  # _read_file reports the bad range or path
     hi = min(hi, total)
     if hi < lo:
         return False
-    spans = sorted((max(lo, k.read.lo), min(hi, k.read.hi)) for k in kept
-                   if k.read is not None and k.read.path == rel and k.read.stamp == stamp)
+    spans = sorted(
+        (max(lo, k.read.lo), min(hi, k.read.hi))
+        for k in kept
+        if k.read is not None and k.read.path == rel and k.read.stamp == stamp
+    )
     covered, upto = 0, lo - 1
     for a, b in spans:
         a = max(a, upto + 1)
@@ -1106,12 +1275,15 @@ def _syntax_check(rel: str, content: str) -> tuple[str | None, str]:
         if suffix == ".feature" and type(exc).__module__.startswith("gherkin"):
             first = errors[0] if errors else exc
             loc = getattr(first, "location", None) or {}
-            return _located(content, loc.get("line"), loc.get("column"), str(first),
-                            "malformed Gherkin"), ""
+            return _located(
+                content, loc.get("line"), loc.get("column"), str(first), "malformed Gherkin"
+            ), ""
         if suffix == ".py":
             host = f"{sys.version_info.major}.{sys.version_info.minor}"
-            return None, (f"\nNOTE: the Python {host} compile check failed with "
-                          f"{type(exc).__name__}: {exc} — not a verdict on the file")
+            return None, (
+                f"\nNOTE: the Python {host} compile check failed with "
+                f"{type(exc).__name__}: {exc} — not a verdict on the file"
+            )
         return None, ""
     return None, ""
 
@@ -1139,8 +1311,13 @@ def _cli_check(rel: str, content: str, argv: tuple[str, ...]) -> str | None:
     if exe is None:
         return None
     try:
-        proc = subprocess.run([exe, *argv[1:]], input=content, capture_output=True,
-                              text=True, timeout=_CLI_CHECK_TIMEOUT_S)
+        proc = subprocess.run(
+            [exe, *argv[1:]],
+            input=content,
+            capture_output=True,
+            text=True,
+            timeout=_CLI_CHECK_TIMEOUT_S,
+        )
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode == 0:
@@ -1176,9 +1353,17 @@ def _located(content: str, line: int | None, col: int | None, msg: str, kind: st
 # Fast advisory type feedback: --follow-imports=silent checks only the written file
 # (~0.3s); the gate's lenient import flags; no cache written into the worktree.
 _MYPY_ADVISORY = (
-    "python", "-m", "mypy", "--follow-imports=silent", "--cache-dir=/dev/null",
-    "--no-error-summary", "--ignore-missing-imports",
-    "--disable-error-code", "import-not-found", "--disable-error-code", "import-untyped",
+    "python",
+    "-m",
+    "mypy",
+    "--follow-imports=silent",
+    "--cache-dir=/dev/null",
+    "--no-error-summary",
+    "--ignore-missing-imports",
+    "--disable-error-code",
+    "import-not-found",
+    "--disable-error-code",
+    "import-untyped",
 )
 _MYPY_TIMEOUT_S = 5
 _MYPY_MAX_LINES = 10
@@ -1194,14 +1379,17 @@ def _mypy_advisory(sandbox: Sandbox, rel: str) -> str:
         return ""
     if result.timed_out or result.returncode not in (0, 1):
         return ""
-    errors = [ln for ln in result.stdout.splitlines()
-              if ln.startswith(f"{rel}:") and ": error:" in ln]
+    errors = [
+        ln for ln in result.stdout.splitlines() if ln.startswith(f"{rel}:") and ": error:" in ln
+    ]
     if not errors:
         return ""
     shown = errors[:_MYPY_MAX_LINES]
     more = f"\n  ... {len(errors) - len(shown)} more" if len(errors) > len(shown) else ""
-    return ("\nADVISORY (mypy on this file only; the write was kept — fix what is real, "
-            "ignore what an unfinished module explains):\n  " + "\n  ".join(shown) + more)
+    return (
+        "\nADVISORY (mypy on this file only; the write was kept — fix what is real, "
+        "ignore what an unfinished module explains):\n  " + "\n  ".join(shown) + more
+    )
 
 
 def _read_file(worktree: Path, rel: str, act: dict[str, Any]) -> tuple[str, _Read | None]:

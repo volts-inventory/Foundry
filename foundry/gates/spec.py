@@ -65,7 +65,8 @@ def _incomplete_steps(criterion: dict[str, Any]) -> list[str]:
     if not any(criterion.get(k) for k in _SCENARIO_STEPS):
         return []
     return [
-        k for k in _SCENARIO_STEPS
+        k
+        for k in _SCENARIO_STEPS
         if not (
             isinstance(v := criterion.get(k), list)
             and any(isinstance(step, str) and step.strip() for step in v)
@@ -172,8 +173,7 @@ class SpecGate:
                 continue
             cid = str(c.get("id") or f"#{i}")
             missing = [
-                f for f in _REQUIRED_FIELDS
-                if not (isinstance(v := c.get(f), str) and v.strip())
+                f for f in _REQUIRED_FIELDS if not (isinstance(v := c.get(f), str) and v.strip())
             ]
             if missing:
                 out.append(f"criterion {cid}: missing/empty {', '.join(missing)}")

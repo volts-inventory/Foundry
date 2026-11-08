@@ -59,11 +59,17 @@ def test_scripted_responses_keyed_by_substring():
     )
     proxy = make_proxy(transport)
     hit = proxy.complete(
-        "n", "T2", "REVIEW THE DIFF please", [{"role": "user", "content": "x"}],
+        "n",
+        "T2",
+        "REVIEW THE DIFF please",
+        [{"role": "user", "content": "x"}],
         purpose="ideation",
     )
     miss = proxy.complete(
-        "n", "T2", "unrelated SOP", [{"role": "user", "content": "x"}],
+        "n",
+        "T2",
+        "unrelated SOP",
+        [{"role": "user", "content": "x"}],
         purpose="ideation",
     )
     assert hit.text == "scripted-review-body"
@@ -73,8 +79,11 @@ def test_scripted_responses_keyed_by_substring():
 def test_served_model_mirrors_requested_tier_no_spurious_drift():
     # R1-02: T2/T3 calls report the requested tier's model -> no pinned-ID drift.
     proxy = make_proxy(MockTransport(default_text="x"))
-    for tier, model in (("T1", "claude-opus-4-8"), ("T2", "claude-sonnet-4-6"),
-                        ("T3", "claude-haiku-4-5")):
+    for tier, model in (
+        ("T1", "claude-opus-4-8"),
+        ("T2", "claude-sonnet-4-6"),
+        ("T3", "claude-haiku-4-5"),
+    ):
         result = proxy.complete(
             "n", tier, "SOP", [{"role": "user", "content": "x"}], purpose="ideation"
         )

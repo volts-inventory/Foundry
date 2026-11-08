@@ -165,8 +165,14 @@ def read_verified_report(
 _INT = r"-?\d+"
 _FLOAT = r"(?=.*\d.*)[-+]?\d*(?:\.(?=\d.*))?\d*(?:\d+[E][+-]?\d+)?"
 _BUILTIN_PARAMS = {
-    "int": _INT, "biginteger": _INT, "byte": _INT, "short": _INT, "long": _INT,
-    "float": _FLOAT, "double": _FLOAT, "bigdecimal": _FLOAT,
+    "int": _INT,
+    "biginteger": _INT,
+    "byte": _INT,
+    "short": _INT,
+    "long": _INT,
+    "float": _FLOAT,
+    "double": _FLOAT,
+    "bigdecimal": _FLOAT,
     "word": r"[^\s]+",
     "string": r'"(?:[^"\\]*(?:\\.[^"\\]*)*)"|\'(?:[^\'\\]*(?:\\.[^\'\\]*)*)\'',
     "": r".*",
@@ -330,8 +336,9 @@ def _catch_all_sets(
     """For each probe set, the definition ids that accept every probe in it."""
     ids = sorted(step_defs)
     patterns = [_def_job(step_defs[sid], params) for sid in ids]
-    answers, notes = _eval_patterns([p for p in patterns if p is not None],
-                                    [list(s) for s in probe_sets])
+    answers, notes = _eval_patterns(
+        [p for p in patterns if p is not None], [list(s) for s in probe_sets]
+    )
     flagged: list[set[str]] = [set() for _ in probe_sets]
     it = iter(answers)
     for sid, pat in zip(ids, patterns, strict=True):
@@ -360,8 +367,12 @@ _RS_STEP = re.compile(
 )
 _STEP_KEYWORD_TYPES = {"given": "Context", "when": "Action", "then": "Outcome"}
 _JSON_STATUS = {
-    "passed": "PASSED", "failed": "FAILED", "undefined": "UNDEFINED",
-    "pending": "PENDING", "skipped": "SKIPPED", "ambiguous": "AMBIGUOUS",
+    "passed": "PASSED",
+    "failed": "FAILED",
+    "undefined": "UNDEFINED",
+    "pending": "PENDING",
+    "skipped": "SKIPPED",
+    "ambiguous": "AMBIGUOUS",
 }
 
 
@@ -380,8 +391,10 @@ def _source_files(workdir: Path, suffix: str) -> list[Path]:
     for root, dirs, files in os.walk(workdir):
         # The go tool ignores _* and testdata directories: so does the scan.
         dirs[:] = sorted(
-            d for d in dirs
-            if d not in _SKIP_DIRS and not d.startswith(".")
+            d
+            for d in dirs
+            if d not in _SKIP_DIRS
+            and not d.startswith(".")
             and not (suffix == ".go" and (d.startswith("_") or d == "testdata"))
         )
         out.extend(Path(root) / f for f in sorted(files) if f.endswith(suffix))
@@ -447,9 +460,14 @@ def source_step_patterns(workdir: Path) -> list[tuple[str, str]] | None:
     ``ReportError`` (its catch-all check cannot run); a source file that cannot be
     read safely is skipped, so the steps it defines count as unchecked."""
     workdir = Path(workdir)
-    kinds = [(s, rx, tok) for marker, s, rx, tok in (
-        ("go.mod", ".go", _GO_STEP, _GO_TOKENS), ("Cargo.toml", ".rs", _RS_STEP, _RS_TOKENS),
-    ) if (workdir / marker).is_file()]
+    kinds = [
+        (s, rx, tok)
+        for marker, s, rx, tok in (
+            ("go.mod", ".go", _GO_STEP, _GO_TOKENS),
+            ("Cargo.toml", ".rs", _RS_STEP, _RS_TOKENS),
+        )
+        if (workdir / marker).is_file()
+    ]
     if not kinds:
         return None
     found: list[tuple[str, str]] = []
@@ -536,12 +554,13 @@ def convert_cucumber_json(data: bytes, workdir: Path) -> list[dict[str, Any]]:
             scenarios.append((str(feature.get("uri", "")), str(el.get("name", "")), steps, hooks))
 
     texts = sorted({str(s.get("name", "")) for _, _, steps, _ in scenarios for s in steps})
-    defs = {f"sd{i}": {"id": f"sd{i}", "pattern": {"type": t, "source": src}}
-            for i, (t, src) in enumerate(patterns)}
+    defs = {
+        f"sd{i}": {"id": f"sd{i}", "pattern": {"type": t, "source": src}}
+        for i, (t, src) in enumerate(patterns)
+    }
     jobs = {sid: _def_job(d, {}) for sid, d in defs.items()}
     runnable = [sid for sid, j in jobs.items() if j is not None]
-    answers, _ = _eval_patterns([j for j in jobs.values() if j is not None],
-                                [[t] for t in texts])
+    answers, _ = _eval_patterns([j for j in jobs.values() if j is not None], [[t] for t in texts])
     binds: dict[str, list[str]] = {t: [] for t in texts}
     for sid, answer in zip(runnable, answers, strict=True):
         if answer is not None and len(answer) == len(texts):
@@ -559,22 +578,39 @@ def convert_cucumber_json(data: bytes, workdir: Path) -> list[dict[str, Any]]:
             text = str(step.get("name", ""))
             kind = _step_type(str(step.get("keyword", "")), kind)
             status = _JSON_STATUS.get(
-                str((step.get("result") or {}).get("status", "")).lower(), "UNKNOWN")
+                str((step.get("result") or {}).get("status", "")).lower(), "UNKNOWN"
+            )
             if status == "SKIPPED" and not binds[text]:
                 status = "UNDEFINED"
             pid, tid = f"p{n}s{k}", f"t{n}s{k}"
             pickle_steps.append({"id": pid, "type": kind, "text": text})
-            test_steps.append({"id": tid, "pickleStepId": pid,
-                               "stepDefinitionIds": binds[text] if status != "UNDEFINED" else []})
-            finished.append({"testCaseStartedId": f"r{n}", "testStepId": tid,
-                             "testStepResult": {"status": status}})
+            test_steps.append(
+                {
+                    "id": tid,
+                    "pickleStepId": pid,
+                    "stepDefinitionIds": binds[text] if status != "UNDEFINED" else [],
+                }
+            )
+            finished.append(
+                {
+                    "testCaseStartedId": f"r{n}",
+                    "testStepId": tid,
+                    "testStepResult": {"status": status},
+                }
+            )
         for k, hook in enumerate(hooks):
             tid = f"t{n}h{k}"
             status = _JSON_STATUS.get(
-                str((hook.get("result") or {}).get("status", "")).lower(), "UNKNOWN")
+                str((hook.get("result") or {}).get("status", "")).lower(), "UNKNOWN"
+            )
             test_steps.append({"id": tid, "hookId": tid})
-            finished.append({"testCaseStartedId": f"r{n}", "testStepId": tid,
-                             "testStepResult": {"status": status}})
+            finished.append(
+                {
+                    "testCaseStartedId": f"r{n}",
+                    "testStepId": tid,
+                    "testStepResult": {"status": status},
+                }
+            )
         envelopes += [
             {"pickle": {"id": f"p{n}", "uri": uri, "name": name, "steps": pickle_steps}},
             {"testCase": {"id": f"c{n}", "pickleId": f"p{n}", "testSteps": test_steps}},

@@ -349,9 +349,7 @@ def test_integrated_fail_latches_but_fixes_forward_then_halts_when_spent(
 
     # Once the convergence bound is SPENT, escalate (halt) — don't loop forever.
     spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
-    assert (
-        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
-    )
+    assert route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
 
 
 # ---- 4b. critic-flagged security/abuse omission FAILS the Spec gate ----------
@@ -389,9 +387,7 @@ def test_critic_security_omission_fails_spec_no_pr(tmp_path, rt, runner, records
         route_after_gates(state_with, _config(), boundary=SPEC_BOUNDARY, records=records) == "fix"
     )
     spent = {"configurable": {"thread_id": RUN_ID, "fix_attempts": 3}}
-    assert (
-        route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
-    )
+    assert route_after_gates(state_with, spent, boundary=SPEC_BOUNDARY, records=records) == "halt"
 
 
 def test_clean_empty_and_blank_critique_materialize_identical_tree(tmp_path):
@@ -572,9 +568,7 @@ def test_path_traversal_rejected_before_write(tmp_path, verifier):
     state, resolve, _ = _seed(criteria, ((diff, uri, evil),))
 
     with pytest.raises(PathContainmentError):
-        materialize_workdir(
-            state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: evil
-        )
+        materialize_workdir(state, tmp_path / "wd", resolve=resolve, resolve_blob=lambda u: evil)
     # Nothing escaped the integrated tree.
     assert not (tmp_path / "escape.py").exists()
 
@@ -711,23 +705,28 @@ def test_halted_run_writes_a_usable_draft_with_failing_findings(tmp_path, verifi
 
     def _gate(name, status):
         return GateResult(
-            name=name, status=status, decision_deterministic=True,
-            execution_deterministic=True, verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
-            run_against="a" * 64, seq=_seq(name, f"verdict:{name}"),
+            name=name,
+            status=status,
+            decision_deterministic=True,
+            execution_deterministic=True,
+            verdict_class=VerdictClass.EXECUTION_DETERMINISTIC,
+            run_against="a" * 64,
+            seq=_seq(name, f"verdict:{name}"),
         )
 
     state = {**state, "gates": [_gate("build", GateStatus.PASS), _gate("test", GateStatus.FAIL)]}
     out = tmp_path / "draft"
     findings = {"test": ("FAILED tests/test_app.py::test_f", "E   assert f() == 2")}
-    draft_root = _write_draft_on_halt(
+    draft_root, text = _write_draft_on_halt(
         state, str(out), gate_findings=findings, resolve=resolve, resolve_blob=resolve_blob
     )
     assert draft_root is not None
-    assert (out / "app.py").is_file()                       # best-attempt source is there
+    assert (out / "app.py").is_file()  # best-attempt source is there
     status = (out / "DRAFT-STATUS.md").read_text(encoding="utf-8")
-    assert "held at the gate" in status.lower()             # clearly marked not shipped
-    assert "E   assert f() == 2" in status                  # what's still failing
-    assert "❌" in status and "✅" in status                 # per-gate verdicts
+    assert status == text
+    assert "held at the gate" in status.lower()  # clearly marked not shipped
+    assert "E   assert f() == 2" in status  # what's still failing
+    assert "❌" in status and "✅" in status  # per-gate verdicts
 
 
 def test_spec_gate_reads_the_newest_criterion_per_id(tmp_path, rt, runner, verifier):
@@ -741,15 +740,25 @@ def test_spec_gate_reads_the_newest_criterion_per_id(tmp_path, rt, runner, verif
     state, resolve, resolve_blob = _seed((fixed, stale, _criterion("c2", security=True)))
 
     out = run_spec_gate(
-        state, _config(), rt=rt, runner=runner, resolve=resolve,
-        resolve_blob=resolve_blob, workdir=tmp_path / "spec",
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "spec",
     )
     assert out["gates"][0].status is GateStatus.PASS
 
     stale_newer = stale.model_copy(update={"seq": _seq("planner", "c", epoch=3)})
     state, resolve, resolve_blob = _seed((fixed, stale_newer, _criterion("c2", security=True)))
     out = run_spec_gate(
-        state, _config(2), rt=rt, runner=runner, resolve=resolve,
-        resolve_blob=resolve_blob, workdir=tmp_path / "spec2",
+        state,
+        _config(2),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "spec2",
     )
     assert out["gates"][0].status is GateStatus.FAIL

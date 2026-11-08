@@ -147,8 +147,9 @@ def _chat_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
         role = str(msg.get("role", "user"))
         content = msg.get("content", "")
         if not isinstance(content, list):
-            out.append({"role": role, "content": content if isinstance(content, str)
-                        else str(content)})
+            out.append(
+                {"role": role, "content": content if isinstance(content, str) else str(content)}
+            )
             continue
         texts: list[str] = []
         calls: list[dict[str, Any]] = []
@@ -156,14 +157,25 @@ def _chat_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
         for c in content:
             kind = c.get("type") if isinstance(c, dict) else None
             if kind == "tool_use":
-                calls.append({"id": str(c.get("id", "")), "type": "function", "function": {
-                    "name": str(c.get("name", "")),
-                    "arguments": json.dumps(c.get("input") or {}),
-                }})
+                calls.append(
+                    {
+                        "id": str(c.get("id", "")),
+                        "type": "function",
+                        "function": {
+                            "name": str(c.get("name", "")),
+                            "arguments": json.dumps(c.get("input") or {}),
+                        },
+                    }
+                )
             elif kind == "tool_result":
                 results = True
-                out.append({"role": "tool", "tool_call_id": str(c.get("tool_use_id", "")),
-                            "content": str(c.get("content", ""))})
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": str(c.get("tool_use_id", "")),
+                        "content": str(c.get("content", "")),
+                    }
+                )
             else:
                 texts.append(str(c.get("text", "")) if isinstance(c, dict) else str(c))
         if calls:
@@ -176,11 +188,14 @@ def _chat_messages(request: dict[str, Any]) -> list[dict[str, Any]]:
 def _chat_tools(request: dict[str, Any]) -> list[dict[str, Any]]:
     """Anthropic-shape tool specs as OpenAI ``function`` tools."""
     return [
-        {"type": "function", "function": {
-            "name": str(t.get("name", "")),
-            "description": str(t.get("description", "")),
-            "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
-        }}
+        {
+            "type": "function",
+            "function": {
+                "name": str(t.get("name", "")),
+                "description": str(t.get("description", "")),
+                "parameters": t.get("input_schema") or {"type": "object", "properties": {}},
+            },
+        }
         for t in request.get("tools") or ()
         if isinstance(t, dict)
     ]
@@ -422,11 +437,18 @@ class ClaudeCliTransport:
         self._check_version()
         prompt = _flatten_to_prompt(request, include_system=False)
         argv = [
-            self._bin, "-p", prompt, "--output-format", "json",
+            self._bin,
+            "-p",
+            prompt,
+            "--output-format",
+            "json",
             # An empty --system-prompt would fall back to the default agent prompt.
-            "--system-prompt", _system_text(request) or "Answer the user's request.",
-            "--tools", "",
-            "--setting-sources", "",
+            "--system-prompt",
+            _system_text(request) or "Answer the user's request.",
+            "--tools",
+            "",
+            "--setting-sources",
+            "",
             "--strict-mcp-config",
             "--disable-slash-commands",
             "--no-session-persistence",
@@ -502,9 +524,12 @@ def _observe_claude_model(parsed: dict[str, Any], *, requested: str | None) -> s
             v = usage_by_model.get(k)
             if not isinstance(v, dict):
                 return 0
-            return _as_int(v.get("inputTokens")) + _as_int(v.get("outputTokens")) + _as_int(
-                v.get("input_tokens")
-            ) + _as_int(v.get("output_tokens"))
+            return (
+                _as_int(v.get("inputTokens"))
+                + _as_int(v.get("outputTokens"))
+                + _as_int(v.get("input_tokens"))
+                + _as_int(v.get("output_tokens"))
+            )
 
         if keys:
             return max(keys, key=_tokens)
@@ -725,6 +750,7 @@ class OpenAITransport:
                     "(e.g. `uv add openai` / `pip install openai`)"
                 ) from exc
             return openai.OpenAI()
+
         self._cache = _ClientCache(_build, injected=client)
 
     def _ensure_client(self) -> Any:
@@ -884,8 +910,4 @@ def build_backend(name: BackendName, **kwargs: Any) -> ModelProviderProxy:
         return claude_cli_backend(**kwargs)
     if name == "codex":
         return codex_backend(**kwargs)
-    raise ValueError(
-        f"unknown backend {name!r} "
-        "(expected anthropic | openai | claude-cli | codex)"
-    )
-
+    raise ValueError(f"unknown backend {name!r} (expected anthropic | openai | claude-cli | codex)")

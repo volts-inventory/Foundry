@@ -62,6 +62,7 @@ def build_implementation_subgraph(
     ticket_tiers: Mapping[Any, str] | None = None,
     on_task: TaskEventHook | None = None,
     wave_check: WaveBuildCheck | None = None,
+    self_check_mode: str | None = None,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED implementation (Layer 3) role subgraph.
 
@@ -96,6 +97,9 @@ def build_implementation_subgraph(
         back to the check, bounded by the shared fix-attempt budget, and a spent
         budget exits with waves unbuilt (the supervisor halts). Needs the fixer
         (``rt.cas``); ``None`` builds every wave back to back.
+    self_check_mode:
+        The sessions' in-session check (``FOUNDRY_SELF_CHECK`` values); None reads
+        the env.
 
     START routes to the looping ``engineering`` node: each pass builds one wave of
     tickets and loops back while a wave remains, then exits to the supervisor's
@@ -115,13 +119,21 @@ def build_implementation_subgraph(
     gate_id = "wave_gate"
     check = wave_check if can_fix else None
     # The sessions run the wave check's gates themselves as a `check` tool.
-    self_check = SelfCheckSettings(profile=check.profile) if check is not None else None
+    self_check = (
+        SelfCheckSettings(profile=check.profile, mode=self_check_mode)
+        if check is not None
+        else None
+    )
     if can_fix:
         assert blobs is not None
         fixer = make_fixer_node(
-            rt, source_dir=source_dir, resolve=resolve, resolve_blob=blobs,
+            rt,
+            source_dir=source_dir,
+            resolve=resolve,
+            resolve_blob=blobs,
             snapshot_store=snapshot_store,
-            turn_budget=turn_budget, cost_budget_microusd=cost_budget_microusd,
+            turn_budget=turn_budget,
+            cost_budget_microusd=cost_budget_microusd,
             self_check=self_check,
         )
 
@@ -142,11 +154,19 @@ def build_implementation_subgraph(
     # One looping node, one wave per pass (a checkpoint per wave).
     eng_id = "engineering"
     engineering = make_engineering_node(
-        rt, source_dir=source_dir, resolve=resolve, resolve_blob=blobs,
-        snapshot_store=snapshot_store, turn_budget=turn_budget,
-        cost_budget_microusd=cost_budget_microusd, max_slots=max_slots,
-        cost_cap_microusd=cost_cap_microusd, workers=workers,
-        ticket_tiers=ticket_tiers, on_task=on_task, self_check=self_check,
+        rt,
+        source_dir=source_dir,
+        resolve=resolve,
+        resolve_blob=blobs,
+        snapshot_store=snapshot_store,
+        turn_budget=turn_budget,
+        cost_budget_microusd=cost_budget_microusd,
+        max_slots=max_slots,
+        cost_cap_microusd=cost_cap_microusd,
+        workers=workers,
+        ticket_tiers=ticket_tiers,
+        on_task=on_task,
+        self_check=self_check,
     )
 
     def _engineering(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -155,6 +175,7 @@ def build_implementation_subgraph(
     g.add_node(eng_id, _engineering)
 
     if check is not None:
+
         def _wave_gate(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
             assert check is not None
             return check.run(state, config)
@@ -164,12 +185,14 @@ def build_implementation_subgraph(
             # ESCALATE: the engineering node re-runs the requested local tickets on
             # the cloud level, then the check runs again; RESTART: it rebuilds the
             # planned tickets from scratch on their own tier.
-            return {ADVANCE: eng_id, ESCALATE: eng_id, RESTART: eng_id, FIX: fixer_id,
-                    HALT: END}[check.route(state, config)]
+            return {ADVANCE: eng_id, ESCALATE: eng_id, RESTART: eng_id, FIX: fixer_id, HALT: END}[
+                check.route(state, config)
+            ]
 
         g.add_node(gate_id, _wave_gate)
-        g.add_conditional_edges(gate_id, _after_check,
-                                {eng_id: eng_id, fixer_id: fixer_id, END: END})
+        g.add_conditional_edges(
+            gate_id, _after_check, {eng_id: eng_id, fixer_id: fixer_id, END: END}
+        )
 
     def _after_wave(state: FactoryState) -> str:
         # A spent token cap exits so the supervisor commits this wave, then stops.
@@ -182,27 +205,38 @@ def build_implementation_subgraph(
             return eng_id
         return gate_id
 
-    g.add_conditional_edges(eng_id, _after_wave,
-                            {eng_id: eng_id, END: END,
-                             **({gate_id: gate_id} if check is not None else {})})
+    g.add_conditional_edges(
+        eng_id,
+        _after_wave,
+        {eng_id: eng_id, END: END, **({gate_id: gate_id} if check is not None else {})},
+    )
 
     def _start(state: FactoryState) -> str:
         if not has_tickets(state):
             return END
-        if (can_fix and state.get("phase") == "build_test_fix"
-                and tickets_settled(state, resolve)):
+        if can_fix and state.get("phase") == "build_test_fix" and tickets_settled(state, resolve):
             # The final gate planned a ticket restart instead of a fixer pass.
             return eng_id if pending_restarts(state, resolve) else fixer_id
         # Resuming a run the per-wave check halted: re-run that check (fresh budget)
         # on the waves already built before building the next one.
-        if (check is not None and state.get("phase") == "resume"
-                and pending_wave(state, resolve) and ready_tasks(state)):
+        if (
+            check is not None
+            and state.get("phase") == "resume"
+            and pending_wave(state, resolve)
+            and ready_tasks(state)
+        ):
             return gate_id
         # The node also emits the ticket tasks, so it runs even with no wave.
         return eng_id if pending_wave(state, resolve) or not ready_tasks(state) else END
 
-    g.add_conditional_edges(START, _start,
-                            {eng_id: eng_id,
-                             **({fixer_id: fixer_id} if can_fix else {}),
-                             **({gate_id: gate_id} if check is not None else {}), END: END})
+    g.add_conditional_edges(
+        START,
+        _start,
+        {
+            eng_id: eng_id,
+            **({fixer_id: fixer_id} if can_fix else {}),
+            **({gate_id: gate_id} if check is not None else {}),
+            END: END,
+        },
+    )
     return g

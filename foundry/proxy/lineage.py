@@ -75,8 +75,7 @@ class LineageMap:
         entries: Iterable[tuple[str, Iterable[str]]] = DEFAULT_LINEAGE_ENTRIES,
     ) -> None:
         self._entries: tuple[tuple[str, frozenset[str]], ...] = tuple(
-            (str(pattern), frozenset(str(f) for f in families))
-            for pattern, families in entries
+            (str(pattern), frozenset(str(f) for f in families)) for pattern, families in entries
         )
         if not self._entries:
             raise ValueError("LineageMap requires at least one curated entry")

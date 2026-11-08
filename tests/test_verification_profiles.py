@@ -102,9 +102,7 @@ def test_no_profile_records_an_attested_unpinned_smoke_pass(tmp_path: Path) -> N
     from foundry.state.seq import EpochCounter
     from tests.test_gate_wiring import KEY, KEY_ID, LINEAGE_REV, SCANNER_REV
 
-    runner = TwoZoneGateRunner(
-        ZoneBSigner(KEY, KEY_ID), GlobalRecords(), SCANNER_REV, LINEAGE_REV
-    )
+    runner = TwoZoneGateRunner(ZoneBSigner(KEY, KEY_ID), GlobalRecords(), SCANNER_REV, LINEAGE_REV)
     rt = AgentRuntime(proxy=ModelProviderProxy(transport=MockTransport()), epochs=EpochCounter())
     out = run_build_test_gates(
         {"artifacts": []},

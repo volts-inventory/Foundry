@@ -192,6 +192,11 @@ button.danger{background:#6b1f28;border-color:var(--red);color:#ffe0e3}
 #log li.good,#progress li.good{color:var(--green)}
 #log li.bad,#progress li.bad{color:var(--red)}
 #log li.gold,#progress li.gold{color:var(--gold)}
+/* run progress lines (`log` events): small; warnings and self-check verdicts stand out */
+#log li.run{font-size:11px}
+#log li.run.warn{color:#ffa94d;border-left:2px solid #ffa94d;padding-left:6px}
+#log li.run.good,#log li.run.bad{border-left:2px solid currentColor;padding-left:6px}
+#log li.run.retry{color:var(--blue)}
 /* TICKETS tab: one row per planned ticket, status from the live task events */
 #tickets li{padding:5px 0;border-bottom:1px dashed #1f2942;color:var(--dim);
   overflow-wrap:anywhere;display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;align-items:baseline}

@@ -61,21 +61,49 @@ TOOLS = (
 )
 
 TS_STACK: dict[str, Any] = {
-    "language": "typescript", "framework": "express", "package_manager": "npm",
-    "install": "npm ci", "build": "npm run build", "typecheck": "npx tsc --noEmit",
-    "test": "npm test", "bdd": "npx cucumber-js --format message:$FOUNDRY_BDD_REPORT",
-    "run": "", "notes": "", "contracts_file": "src/contracts.ts",
+    "language": "typescript",
+    "framework": "express",
+    "package_manager": "npm",
+    "install": "npm ci",
+    "build": "npm run build",
+    "typecheck": "npx tsc --noEmit",
+    "test": "npm test",
+    "bdd": "npx cucumber-js --format message:$FOUNDRY_BDD_REPORT",
+    "run": "",
+    "notes": "",
+    "contracts_file": "src/contracts.ts",
     "harness_files": ["package.json", "tsconfig.json", "cucumber.json"],
 }
 
 TS_INTERFACES = [
-    {"name": "TodoStore.add", "kind": "function", "signature": "add(todo: Todo): string",
-     "inputs": ["todo: Todo"], "outputs": ["id: string"], "errors": ["TitleTooLong"],
-     "description": "Stores a todo.", "consumers": ["api"]},
-    {"name": "TodoStore.list", "kind": "function", "signature": "list(): Todo[]",
-     "inputs": [], "outputs": ["todos: Todo[]"], "errors": [], "description": "All todos."},
-    {"name": "POST /todos", "kind": "http", "signature": "POST /todos {title} -> 201 {id}",
-     "inputs": [], "outputs": [], "errors": ["401"], "description": "Add over HTTP."},
+    {
+        "name": "TodoStore.add",
+        "kind": "function",
+        "signature": "add(todo: Todo): string",
+        "inputs": ["todo: Todo"],
+        "outputs": ["id: string"],
+        "errors": ["TitleTooLong"],
+        "description": "Stores a todo.",
+        "consumers": ["api"],
+    },
+    {
+        "name": "TodoStore.list",
+        "kind": "function",
+        "signature": "list(): Todo[]",
+        "inputs": [],
+        "outputs": ["todos: Todo[]"],
+        "errors": [],
+        "description": "All todos.",
+    },
+    {
+        "name": "POST /todos",
+        "kind": "http",
+        "signature": "POST /todos {title} -> 201 {id}",
+        "inputs": [],
+        "outputs": [],
+        "errors": ["401"],
+        "description": "Add over HTTP.",
+    },
 ]
 
 
@@ -148,8 +176,7 @@ def test_a_non_python_stack_without_test_or_bdd_is_dropped() -> None:
     bare = {**TS_STACK, "test": "", "bdd": ""}
     writes, _, _ = _plan_once({**PLAN, "stack": bare})
     assert "stack" not in writes
-    assert any("neither a test nor a bdd command" in c
-               for c in writes["agent_journal"][0].concerns)
+    assert any("neither a test nor a bdd command" in c for c in writes["agent_journal"][0].concerns)
 
 
 def test_a_pinned_stack_is_kept_and_shown_as_fixed() -> None:
@@ -178,29 +205,37 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
     assert "only `interface` and `type` declarations" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
-    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json",
-                             "package-lock.json")
+    assert harness.files == ("package.json", "tsconfig.json", "cucumber.json", "package-lock.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
     for t in rest:
         assert t.depends_on[:2] == (CONTRACTS_TICKET_ID, HARNESS_TICKET_ID)
         assert "src/contracts.ts" not in t.files
     assert [t.seq.local for t in tickets] == list(range(len(tickets)))
     concerns = writes["agent_journal"][0].concerns
-    assert any("T-002: dropped the gate-owned contract file(s) src/contracts.ts" in c
-               for c in concerns)
+    assert any(
+        "T-002: dropped the gate-owned contract file(s) src/contracts.ts" in c for c in concerns
+    )
 
 
-@pytest.mark.parametrize(("language", "planned", "expected"), [
-    # The planner's harness_files lacked the manifest (the failed Go build gave go.mod
-    # to a feature ticket): the harness still owns manifest, lockfile and runner.
-    ("go", ["bdd/godog_test.go"], ("bdd/godog_test.go", "go.mod", "go.sum")),
-    ("javascript", [], ("package.json", "package-lock.json", "cucumber.json")),
-    ("typescript", ["cucumber.mjs"], ("cucumber.mjs", "package.json", "package-lock.json",
-                                     "tsconfig.json", "cucumber.json")),
-    ("rust", ["Cargo.toml"], ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs")),
-])
+@pytest.mark.parametrize(
+    ("language", "planned", "expected"),
+    [
+        # The planner's harness_files lacked the manifest (the failed Go build gave go.mod
+        # to a feature ticket): the harness still owns manifest, lockfile and runner.
+        ("go", ["bdd/godog_test.go"], ("bdd/godog_test.go", "go.mod", "go.sum")),
+        ("javascript", [], ("package.json", "package-lock.json", "cucumber.json")),
+        (
+            "typescript",
+            ["cucumber.mjs"],
+            ("cucumber.mjs", "package.json", "package-lock.json", "tsconfig.json", "cucumber.json"),
+        ),
+        ("rust", ["Cargo.toml"], ("Cargo.toml", "Cargo.lock", "tests/cucumber.rs")),
+    ],
+)
 def test_harness_ticket_owns_the_manifest_lockfile_and_runner(
-    language: str, planned: list[str], expected: tuple[str, ...],
+    language: str,
+    planned: list[str],
+    expected: tuple[str, ...],
 ) -> None:
     from foundry.agents.planner import _generated_tickets
 
@@ -266,34 +301,43 @@ def test_a_rust_stack_without_an_install_fetches_its_crates() -> None:
     pinned, _ = _stack_decision({"stack": {**raw, "install": "cargo vendor"}}, ["rust"])
     assert pinned is not None and pinned.install == "cargo vendor"
     # A stack already on a checkpoint (planned before the default) gets it at gate time.
-    assert stack_profile(StackDecision(language="rust", build="cargo build",
-                                       test="cargo test")).install_cmd == "cargo fetch"
+    assert (
+        stack_profile(
+            StackDecision(language="rust", build="cargo build", test="cargo test")
+        ).install_cmd
+        == "cargo fetch"
+    )
     assert stack_profile(_js(test="t")).install_cmd is None
 
 
-@pytest.mark.parametrize(("install", "ran"), [
-    # `cargo update` only resolves the lockfile: the build (no [dependencies])
-    # passed and the offline bdd step could not download cucumber's crates.
-    ("cargo update", "cargo update && cargo fetch"),
-    ("cargo generate-lockfile", "cargo generate-lockfile && cargo fetch"),
-    ("cargo fetch", "cargo fetch"),
-    ("cargo update && cargo fetch --locked", "cargo update && cargo fetch --locked"),
-    ("cargo vendor", "cargo vendor"),
-])
+@pytest.mark.parametrize(
+    ("install", "ran"),
+    [
+        # `cargo update` only resolves the lockfile: the build (no [dependencies])
+        # passed and the offline bdd step could not download cucumber's crates.
+        ("cargo update", "cargo update && cargo fetch"),
+        ("cargo generate-lockfile", "cargo generate-lockfile && cargo fetch"),
+        ("cargo fetch", "cargo fetch"),
+        ("cargo update && cargo fetch --locked", "cargo update && cargo fetch --locked"),
+        ("cargo vendor", "cargo vendor"),
+    ],
+)
 def test_a_rust_install_always_downloads_the_crates(install: str, ran: str) -> None:
     from foundry.agents.planner import _stack_decision
 
     stack = StackDecision(language="rust", install=install, test="cargo test")
     assert stack_profile(stack).install_cmd == ran
     planned, _ = _stack_decision(
-        {"stack": {"language": "rust", "install": install, "test": "cargo test"}}, ["rust"])
+        {"stack": {"language": "rust", "install": install, "test": "cargo test"}}, ["rust"]
+    )
     assert planned is not None and planned.install == ran
 
 
 def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
     writes, cas, _ = _plan_once(_ts_plan())
     contracts = {
-        c.name: c for c in (cas.resolve(a) for a in writes["artifacts"])
+        c.name: c
+        for c in (cas.resolve(a) for a in writes["artifacts"])
         if isinstance(c, InterfaceContract)
     }
     add = contracts["TodoStore.add"]
@@ -375,15 +419,36 @@ def test_consuming_a_type_contract_needs_no_implementing_ticket() -> None:
     # the generated contracts ticket, so a consumer needs no other implementer.
     tickets = json.loads(json.dumps(PLAN["tickets"]))
     tickets[1]["consumes"] = [*tickets[1].get("consumes", []), "Errors", "NotFound", "Missing"]
-    interfaces = [*TS_INTERFACES,
-                  {"name": "Errors", "kind": "type", "signature": "type E = Error",
-                   "inputs": [], "outputs": [], "errors": [], "description": ""},
-                  {"name": "NotFound", "kind": "class",
-                   "signature": "class NotFound extends Error {\n  constructor(m: string);\n}",
-                   "inputs": [], "outputs": [], "errors": [], "description": ""},
-                  {"name": "Missing", "kind": "class",
-                   "signature": "class M {\n  run(x: number): void;\n}",
-                   "inputs": [], "outputs": [], "errors": [], "description": ""}]
+    interfaces = [
+        *TS_INTERFACES,
+        {
+            "name": "Errors",
+            "kind": "type",
+            "signature": "type E = Error",
+            "inputs": [],
+            "outputs": [],
+            "errors": [],
+            "description": "",
+        },
+        {
+            "name": "NotFound",
+            "kind": "class",
+            "signature": "class NotFound extends Error {\n  constructor(m: string);\n}",
+            "inputs": [],
+            "outputs": [],
+            "errors": [],
+            "description": "",
+        },
+        {
+            "name": "Missing",
+            "kind": "class",
+            "signature": "class M {\n  run(x: number): void;\n}",
+            "inputs": [],
+            "outputs": [],
+            "errors": [],
+            "description": "",
+        },
+    ]
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets, "interfaces": interfaces})
     findings = _critique(writes, cas).contract_findings
     assert not any("contract Errors" in f or "contract NotFound" in f for f in findings)
@@ -395,18 +460,37 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
     tickets[1]["depends_on"] = []  # consumer not ordered after its producer
     tickets[1]["consumes"] = ["TodoStore.add", "TodoStore.missing"]
     tickets[2]["implements"] = ["TodoStore.list"]  # a second producer
-    interfaces = [*TS_INTERFACES, {"name": "TodoStore.missing", "kind": "function",
-                                   "signature": "m(): void", "inputs": [], "outputs": [],
-                                   "errors": [], "description": ""},
-                  {"name": "Unused", "kind": "type", "signature": "type U = 1",
-                   "inputs": [], "outputs": [], "errors": [], "description": ""}]
+    interfaces = [
+        *TS_INTERFACES,
+        {
+            "name": "TodoStore.missing",
+            "kind": "function",
+            "signature": "m(): void",
+            "inputs": [],
+            "outputs": [],
+            "errors": [],
+            "description": "",
+        },
+        {
+            "name": "Unused",
+            "kind": "type",
+            "signature": "type U = 1",
+            "inputs": [],
+            "outputs": [],
+            "errors": [],
+            "description": "",
+        },
+    ]
     tickets[2]["implements"].append("Unused")
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets, "interfaces": interfaces})
     findings = _critique(writes, cas).contract_findings
-    assert "Contract TodoStore.list is implemented by 2 tickets (T-001, T-003); exactly " \
+    assert (
+        "Contract TodoStore.list is implemented by 2 tickets (T-001, T-003); exactly "
         "one ticket may implement it." in findings
-    assert "Ticket T-002 consumes contract TodoStore.missing, but no ticket implements it." \
-        in findings
+    )
+    assert (
+        "Ticket T-002 consumes contract TodoStore.missing, but no ticket implements it." in findings
+    )
     # A forgotten edge to the one implementer is added, not sent back for a re-plan.
     assert not any("does not depend on" in f for f in findings)
     t2 = next(t for t in _tickets(writes, cas) if t.id == "T-002")
@@ -425,9 +509,10 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
 def test_spec_gate_fails_on_contract_findings_and_names_them(tmp_path: Path) -> None:
     doc = {
         "criteria": [{"id": "AC-1", "text": "t", "oracle": "o", "security_abuse": True}],
-        "critique": {"security_abuse_omissions": [],
-                     "contract_findings": ["Ticket T-2 consumes contract X, but no ticket "
-                                           "implements it."]},
+        "critique": {
+            "security_abuse_omissions": [],
+            "contract_findings": ["Ticket T-2 consumes contract X, but no ticket implements it."],
+        },
     }
     (tmp_path / "criteria.json").write_text(json.dumps(doc))
     gate = SpecGate()
@@ -451,9 +536,18 @@ def test_gate_profile_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
     fallback = PROFILES["python"]
     assert gate_profile({}, fallback) is fallback
-    p = gate_profile({"stack": _js(install="npm ci", build="npm run build",
-                                   typecheck="npx tsc --noEmit", test="npm test",
-                                   bdd="npx cucumber-js")}, fallback)
+    p = gate_profile(
+        {
+            "stack": _js(
+                install="npm ci",
+                build="npm run build",
+                typecheck="npx tsc --noEmit",
+                test="npm test",
+                bdd="npx cucumber-js",
+            )
+        },
+        fallback,
+    )
     assert p is not None
     # Its own networked step, not folded into build; tolerant of a missing lockfile.
     assert p.install_cmd == lockfile_tolerant_install("npm ci")
@@ -476,14 +570,25 @@ def test_undetected_stack_language_is_an_error_not_another_stack(
 
     monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"python"}))
     runner, rt, config = _runner_rt()
-    state: dict[str, Any] = {"artifacts": [], "request": "a react dashboard",
-                             "stack": StackDecision(language="rust", test="cargo test")}
+    state: dict[str, Any] = {
+        "artifacts": [],
+        "request": "a react dashboard",
+        "stack": StackDecision(language="rust", test="cargo test"),
+    }
     out = run_build_test_gates(
-        state, config, rt=rt, runner=runner, resolve=lambda h: None,
-        resolve_blob=lambda u: b"", workdir=tmp_path,
+        state,
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=lambda h: None,
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path,
     )
     assert [(g.name, g.status) for g in out["gates"]] == [
-        ("build", GateStatus.ERROR), ("test", GateStatus.ERROR), ("smoke", GateStatus.ERROR)]
+        ("build", GateStatus.ERROR),
+        ("test", GateStatus.ERROR),
+        ("smoke", GateStatus.ERROR),
+    ]
     for g in out["gates"]:
         assert any("missing toolchain" in f and "'rust'" in f for f in g.findings)
         assert not runner.records.stable_fail_latched(g.run_against, g.name)
@@ -502,8 +607,13 @@ def test_stack_without_test_or_bdd_never_falls_back_to_pytest(
     assert stack_profile(_js(test="npm test")).test_unavailable == ""
     runner, rt, config = _runner_rt()
     out = run_build_test_gates(
-        {"artifacts": [], "stack": _js(build="true")}, config, rt=rt, runner=runner,
-        resolve=lambda h: None, resolve_blob=lambda u: b"", workdir=tmp_path,
+        {"artifacts": [], "stack": _js(build="true")},
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=lambda h: None,
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path,
     )
     by_name = {g.name: g for g in out["gates"]}
     assert by_name["build"].status is GateStatus.PASS
@@ -519,8 +629,13 @@ def test_a_stack_command_exit_5_is_a_fail_not_no_tests(
     monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
     runner, rt, config = _runner_rt()
     out = run_build_test_gates(
-        {"artifacts": [], "stack": _js(build="true", test="exit 5")}, config, rt=rt,
-        runner=runner, resolve=lambda h: None, resolve_blob=lambda u: b"", workdir=tmp_path,
+        {"artifacts": [], "stack": _js(build="true", test="exit 5")},
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=lambda h: None,
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path,
     )
     assert {g.name: g.status for g in out["gates"]}["test"] is GateStatus.FAIL
 
@@ -530,8 +645,12 @@ def test_the_stack_commands_are_part_of_the_latched_digest(tmp_path: Path) -> No
         state: dict[str, Any] = {"artifacts": []}
         if stack is not None:
             state["stack"] = stack
-        return materialize_workdir(state, tmp_path / str(len(list(tmp_path.iterdir()))),
-                                   resolve=lambda h: None, resolve_blob=lambda u: b"")
+        return materialize_workdir(
+            state,
+            tmp_path / str(len(list(tmp_path.iterdir()))),
+            resolve=lambda h: None,
+            resolve_blob=lambda u: b"",
+        )
 
     plain = sha(None)
     assert plain == sha(None)
@@ -557,7 +676,7 @@ def test_python_typecheck_tolerates_an_unstubbed_library(tmp_path: Path) -> None
     (tmp_path / "app.py").write_text("import flask_login_zz\nimport other_zz.sub\n")
     # A model-written config that would otherwise make the missing stubs an error.
     (tmp_path / "pyproject.toml").write_text(
-        '[tool.mypy]\nstrict = true\nignore_missing_imports = false\n'
+        "[tool.mypy]\nstrict = true\nignore_missing_imports = false\n"
         '[[tool.mypy.overrides]]\nmodule = ["flask_login_zz", "other_zz.*"]\n'
         "ignore_missing_imports = false\n"
     )
@@ -603,25 +722,37 @@ def test_build_test_gates_run_the_stack_commands(
 
     monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
     runner, rt, config = _runner_rt()
-    state: dict[str, Any] = {"artifacts": [], "stack": _js(
-        build="true", typecheck="echo typed > typed.txt", test="true", run="exit 3",
-    )}
+    state: dict[str, Any] = {
+        "artifacts": [],
+        "stack": _js(
+            build="true",
+            typecheck="echo typed > typed.txt",
+            test="true",
+            run="exit 3",
+        ),
+    }
     out = run_build_test_gates(
-        state, config, rt=rt, runner=runner, resolve=lambda h: None,
-        resolve_blob=lambda u: b"", workdir=tmp_path,
+        state,
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=lambda h: None,
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path,
     )
     by_name = {g.name: g.status for g in out["gates"]}
-    assert by_name == {"build": GateStatus.PASS, "test": GateStatus.PASS,
-                       "smoke": GateStatus.FAIL}
+    assert by_name == {"build": GateStatus.PASS, "test": GateStatus.PASS, "smoke": GateStatus.FAIL}
     assert (tmp_path / "typed.txt").read_text().strip() == "typed"  # typecheck ran in BUILD
 
 
 def _constructed_gates(
-    state: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    state: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     profile: Any = None,
 ) -> dict[str, Any]:
     """The Build/Test gates run_build_test_gates constructs (they still run)."""
-    import foundry.graph.gate_wiring as gw
+    import foundry.graph.gate_wiring.runs as gw
 
     made: dict[str, Any] = {}
 
@@ -639,8 +770,14 @@ def _constructed_gates(
     monkeypatch.setattr(gw, "TestGate", _Test)
     runner, rt, config = _runner_rt()
     run_build_test_gates(
-        {"artifacts": [], **state}, config, rt=rt, runner=runner, resolve=lambda h: None,
-        resolve_blob=lambda u: b"", workdir=tmp_path, profile=profile,
+        {"artifacts": [], **state},
+        config,
+        rt=rt,
+        runner=runner,
+        resolve=lambda h: None,
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path,
+        profile=profile,
     )
     return made
 
@@ -651,8 +788,13 @@ def test_stack_on_state_drives_install_and_bdd(
     import foundry.toolchains as tc
 
     monkeypatch.setattr(tc, "available_languages", lambda: frozenset({"javascript"}))
-    stack = _js(install="true", build="true", typecheck="true", test="true",
-                bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT")
+    stack = _js(
+        install="true",
+        build="true",
+        typecheck="true",
+        test="true",
+        bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT",
+    )
     made = _constructed_gates({"stack": stack}, tmp_path, monkeypatch)
     assert made["build"].install_cmd == "true"
     assert made["build"].cmd == ("/bin/sh", "-c", "true && true")
@@ -680,8 +822,13 @@ def test_no_stack_falls_back_to_the_graph_profile(
 ) -> None:
     from dataclasses import replace
 
-    fallback = replace(PROFILES["node-web"], install_cmd="true", build_cmd=("true",),
-                       test_cmd=("true",), smoke_cmd=None)
+    fallback = replace(
+        PROFILES["node-web"],
+        install_cmd="true",
+        build_cmd=("true",),
+        test_cmd=("true",),
+        smoke_cmd=None,
+    )
     made = _constructed_gates({}, tmp_path, monkeypatch, profile=fallback)
     assert made["build"].install_cmd == "true" and made["build"].cmd == ("true",)
     assert made["test"].bdd_cmd is None and made["test"].cmd == ("true",)
@@ -699,15 +846,21 @@ def test_wave_build_check_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> No
     assert build.name == "build" and build.status is GateStatus.FAIL
 
 
-@pytest.mark.parametrize(("install", "lockfile", "ran"), [
-    ("npm ci", None, "npm install"),
-    ("npm ci", "package-lock.json", "npm ci"),
-    ("npm ci --no-audit --no-fund", None, "npm install --no-audit --no-fund"),
-    ("yarn install --frozen-lockfile", None, "yarn install"),
-    ("pnpm install --frozen-lockfile", "pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
-])
+@pytest.mark.parametrize(
+    ("install", "lockfile", "ran"),
+    [
+        ("npm ci", None, "npm install"),
+        ("npm ci", "package-lock.json", "npm ci"),
+        ("npm ci --no-audit --no-fund", None, "npm install --no-audit --no-fund"),
+        ("yarn install --frozen-lockfile", None, "yarn install"),
+        ("pnpm install --frozen-lockfile", "pnpm-lock.yaml", "pnpm install --frozen-lockfile"),
+    ],
+)
 def test_a_lockfile_strict_install_works_without_a_lockfile(
-    tmp_path: Path, install: str, lockfile: str | None, ran: str,
+    tmp_path: Path,
+    install: str,
+    lockfile: str | None,
+    ran: str,
 ) -> None:
     # Agents write package.json, rarely the lockfile: a bare `npm ci` then fails
     # identically on every retry (EUSAGE) and the run halts on an "infra" ERROR.
@@ -725,8 +878,12 @@ def test_a_lockfile_strict_install_works_without_a_lockfile(
     profile = stack_profile(_js(install=install))
     assert profile.install_cmd == lockfile_tolerant_install(install)
     assert profile.install_cmd is not None
-    subprocess.run(["/bin/sh", "-c", profile.install_cmd], cwd=tmp_path, check=True,
-                   env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    subprocess.run(
+        ["/bin/sh", "-c", profile.install_cmd],
+        cwd=tmp_path,
+        check=True,
+        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+    )
     assert (tmp_path / "ran.log").read_text().strip() == ran
 
 
@@ -757,17 +914,31 @@ def _diff_state(
 ) -> tuple[dict[str, Any], Any, Any]:
     by_uri: dict[str, Any] = {}
     blobs: dict[str, str] = {}
-    contracts = Ticket(id=CONTRACTS_TICKET_ID, title="Define contracts",
-                       specialty=Specialty.BACKEND, files=("src/contracts.ts",),
-                       seq=_seq("planner", 1))
+    contracts = Ticket(
+        id=CONTRACTS_TICKET_ID,
+        title="Define contracts",
+        specialty=Specialty.BACKEND,
+        files=("src/contracts.ts",),
+        seq=_seq("planner", 1),
+    )
     h = emit_artifact(contracts, TICKET_KIND, "planner", contracts.seq)
     by_uri[h.uri] = contracts
     artifacts: list[Artifact] = [h]
     for i, (task, files) in enumerate(diffs, start=1):
-        diff = FeatureDiff(diff_uri=f"cas://blob/{i}", task_id=task, branch=f"task/{task}",
-                           base_tree_sha="b", seq=_seq("engineering", i))
-        a = Artifact(kind=FEATURE_DIFF_KIND, uri=f"cas://fd/{i}", produced_by="engineering",
-                     task_id=task, seq=diff.seq)
+        diff = FeatureDiff(
+            diff_uri=f"cas://blob/{i}",
+            task_id=task,
+            branch=f"task/{task}",
+            base_tree_sha="b",
+            seq=_seq("engineering", i),
+        )
+        a = Artifact(
+            kind=FEATURE_DIFF_KIND,
+            uri=f"cas://fd/{i}",
+            produced_by="engineering",
+            task_id=task,
+            seq=diff.seq,
+        )
         artifacts.append(a)
         by_uri[a.uri] = diff
         blobs[diff.diff_uri] = json.dumps({"kind": "full-file-snapshot", "files": files})
@@ -778,10 +949,12 @@ def _diff_state(
 
 
 def test_contract_files_are_rewritten_from_the_contracts_ticket(tmp_path: Path) -> None:
-    state, resolve, blob = _diff_state([
-        (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = string;\n"}),
-        ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
-    ])
+    state, resolve, blob = _diff_state(
+        [
+            (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = string;\n"}),
+            ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
+        ]
+    )
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
     assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string;\n"
     assert (tmp_path / "src/app.ts").read_text() == "x\n"
@@ -794,24 +967,30 @@ def test_fixes_repair_the_contracts_and_later_tickets_cannot_change_them(
     # rejects), and a later gate may too: the fixer's repair must reach the gates, or
     # the run can never pass. A later ticket's edit to an agreed signature never does,
     # before or after a fix.
-    state, resolve, blob = _diff_state([
-        (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = ;\n"}),
-        ("fix-1", {"src/contracts.ts": "export type Id = string;\n"}),
-        ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
-        ("fix-2", {"src/contracts.ts": "export type Id = string | number;\n",
-                   "src/app.ts": "y\n"}),
-        ("T-002", {"src/contracts.ts": "// gone\n"}),
-    ])
+    state, resolve, blob = _diff_state(
+        [
+            (CONTRACTS_TICKET_ID, {"src/contracts.ts": "export type Id = ;\n"}),
+            ("fix-1", {"src/contracts.ts": "export type Id = string;\n"}),
+            ("T-001", {"src/contracts.ts": "export type Id = number;\n", "src/app.ts": "x\n"}),
+            (
+                "fix-2",
+                {"src/contracts.ts": "export type Id = string | number;\n", "src/app.ts": "y\n"},
+            ),
+            ("T-002", {"src/contracts.ts": "// gone\n"}),
+        ]
+    )
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
     assert (tmp_path / "src/contracts.ts").read_text() == "export type Id = string | number;\n"
     assert (tmp_path / "src/app.ts").read_text() == "y\n"
 
 
 def test_a_retried_contracts_ticket_still_owns_its_files(tmp_path: Path) -> None:
-    state, resolve, blob = _diff_state([
-        (CONTRACTS_TICKET_ID, {"src/contracts.ts": "v1\n"}),
-        (CONTRACTS_TICKET_ID, {"src/contracts.ts": "v2\n"}),
-    ])
+    state, resolve, blob = _diff_state(
+        [
+            (CONTRACTS_TICKET_ID, {"src/contracts.ts": "v1\n"}),
+            (CONTRACTS_TICKET_ID, {"src/contracts.ts": "v2\n"}),
+        ]
+    )
     materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob)
     assert (tmp_path / "src/contracts.ts").read_text() == "v2\n"
 
@@ -831,8 +1010,9 @@ def test_an_agent_worktree_gets_no_scaffolded_manifest(tmp_path: Path) -> None:
     # was never installed.
     files = {"app.py": "import flask\n"}
     state, resolve, blob = _diff_state([("T-001", files)], StackDecision(language="python"))
-    materialize_workdir(state, tmp_path, resolve=resolve, resolve_blob=blob,
-                        scaffold_manifest=False)
+    materialize_workdir(
+        state, tmp_path, resolve=resolve, resolve_blob=blob, scaffold_manifest=False
+    )
     assert not (tmp_path / "requirements.txt").exists()
 
 
@@ -840,8 +1020,11 @@ def test_an_agent_worktree_gets_no_scaffolded_manifest(tmp_path: Path) -> None:
 
 
 def test_personas_take_the_stack_wording() -> None:
-    ts = StackDecision(language="typescript", framework="express",
-                       bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT")
+    ts = StackDecision(
+        language="typescript",
+        framework="express",
+        bdd="npx cucumber-js --format message:$FOUNDRY_BDD_REPORT",
+    )
     test = persona_for("test", ts)
     assert "Cucumber runner for typescript" in test and "pytest" not in test
     assert "npx cucumber-js" in test and test.endswith("written in typescript with express.")
@@ -863,8 +1046,11 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     plan["interfaces"] = [
         {**i, "kind": "function", "signature": i["spec"]} for i in plan["interfaces"]
     ]
-    plan["stack"] = {**PYTHON_STACK, "contracts_file": "notes/contracts.py",
-                     "run": "python3 -m notes"}
+    plan["stack"] = {
+        **PYTHON_STACK,
+        "contracts_file": "notes/contracts.py",
+        "run": "python3 -m notes",
+    }
     cas = ArtifactStore()
     revised = ResponseScript(json.dumps(replies["E2"]), match=_match("YOUR EPIC: E2", "REVISION"))
     rt, tx = _epic_runtime(*_epic_scripts(plan, replies, revised), cas=cas)
@@ -873,24 +1059,33 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     first_ids = [t.id for t in _tickets(first, cas)]
     assert first_ids[0] == CONTRACTS_TICKET_ID and HARNESS_TICKET_ID not in first_ids
 
-    second = node(_failed(first, "criterion E2-AC01: scenario has no then step"),
-                  config_for("r", step=5))
+    second = node(
+        _failed(first, "criterion E2-AC01: scenario has no then step"), config_for("r", step=5)
+    )
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2"]
     state: Any = {"artifacts": [*first["artifacts"], *second["artifacts"]]}
     live = {t.id: t for t in read_tickets(state, cas.resolve)}
     assert live[CONTRACTS_TICKET_ID].files == ("notes/contracts.py", "notes/__init__.py")
-    assert all(CONTRACTS_TICKET_ID in t.depends_on for tid, t in live.items()
-               if tid != CONTRACTS_TICKET_ID)
+    assert all(
+        CONTRACTS_TICKET_ID in t.depends_on for tid, t in live.items() if tid != CONTRACTS_TICKET_ID
+    )
 
 
 def test_a_missing_contract_edge_that_would_close_a_cycle_stays_a_finding() -> None:
     from foundry.agents.planner import _add_contract_deps, _contract_findings
 
     def t(tid: str, deps: tuple[str, ...], impl: tuple[str, ...], uses: tuple[str, ...]) -> Ticket:
-        return Ticket(id=tid, title=tid, description="", specialty=Specialty.BACKEND,
-                      difficulty=Difficulty.STANDARD, depends_on=deps, implements=impl,
-                      consumes=uses, seq=Seq(run_id="r", emission_epoch=1,
-                                             superstep_index=1, node_id="planner", local=0))
+        return Ticket(
+            id=tid,
+            title=tid,
+            description="",
+            specialty=Specialty.BACKEND,
+            difficulty=Difficulty.STANDARD,
+            depends_on=deps,
+            implements=impl,
+            consumes=uses,
+            seq=Seq(run_id="r", emission_epoch=1, superstep_index=1, node_id="planner", local=0),
+        )
 
     tickets = [t("A", (), ("X",), ("Y",)), t("B", ("A",), ("Y",), ())]
     out, concerns = _add_contract_deps(tickets)
@@ -902,24 +1097,38 @@ def test_a_single_quoted_bdd_report_path_is_rewritten_to_expand() -> None:
     # cucumber-js wrote to a file literally named $FOUNDRY_BDD_REPORT.
     from foundry.agents.planner import _stack_decision
 
-    raw = {"language": "javascript", "test": "npx jest",
-           "bdd": "npx cucumber-js --format 'message:$FOUNDRY_BDD_REPORT'"}
+    raw = {
+        "language": "javascript",
+        "test": "npx jest",
+        "bdd": "npx cucumber-js --format 'message:$FOUNDRY_BDD_REPORT'",
+    }
     stack, concerns = _stack_decision({"stack": raw}, ["javascript"])
     assert stack is not None
     assert stack.bdd == 'npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
     assert any("single-quotes" in c for c in concerns)
 
 
-@pytest.mark.parametrize(("bdd", "flagged"), [
-    ("npx cucumber-js --format json:report.json", "legacy `json:`"),
-    ("npx cucumber-js --import 'features/**/*.ts' --format \"message:$FOUNDRY_BDD_REPORT\"",
-     "without a loader"),
-    ('NODE_OPTIONS="--import tsx" npx cucumber-js --import features/s.ts '
-     '--format "message:$FOUNDRY_BDD_REPORT"', None),
-    ('npx cucumber-js --require-module ts-node/register --require features/s.ts '
-     '--format "message:$FOUNDRY_BDD_REPORT"', None),
-    ('npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"', None),
-])
+@pytest.mark.parametrize(
+    ("bdd", "flagged"),
+    [
+        ("npx cucumber-js --format json:report.json", "legacy `json:`"),
+        (
+            "npx cucumber-js --import 'features/**/*.ts' --format \"message:$FOUNDRY_BDD_REPORT\"",
+            "without a loader",
+        ),
+        (
+            'NODE_OPTIONS="--import tsx" npx cucumber-js --import features/s.ts '
+            '--format "message:$FOUNDRY_BDD_REPORT"',
+            None,
+        ),
+        (
+            "npx cucumber-js --require-module ts-node/register --require features/s.ts "
+            '--format "message:$FOUNDRY_BDD_REPORT"',
+            None,
+        ),
+        ('npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"', None),
+    ],
+)
 def test_cucumber_js_commands_the_gate_cannot_read_are_flagged(
     bdd: str, flagged: str | None
 ) -> None:
@@ -931,16 +1140,19 @@ def test_cucumber_js_commands_the_gate_cannot_read_are_flagged(
     assert _stack_command_findings(_js(test="t", bdd=bdd, profile="node")) == ()
 
 
-@pytest.mark.parametrize(("framework", "run", "flagged"), [
-    ("express", "node app.js", True),
-    ("express", "npm start", True),
-    ("Flask", "python3 app.py", True),
-    ("", "flask run", True),
-    ("", "uvicorn app.main:app --port 8000", True),
-    ("express", "node smoke.js", False),
-    ("commander", "node index.js", False),
-    ("express", "node src/server.js --smoke", False),
-])
+@pytest.mark.parametrize(
+    ("framework", "run", "flagged"),
+    [
+        ("express", "node app.js", True),
+        ("express", "npm start", True),
+        ("Flask", "python3 app.py", True),
+        ("", "flask run", True),
+        ("", "uvicorn app.main:app --port 8000", True),
+        ("express", "node smoke.js", False),
+        ("commander", "node index.js", False),
+        ("express", "node src/server.js --smoke", False),
+    ],
+)
 def test_a_web_stack_run_that_starts_the_bare_server_is_flagged(
     framework: str, run: str, flagged: bool
 ) -> None:
@@ -959,9 +1171,13 @@ def test_js_harness_recipe_fixes_the_command_and_config() -> None:
     js, ts = bdd_runner_hint("javascript"), bdd_runner_hint("typescript")
     assert 'bdd = `npx cucumber-js --format "message:$FOUNDRY_BDD_REPORT"`' in js
     config = json.loads(js.split("MUST be exactly:\n")[1].split("\n")[0])
-    assert config == {"default": {"paths": ["features/**/*.feature"],
-                                  "import": ["features/step_definitions/**/*.js"],
-                                  "forceExit": True}}
+    assert config == {
+        "default": {
+            "paths": ["features/**/*.feature"],
+            "import": ["features/step_definitions/**/*.js"],
+            "forceExit": True,
+        }
+    }
     assert 'NODE_OPTIONS="--import tsx" npx cucumber-js' in ts
     assert "features/step_definitions/**/*.ts" in ts and "**/*.js" not in ts
 
@@ -971,10 +1187,9 @@ def test_bdd_quoting_rewrites_only_the_word_holding_the_report_variable() -> Non
 
     unquoted = "npx cucumber-js --tags '@smoke' --format message:$FOUNDRY_BDD_REPORT --name 'login'"
     assert _bdd_quoting(unquoted) == unquoted
-    assert _bdd_quoting("npx cucumber-js --tags '@smoke' --format 'message:$FOUNDRY_BDD_REPORT'"
-                        " --name 'login'") == (
-        "npx cucumber-js --tags '@smoke' --format \"message:$FOUNDRY_BDD_REPORT\""
-        " --name 'login'")
+    assert _bdd_quoting(
+        "npx cucumber-js --tags '@smoke' --format 'message:$FOUNDRY_BDD_REPORT' --name 'login'"
+    ) == ("npx cucumber-js --tags '@smoke' --format \"message:$FOUNDRY_BDD_REPORT\" --name 'login'")
 
 
 def test_stack_profile_adds_mypy_flags_only_to_a_mypy_invocation() -> None:

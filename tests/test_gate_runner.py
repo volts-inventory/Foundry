@@ -143,10 +143,18 @@ class _HungGate(_ExplodingGate):
     def execute(self, workdir: Path):
         import subprocess
 
-        argv = ["/usr/bin/sandbox-exec", "-p", "(version 1)", "--",
-                "/bin/sh", "-c", 'npx cucumber-js --format "message:$R"']
+        argv = [
+            "/usr/bin/sandbox-exec",
+            "-p",
+            "(version 1)",
+            "--",
+            "/bin/sh",
+            "-c",
+            'npx cucumber-js --format "message:$R"',
+        ]
         raise subprocess.TimeoutExpired(
-            argv, 600.0, f"{workdir}/features ok\n7 scenarios (7 passed)\n".encode(), b"")
+            argv, 600.0, f"{workdir}/features ok\n7 scenarios (7 passed)\n".encode(), b""
+        )
 
 
 def test_a_hung_step_names_its_command_and_last_output(tmp_path, runner, verifier):
@@ -200,8 +208,7 @@ def test_build_infra_failures_are_unlatched_errors(
     # These run in-process; the networked install step must be explicitly allowed there.
     monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
     digest = "c" * 64
-    r = runner.run(BuildGate(cmd=cmd, install_cmd=install), digest, _seq("build", digest),
-                   tmp_path)
+    r = runner.run(BuildGate(cmd=cmd, install_cmd=install), digest, _seq("build", digest), tmp_path)
     assert r.status is status, r.findings
     assert records.stable_fail_latched(digest, "build") is (status is GateStatus.FAIL)
 
@@ -212,16 +219,29 @@ def test_reuse_key_binds_the_gate_commands(runner):
 
     sh = ("/bin/sh", "-c", "npm test")
     assert key(BuildGate()) == key(BuildGate())
-    assert len({
-        key(BuildGate()), key(BuildGate(cmd=("make",))),
-        key(BuildGate(install_cmd="npm ci")), key(BuildGate(profile_name="stack:go")),
-    }) == 4
-    assert len({
-        key(TestGate()), key(TestGate(cmd=sh, stack_harness=True)),
-        key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js")),
-        key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js --x")),
-        key(TestGate(cmd=sh, stack_harness=True, profile_name="stack:typescript")),
-    }) == 5
+    assert (
+        len(
+            {
+                key(BuildGate()),
+                key(BuildGate(cmd=("make",))),
+                key(BuildGate(install_cmd="npm ci")),
+                key(BuildGate(profile_name="stack:go")),
+            }
+        )
+        == 4
+    )
+    assert (
+        len(
+            {
+                key(TestGate()),
+                key(TestGate(cmd=sh, stack_harness=True)),
+                key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js")),
+                key(TestGate(cmd=sh, stack_harness=True, bdd_cmd="npx cucumber-js --x")),
+                key(TestGate(cmd=sh, stack_harness=True, profile_name="stack:typescript")),
+            }
+        )
+        == 5
+    )
 
 
 @pytest.mark.parametrize(
@@ -280,5 +300,5 @@ def test_failing_test_gate_carries_the_failure_in_findings(tmp_path, runner, rec
     r = runner.run(TestGate(), "task/fb", _seq("test", "task/fb"), tmp_path)
     assert r.status is GateStatus.FAIL
     blob = "\n".join(r.findings)
-    assert "test_double_spaces_preserved" in blob          # which test
-    assert "assert" in blob                                 # the assertion detail
+    assert "test_double_spaces_preserved" in blob  # which test
+    assert "assert" in blob  # the assertion detail

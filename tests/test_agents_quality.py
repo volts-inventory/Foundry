@@ -31,7 +31,6 @@ KEY = b"dev-zone-b-quality-key"
 KEY_ID = "dev-key-quality"
 
 
-
 # ---- harness ----------------------------------------------------------------
 
 
@@ -92,9 +91,7 @@ def test_request_changes_not_overridden_by_later_approve(installed: GlobalRecord
     records = installed
 
     # 1) request-changes verdict on the subject.
-    rc_node = make_reviewer_critic_node(
-        make_runtime(MockTransport(verdicts=["request-changes"]))
-    )
+    rc_node = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["request-changes"])))
     rc_cfg = config_for("run-C", step=3, nonce="N1", subject="cas://diff/3", state_sha="sha-3")
     rc = rc_node({}, rc_cfg)["gates"][0]
     assert rc.status is GateStatus.FAIL
@@ -143,7 +140,7 @@ def test_two_reviews_in_one_run_get_distinct_nonces(installed: GlobalRecords) ->
     node = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["approve"])))
     a = node({}, config_for("run-Z", nonce="N", subject="cas://diff/a", state_sha="s1"))["gates"][0]
     b = node({}, config_for("run-Z", nonce="N", subject="cas://tree/b", state_sha="s2"))["gates"][0]
-    assert a.verdict_nonce != b.verdict_nonce            # same base "N", distinct nonces
+    assert a.verdict_nonce != b.verdict_nonce  # same base "N", distinct nonces
 
 
 def test_commit_step_consumes_nonce_so_replay_is_rejected(installed: GlobalRecords) -> None:
@@ -156,9 +153,9 @@ def test_commit_step_consumes_nonce_so_replay_is_rejected(installed: GlobalRecor
     ap = make_reviewer_critic_node(make_runtime(MockTransport(verdicts=["approve"])))(
         {}, config_for("run-X", nonce="N0", subject="cas://diff/x", state_sha="sx")
     )["gates"][0]
-    assert merge_gates([ap], None) == [ap]              # admitted (nonce not yet consumed)
+    assert merge_gates([ap], None) == [ap]  # admitted (nonce not yet consumed)
 
-    _commit_judgment_ledger([], [ap], records)          # the trusted write
+    _commit_judgment_ledger([], [ap], records)  # the trusted write
 
     assert records.nonce_consumed_by_other(ap.verdict_nonce, "another-identity") is True
     # idempotent: the SAME verdict re-folding is not a replay
@@ -194,12 +191,18 @@ def _diff_state(store: Any, diffs: dict[str, str]) -> dict[str, Any]:
         store.put_body_at(
             uri,
             FeatureDiff(
-                diff_uri=store.put_blob(text), task_id=task_id,
-                branch=f"task/{task_id}", base_tree_sha="base", seq=seq,
+                diff_uri=store.put_blob(text),
+                task_id=task_id,
+                branch=f"task/{task_id}",
+                base_tree_sha="base",
+                seq=seq,
             ),
         )
-        artifacts.append(Artifact(kind="feature_diff", uri=uri, produced_by="engineering",
-                                  task_id=task_id, seq=seq))
+        artifacts.append(
+            Artifact(
+                kind="feature_diff", uri=uri, produced_by="engineering", task_id=task_id, seq=seq
+            )
+        )
     return {"artifacts": artifacts}
 
 
@@ -215,10 +218,13 @@ def test_review_request_carries_the_diff_text() -> None:
     transport = MockTransport(verdicts=["approve"])
     rt = make_runtime(transport)
     rt.cas = ArtifactStore()
-    state = _diff_state(rt.cas, {
-        "T-A": "+++ b/app.py\n+def tip(total): return total * 0.15\n",
-        "T-B": "+++ b/test_app.py\n+assert tip(100) == 15\n",
-    })
+    state = _diff_state(
+        rt.cas,
+        {
+            "T-A": "+++ b/app.py\n+def tip(total): return total * 0.15\n",
+            "T-B": "+++ b/test_app.py\n+assert tip(100) == 15\n",
+        },
+    )
     review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
     text = _review_request_text(transport)
     assert "def tip(total): return total * 0.15" in text
@@ -237,9 +243,15 @@ def test_review_request_truncates_and_names_unresolvable_diffs() -> None:
     rt = make_runtime(transport)
     rt.cas = ArtifactStore()
     state = _diff_state(rt.cas, {"T-BIG": "+x\n" * reviewer_critic._DIFF_CHAR_CAP})
-    state["artifacts"].append(Artifact(kind="feature_diff", uri="cas://feature_diff/gone",
-                                       produced_by="engineering", task_id="T-GONE",
-                                       seq=Seq("run-R", 1, 2, "engineering", 0)))
+    state["artifacts"].append(
+        Artifact(
+            kind="feature_diff",
+            uri="cas://feature_diff/gone",
+            produced_by="engineering",
+            task_id="T-GONE",
+            seq=Seq("run-R", 1, 2, "engineering", 0),
+        )
+    )
     review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
     text = _review_request_text(transport)
     assert "TRUNCATED" in text
@@ -249,6 +261,11 @@ def test_review_request_truncates_and_names_unresolvable_diffs() -> None:
 def test_review_request_says_when_no_diff_is_resolvable() -> None:
     transport = MockTransport(verdicts=["approve"])
     rt = make_runtime(transport)
-    review(rt, {}, config_for("run-R", nonce="N", subject="cas://diff/x"),
-           node_id="reviewer", role="Reviewer")
+    review(
+        rt,
+        {},
+        config_for("run-R", nonce="N", subject="cas://diff/x"),
+        node_id="reviewer",
+        role="Reviewer",
+    )
     assert "no diff text to review" in _review_request_text(transport)

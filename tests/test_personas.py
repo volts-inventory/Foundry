@@ -21,8 +21,12 @@ def test_persona_lookup_is_case_insensitive_and_safe() -> None:
 
 
 def _packet(**kw: object) -> TaskPacket:
-    base: dict[str, object] = {"task": {"id": "t1"}, "worktree_path": "/w",
-                               "turn_budget": 1, "cost_budget_microusd": 0}
+    base: dict[str, object] = {
+        "task": {"id": "t1"},
+        "worktree_path": "/w",
+        "turn_budget": 1,
+        "cost_budget_microusd": 0,
+    }
     base.update(kw)
     return TaskPacket(**base)  # type: ignore[arg-type]
 
@@ -34,10 +38,12 @@ def test_empty_persona_leaves_prompt_byte_identical() -> None:
 
 
 def test_persona_renders_after_constraints_before_task() -> None:
-    prompt = assemble_prompt(_packet(
-        persona=persona_for("backend"),
-        pinned_constraints=("MUST validate input",),
-    ))
+    prompt = assemble_prompt(
+        _packet(
+            persona=persona_for("backend"),
+            pinned_constraints=("MUST validate input",),
+        )
+    )
     i_con = prompt.index("PINNED CONSTRAINTS")
     i_role = prompt.index("ROLE:")
     i_task = prompt.index("TASK:")

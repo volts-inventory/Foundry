@@ -127,17 +127,11 @@ def durable_backends(state_dir: str | Path) -> DurableBackends:
     # GlobalRecords trust ledgers on their OWN file-backed connection. WAL +
     # check_same_thread=False mirror the dev :memory: conn's posture (the
     # GlobalRecords __init__ creates the schema idempotently).
-    records_conn = sqlite3.connect(
-        str(root / _GLOBAL_RECORDS_DB), check_same_thread=False
-    )
+    records_conn = sqlite3.connect(str(root / _GLOBAL_RECORDS_DB), check_same_thread=False)
     records_conn.execute("PRAGMA journal_mode=WAL")
     global_records = GlobalRecords(records_conn)
 
     # Durable content-addressed store (drop-in for the in-memory ArtifactStore).
     cas = FilesystemArtifactStore(root / _CAS_DIRNAME)
 
-    return DurableBackends(
-        checkpointer, global_records, cas, records_conn=records_conn
-    )
-
-
+    return DurableBackends(checkpointer, global_records, cas, records_conn=records_conn)

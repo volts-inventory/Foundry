@@ -98,6 +98,17 @@ def test_a_rerun_resumes_with_the_local_cap_and_keeps_the_log(
     bench.main(["--mode", "local", "--cases", "dice", "--out-dir", str(tmp_path)])
     assert all(c[c.index("--time-cap") + 1] == "600" for c in calls)
     root = tmp_path / "local" / "dice"
-    assert (root / "run.log").read_text() == "attempt 1\ntime cap reached\nattempt 2\n"
+    segments = (root / "run.log").read_text().split(bench.RUN_MARK)
+    assert [seg.strip() for seg in segments] == ["", "attempt 1\ntime cap reached", "attempt 2"]
     assert json.loads((root / "run.json").read_text())["exit_code"] == 0
     assert bench.summarize_case(root)["stopped_by_time_cap"] is False  # resumed to a pass
+
+
+def test_time_cap_is_judged_from_the_last_run_only(tmp_path: Path) -> None:
+    root = _case(tmp_path, 3, True)
+    (root / "run.log").write_text(
+        LOG + f"\n{bench.RUN_MARK}\nstopped: something else failed\n"
+    )
+    s = bench.summarize_case(root)
+    assert s["stopped_by_time_cap"] is False
+    assert s["model_calls"] == 2

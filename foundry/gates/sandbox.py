@@ -78,6 +78,8 @@ from pathlib import Path
 from typing import IO
 from urllib.parse import unquote, urlsplit, urlunsplit
 
+from foundry.execution.sandbox import _force_rmtree
+
 from .runner import GroundingUnavailable, run_grounding_command
 
 __all__ = [
@@ -970,11 +972,7 @@ class ToolchainCache:
             root, self._root = self._root, None
         if root is None:
             return
-        # Go extracts modules read-only: make them removable first.
-        for d, _dirs, _files in os.walk(root):
-            with contextlib.suppress(OSError):
-                os.chmod(d, 0o700)
-        shutil.rmtree(root, ignore_errors=True)
+        _force_rmtree(Path(root))
 
 
 _OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}

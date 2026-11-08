@@ -67,6 +67,7 @@ from foundry.agents._common import (
     persist_prose,
     scope_directive,
 )
+from foundry.agents.implementation.tickets import _pytest_bdd
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.base_tree import BaseView, read_base, render_base_view
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
@@ -1906,10 +1907,6 @@ def _own_scenario_bindings(
                         + ("(a test ticket with no test module)." if test
                            else "(no test ticket depends on it)."))
     return out, concerns
-
-
-def _pytest_bdd(stack: StackDecision | None) -> bool:
-    return stack is None or (stack.language == "python" and not stack.bdd)
 
 
 def _fold_test_bindings(

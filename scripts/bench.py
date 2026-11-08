@@ -38,6 +38,7 @@ START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")
 REUSE = re.compile(r"reuse model call: ")
 DONE = re.compile(r"done\s+model call: (\S+) \([^)]*\) in ([\d.]+)([sm])\b")
 STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
+RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
 
 
@@ -57,6 +58,8 @@ def run_case(
     before = json.loads(meta.read_text()).get("wall_s", 0.0) if meta.exists() else 0.0
     start = time.monotonic()
     with (root / "run.log").open("a") as log:
+        log.write(f"\n{RUN_MARK}\n")
+        log.flush()
         code = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT).returncode
     meta.write_text(
         json.dumps({"wall_s": round(before + time.monotonic() - start, 1), "exit_code": code})
@@ -81,6 +84,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     if (root / "run.json").exists():
         meta = json.loads((root / "run.json").read_text())
     log = (root / "run.log").read_text(errors="replace") if (root / "run.log").exists() else ""
+    last_run = log.rsplit(RUN_MARK, 1)[-1]
     by_node: Counter[str] = Counter()
     by_tier: Counter[str] = Counter()
     secs_by_node: dict[str, float] = {}
@@ -108,7 +112,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     return {
         "wall_s": meta.get("wall_s"),
         "exit_code": code,
-        "stopped_by_time_cap": meta.get("exit_code") == 3 and "time cap reached" in log,
+        "stopped_by_time_cap": meta.get("exit_code") == 3 and "time cap reached" in last_run,
         "model_calls": sum(by_node.values()),
         "calls_by_node": dict(by_node),
         "calls_by_tier": dict(by_tier),

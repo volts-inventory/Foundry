@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -154,6 +155,7 @@ class LocalOpenAITransport:
         # Each recent assistant turn's reasoning, by _turn_key, replayed when the
         # session sends that turn back (bounded: sessions end, keys go stale).
         self._reasoning: OrderedDict[tuple[str, ...], str] = OrderedDict()
+        self._reasoning_lock = threading.Lock()
 
         def _build() -> Any:
             try:
@@ -172,10 +174,11 @@ class LocalOpenAITransport:
         key = _turn_key(response.text, tuple(str(c.get("id", "")) for c in response.tool_calls))
         if key is None or not response.reasoning:
             return
-        self._reasoning[key] = response.reasoning
-        self._reasoning.move_to_end(key)
-        while len(self._reasoning) > _REASONING_MEMORY:
-            self._reasoning.popitem(last=False)
+        with self._reasoning_lock:
+            self._reasoning[key] = response.reasoning
+            self._reasoning.move_to_end(key)
+            while len(self._reasoning) > _REASONING_MEMORY:
+                self._reasoning.popitem(last=False)
 
     def _messages(self, request: dict[str, Any], thinking: bool) -> list[dict[str, Any]]:
         messages = []
@@ -184,8 +187,11 @@ class LocalOpenAITransport:
             if thinking and msg["role"] == "assistant":
                 ids = tuple(str(c.get("id", "")) for c in msg.get("tool_calls") or ())
                 key = _turn_key(msg.get("content"), ids)
-                if key is not None and key in self._reasoning:
-                    msg["reasoning"] = self._reasoning[key]
+                if key is not None:
+                    with self._reasoning_lock:
+                        reasoning = self._reasoning.get(key)
+                    if reasoning is not None:
+                        msg["reasoning"] = reasoning
             messages.append(msg)
         return messages
 

@@ -1068,3 +1068,22 @@ def test_cli_local_check_exit_codes(
     assert json.loads(capsys.readouterr().out)["models"] == ["m"]
     assert cli.main(["--local-check", "--local-model", "other"]) == 1
     assert cli.main(["--model-mode", "orbit", "build a thing"]) == 2
+
+
+def test_concurrent_remember_keeps_the_reasoning_memory_bounded() -> None:
+    from foundry.proxy import local_transport as lt
+
+    transport = LocalOpenAITransport(client=_local_client(False, "{}"))
+
+    def work(n: int) -> None:
+        for i in range(lt._REASONING_MEMORY):
+            transport.remember(ProviderResponse(
+                served_model="m", request_id="r", text=f"t{n}-{i}", usage={},
+                stop_reason="stop", reasoning="why"))
+
+    threads = [threading.Thread(target=work, args=(n,)) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(transport._reasoning) == lt._REASONING_MEMORY

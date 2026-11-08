@@ -1063,3 +1063,18 @@ def test_real_cargo_fetch_feeds_the_offline_build(tmp_path: Path, monkeypatch: A
             assert rc == 0, err
     finally:
         cache.close()
+
+
+def test_toolchain_cache_close_never_chmods_or_removes_a_symlink_target(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("x")
+    outside.chmod(0o755)
+    cache = sandbox.ToolchainCache()
+    ro = Path(cache.root) / "go" / "pkg"
+    ro.mkdir(parents=True)
+    (ro / "link").symlink_to(outside, target_is_directory=True)
+    ro.chmod(0o555)
+    cache.close()
+    assert (outside / "keep.txt").read_text() == "x"
+    assert (outside.stat().st_mode & 0o777) == 0o755

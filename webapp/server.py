@@ -33,7 +33,9 @@ from typing import Any
 from webapp import insight
 from webapp import settings as _settings
 from webapp.events import (
+    LOG_CHATTY,
     STAGE_FOR_NODE,
+    event_for_log_line,
     event_for_task,
     events_for_node_output,
     events_for_result,
@@ -97,6 +99,12 @@ _PACE = 0.5  # seconds between paced closing events
 # flood the log (or every connected device's stream) with hundreds of tool calls.
 _ACT_MIN_GAP = 2.0  # seconds between reported activities
 _ACT_MAX_PER_STEP = 40  # then one "still working" line and silence for that step
+# Progress lines (`log` events): model-call start/done lines arrive per call, from
+# every worker at once, so they are coalesced to one per gap; the rest always land.
+_LOG_CHATTY_GAP = 5.0
+_LOG_LOCK = threading.Lock()  # log_cb fires from the run's worker threads
+DRAFT_STATUS_FILE = "DRAFT-STATUS.md"
+_DRAFT_STATUS_MAX = 256 * 1024
 
 
 def _int_env(name: str, default: int) -> int:
@@ -231,13 +239,16 @@ def _whole(raw: Any, name: str) -> int:
 
 
 def _resume_overrides(
-    body: Mapping[str, Any],
-) -> tuple[int | None, int | None, float | None]:
-    """(token_cap, max_fix_attempts, time_cap_minutes) from a resume body; ``None``
-    keeps the floor's current value. A token or time cap of 0 (or null) lifts that
-    cap. Raises ValueError."""
+    body: Mapping[str, Any], view: Mapping[str, Any] | None = None, backend: str = "mock"
+) -> tuple[int | None, int | None, float | None, dict[str, Any]]:
+    """(token_cap, max_fix_attempts, time_cap_minutes, build view) from a resume
+    body; ``None`` keeps the floor's current value. A token or time cap of 0 (or
+    null) lifts that cap. The view is the floor's ``view`` with any new model mode,
+    levels, local server and Advanced switches; scope, spec and stack are refused
+    (``settings.resume_view``). Raises ValueError."""
     if not isinstance(body, Mapping):
         raise ValueError("expected a JSON object")
+    new_view = _settings.resume_view(view or {}, body, backend)
     token_cap: int | None = None
     max_fix: int | None = None
     time_cap: float | None = None
@@ -253,7 +264,7 @@ def _resume_overrides(
         time_cap = 0.0 if n is None else n
         if not 0 <= time_cap <= _settings.MAX_TIME_CAP_MIN:
             raise ValueError(f"time_cap_minutes must be 0 (no cap) to {_settings.MAX_TIME_CAP_MIN}")
-    return token_cap, max_fix, time_cap
+    return token_cap, max_fix, time_cap, new_view
 
 
 BUILD_STATUSES = ("shipped", "halted", "stopped", "running")
@@ -362,6 +373,14 @@ class Project:
     act_last: float = 0.0  # monotonic time of the last emitted activity
     act_count: int = 0  # emitted this step (capped; reset on each start)
     act_text: str = ""  # last phrase (collapses immediate repeats)
+    # Progress-line (`log`) throttle: last chatty line's time, how many chatty
+    # lines were held back since, and the last line (collapses immediate repeats).
+    log_last: float = 0.0
+    log_more: int = 0
+    log_text: str = ""
+    # DRAFT-STATUS.md of the latest run that did not ship ("" when none); restored
+    # from the floor's `draft_status` event after a restart.
+    draft_status: str = ""
     status: str = "running"
     passed: bool = False  # final verdict (for elevator/reload rehydration)
     gates: dict[str, Any] = field(default_factory=dict)  # name -> {status,attested,advisory}
@@ -541,9 +560,16 @@ def _restore_controls(p: Project) -> None:
                 p.token_cap = e["token_cap"]
             if "max_fix_attempts" in e:
                 p.max_fix_attempts = int(e["max_fix_attempts"])
+            if t == "resumed" and isinstance(e.get("build"), Mapping):
+                p.build = dict(e["build"])  # a Retry with… may change the model setup
             if t == "resumed" and "time_cap_minutes" in e:
                 p.build = {**p.build, "time_cap_minutes": e["time_cap_minutes"]}
+            if t == "resumed" and isinstance(e.get("slots"), int):
+                p.max_slots = e["slots"]
             p.phase = ""
+            p.draft_status = ""
+        elif t == "draft_status":
+            p.draft_status = str(e.get("text") or "")
         elif t == "done":
             p.phase = "passed" if e.get("passed") else str(e.get("phase") or "halted")
 
@@ -756,8 +782,18 @@ def _floor_insight(p: Project) -> dict[str, Any]:
         gates=p.gates,
         meter=meter,
         draft_files=len(repo.files) if repo else 0,
+        draft_status=p.draft_status,
     )
     return out
+
+
+def _virtual_files(pid: str) -> dict[str, bytes]:
+    """Files the browser shows that no run wrote to the tree: a non-shipped
+    floor's DRAFT-STATUS.md (read-only, from its run result)."""
+    p = _PROJECTS.get(pid)
+    if p is None or not p.draft_status or not _draft_label(pid)["draft"]:
+        return {}
+    return {DRAFT_STATUS_FILE: p.draft_status.encode("utf-8")}
 
 
 def _tree(pid: str) -> dict[str, bytes] | None:
@@ -791,6 +827,33 @@ def take_activity(p: Project, text: str, now: float | None = None) -> str | None
         return None  # too soon after the last one
     p.act_last, p.act_count, p.act_text = t, p.act_count + 1, line
     return line
+
+
+def take_log(p: Project, line: str, now: float | None = None) -> dict[str, Any] | None:
+    """The ``log`` event to emit for one progress line, or ``None`` to hold it back.
+
+    Self-check verdicts, retries, warnings, escalations and waits always land (an
+    immediate repeat aside). Model-call start/done lines (and unrecognized ones)
+    come per call from every worker, so at most one lands per
+    :data:`_LOG_CHATTY_GAP`; the next one that lands says how many were held
+    back (``more``)."""
+    ev = event_for_log_line(line)
+    if ev is None:
+        return None
+    t = time.monotonic() if now is None else now
+    with _LOG_LOCK:
+        if ev["text"] == p.log_text:
+            return None
+        if ev["kind"] in LOG_CHATTY:
+            if p.log_last and (t - p.log_last) < _LOG_CHATTY_GAP:
+                p.log_more += 1
+                return None
+            p.log_last = t
+            if p.log_more:
+                ev["more"] = p.log_more
+            p.log_more = 0
+        p.log_text = ev["text"]
+    return ev
 
 
 def waiting_on(p: Project, now: float | None = None, cap: int = 3) -> str:
@@ -1231,6 +1294,12 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 text="… (still working; further tool calls not listed)",
             )
 
+    def log_line(line: str) -> None:
+        """One progress line from the run (model calls, self-checks, retries, waits)."""
+        ev = take_log(p, line)
+        if ev is not None:
+            _emit(p, **ev)
+
     # The code lives in the durable CAS — the build needs NO output directory. We
     # only write a disk tree when WORKSHOP_WRITE_DISK opts in (an export cache);
     # otherwise the Repo/OUTPUT browser materializes the tree straight from the store.
@@ -1285,6 +1354,7 @@ def _run_factory(p: Project, resume: bool = False) -> None:
                 ticket_tiers=p.ticket_tiers or None,
                 progress_cb=progress,
                 activity_cb=activity,  # what the agent is doing INSIDE a step
+                log_cb=log_line,  # the run's progress lines, as `log` events
                 mode=p.mode,
                 backend=p.backend,  # real backend per project (not always mock)
                 adapter=p.adapter,  # coding substrate (stub/raw-react)
@@ -1372,6 +1442,11 @@ def _run_factory(p: Project, resume: bool = False) -> None:
         "artifact_uri": result.artifact_uri,
         "gate_statuses": {k: str(v) for k, v in result.gate_statuses.items()},
     }
+    draft_status = getattr(result, "draft_status", None)
+    if not result.passed and draft_status:
+        # An event, so the floor's durable log carries it past a restart.
+        p.draft_status = str(draft_status)[:_DRAFT_STATUS_MAX]
+        _emit(p, type="draft_status", text=p.draft_status)
     for ev in events_for_result(result_dict):
         _emit(p, **ev)
         time.sleep(_PACE)
@@ -1597,20 +1672,29 @@ class Handler(BaseHTTPRequestHandler):
         # The code lives in the store: list the materialized CAS tree first. Fall
         # back to a disk export only for an older build with no durable checkpoint.
         tree = _tree(pid)
+        base = self._out_base(pid) if tree is None else None
         if tree is not None:
             files = [{"path": p, "size": len(b)} for p, b in sorted(tree.items())]
-            self._json(200, {"files": files, "source": "store", **_draft_label(pid)})
-            return
-        base = self._out_base(pid)
-        if base is None:
+            source = "store"
+        elif base is not None:
+            files = [
+                {"path": str(f.relative_to(base)), "size": f.stat().st_size}
+                for f in sorted(base.rglob("*"))
+                if f.is_file()
+            ]
+            source = "disk"
+        else:
+            files, source = [], "none"
+        listed = {f["path"] for f in files}
+        virtual = [
+            {"path": rel, "size": len(b), "virtual": True}
+            for rel, b in _virtual_files(pid).items()
+            if rel not in listed  # a run that wrote its own copy is served as written
+        ]
+        if not files and not virtual:
             self._json(404, {"error": "no output yet"})
             return
-        files = [
-            {"path": str(f.relative_to(base)), "size": f.stat().st_size}
-            for f in sorted(base.rglob("*"))
-            if f.is_file()
-        ]
-        self._json(200, {"files": files, "source": "disk", **_draft_label(pid)})
+        self._json(200, {"files": virtual + files, "source": source, **_draft_label(pid)})
 
     def _resolve_within(self, base: Path, rel: str) -> Path | None:
         """Resolve ``rel`` under ``base``, fail-closed on traversal/symlink escape."""
@@ -1627,22 +1711,23 @@ class Handler(BaseHTTPRequestHandler):
         # Store first: the materialized tree's keys are already containment-checked
         # by materialize_workdir (D-R1-03), so an exact-key lookup needs no re-guard.
         tree = _tree(pid)
+        virtual = _virtual_files(pid).get(rel)
         if tree is not None:
-            data = tree.get(rel)
+            data = tree.get(rel, virtual)
             if data is None:
                 self._json(404, {"error": "not found"})
                 return
             self._send_text(data)
             return
         base = self._out_base(pid)
-        if base is None:
-            self._json(404, {"error": "no output"})
+        target = self._resolve_within(base, rel) if base is not None else None
+        if target is not None and target.is_file():
+            self._send_text(target.read_bytes())
             return
-        target = self._resolve_within(base, rel)
-        if target is None or not target.is_file():
-            self._json(404, {"error": "not found"})
+        if virtual is not None:
+            self._send_text(virtual)
             return
-        self._send_text(target.read_bytes())
+        self._json(404, {"error": "no output" if base is None else "not found"})
 
     def _send_text(self, data: bytes) -> None:
         """A file for the in-page viewer, cut at the view cap; a cut file says so in
@@ -1793,8 +1878,12 @@ class Handler(BaseHTTPRequestHandler):
         budget. Pending nodes continue; a halted run re-enters at the boundary that
         halted it (``cli._resume_seed``) with a fresh fix budget."""
         body = self._read_json()
+        with _LOCK:
+            known = _PROJECTS.get(pid)
         try:
-            token_cap, max_fix, time_cap = _resume_overrides(body)
+            token_cap, max_fix, time_cap, view = _resume_overrides(
+                body, known.build if known else {}, _server_backend()
+            )
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
@@ -1828,6 +1917,9 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            p.build = view
+            if "max_slots" in body:
+                p.max_slots = view.get("max_slots") or _settings.default_slots()
             if time_cap is not None:
                 p.build = {**p.build, "time_cap_minutes": time_cap or None}
             if token_cap is not None:
@@ -1839,6 +1931,7 @@ class Handler(BaseHTTPRequestHandler):
             p.closing = False
             p.phase = ""
             p.passed = False
+            p.draft_status = ""
             p.autoresume_left = 6
             p.status = "running"
             with p.cond:
@@ -1856,13 +1949,17 @@ class Handler(BaseHTTPRequestHandler):
             token_cap=p.token_cap,
             max_fix_attempts=p.max_fix_attempts,
             time_cap_minutes=minutes,
+            build=p.build,
+            slots=p.max_slots,
         )
         cap = f"a {p.token_cap:,}-token cap" if p.token_cap else "no token cap"
         clock = f", a {minutes:g}-minute time cap" if minutes else ""
+        mode = p.build.get("model_mode")
+        on = f" on {mode} models" if mode else ""
         _emit(
             p,
             type="narrate",
-            text=f"▶ Resumed with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).",
+            text=f"▶ Resumed{on} with {cap}{clock} and {p.max_fix_attempts} fix attempt(s).",
         )
         _persist(p)
         threading.Thread(
@@ -1982,7 +2079,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, _settings.client_view(saved, backend))
 
     def _new_project(self) -> None:
-        from foundry.cli import AUTO_SLOTS_CAP, _default_adapter_for
+        from foundry.cli import _default_adapter_for
 
         body = self._read_json()
         request = str(body.get("request", "")).strip()
@@ -2017,10 +2114,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(409, {"error": "that floor's code can't be read back"})
                 return
         adapter = _default_adapter_for(backend)
-        try:
-            max_slots = max(1, int(os.environ.get("FOUNDRY_MAX_SLOTS", "") or AUTO_SLOTS_CAP))
-        except ValueError:
-            max_slots = AUTO_SLOTS_CAP
+        max_slots = opts["max_slots"]  # the settings' value, else FOUNDRY_MAX_SLOTS
         tok_env = os.environ.get("FOUNDRY_TOKEN_CAP", "").strip()
         token_cap = int(tok_env) if tok_env.isdigit() else None
         try:

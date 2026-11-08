@@ -408,8 +408,12 @@ def halt_report(
     meter: Mapping[str, Any] | None,
     draft_files: int,
     time_cap_s: float | None = None,
+    draft_status: str = "",
 ) -> dict[str, Any]:
     """Why a floor ended without shipping, in plain words, and what to do next.
+
+    ``draft_status`` is the run's DRAFT-STATUS.md (what was built, what is left),
+    passed through as-is for the panel to show.
 
     ``actions`` are what the panel's buttons do: ``resume`` posts ``body`` to the
     floor's resume route, ``retry`` opens the Retry-with form, ``files`` opens the
@@ -534,6 +538,7 @@ def halt_report(
         "notes": fix_notes(state, failing_names),
         "meter": dict(meter) if meter else None,
         "draft_files": draft_files,
+        "draft_status": draft_status,
         "resumable": resumable,
         "actions": actions,
     }

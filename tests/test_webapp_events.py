@@ -2,7 +2,76 @@
 
 from __future__ import annotations
 
-from webapp.events import events_for_node_output, events_for_result, live_event_for_node
+import pytest
+
+from webapp.events import (
+    LOG_TEXT_MAX,
+    event_for_log_line,
+    events_for_node_output,
+    events_for_result,
+    live_event_for_node,
+)
+
+
+@pytest.mark.parametrize(
+    "line,kind,extra,text",
+    [
+        (
+            "[08:09:34] self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+            "self-check",
+            {"ticket": "T-ORDERS", "verdict": "red"},
+            "self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+        ),
+        (
+            "[08:10:01] self-check T2: green (0.9s; 7 left)",
+            "self-check",
+            {"ticket": "T2", "verdict": "green"},
+            "self-check T2: green (0.9s; 7 left)",
+        ),
+        (
+            "[08:09:34] start model call: planner (T1, ideation)",
+            "call",
+            {"phase": "start"},
+            "start model call: planner (T1, ideation)",
+        ),
+        (
+            "[08:11:03] done  model call: planner in 89s, 20k tokens (T1)",
+            "call",
+            {"phase": "done"},
+            "done model call: planner in 89s, 20k tokens (T1)",
+        ),
+        (
+            "[08:12:00] retry model call: planner — timeout [1/3], waiting 0s",
+            "retry",
+            {},
+            "retry model call: planner — timeout [1/3], waiting 0s",
+        ),
+        (
+            "[08:12:00] WARNING planner: context truncated: sent ~90000, model saw 32000",
+            "warning",
+            {},
+            "WARNING planner: context truncated: sent ~90000, model saw 32000",
+        ),
+        ("[08:13:00] escalate T3 to T1", "escalate", {}, "escalate T3 to T1"),
+        (
+            "[autoresume] transient provider failure (529); waiting 5 min before resuming",
+            "wait",
+            {},
+            "transient provider failure (529); waiting 5 min before resuming",
+        ),
+        ("[08:14:00] wrote BUILD-MANIFEST.json", "info", {}, "wrote BUILD-MANIFEST.json"),
+    ],
+)
+def test_progress_lines_become_classified_log_events(line, kind, extra, text) -> None:
+    assert event_for_log_line(line) == {"type": "log", "kind": kind, "text": text, **extra}
+
+
+def test_log_lines_are_trimmed_and_blank_ones_dropped() -> None:
+    assert event_for_log_line("") is None
+    assert event_for_log_line("[08:00:00]   ") is None
+    ev = event_for_log_line("[08:00:00] WARNING x: " + "y" * 1000)
+    assert ev is not None and ev["kind"] == "warning"
+    assert len(ev["text"]) == LOG_TEXT_MAX and ev["text"].endswith("…")
 
 
 def test_live_event_for_node_seats_the_agent_at_its_desk() -> None:

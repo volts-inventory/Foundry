@@ -261,6 +261,14 @@
         fx.append(ul);
       }
       body.append(fx);
+      if (h.draft_status){
+        const ds = section("Draft status");
+        const det = el("details", "ir-detail");
+        det.append(el("summary", "", "DRAFT-STATUS.md — what was built and what is left"),
+                   el("pre", "ic-finding", h.draft_status));
+        ds.append(det);
+        body.append(ds);
+      }
       if (h.meter) body.append(meterSection(h.meter));
       if (h.detail){
         const det = el("details", "ir-detail");

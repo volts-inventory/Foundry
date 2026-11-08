@@ -38,6 +38,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FOUNDRY_AUTH", "0")
     monkeypatch.setenv("FOUNDRY_MODEL_BACKEND", "mock")
     monkeypatch.delenv("FOUNDRY_TOKEN_CAP", raising=False)
+    for var in ("FOUNDRY_LOCAL_URL", "FOUNDRY_LOCAL_MODEL", "FOUNDRY_MAX_SLOTS"):
+        monkeypatch.delenv(var, raising=False)  # the settings' defaults follow them
     srv = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield SimpleNamespace(port=srv.server_port, store=store, tmp=tmp_path)
@@ -489,3 +491,270 @@ def test_new_routes_enforce_csrf_token_and_sign_in(env, monkeypatch, path):
     assert _call(env, "GET", "/api/settings")[0] == 401
     assert called == [] and not (env.tmp / "out" / "settings.json").exists()
     assert server._PROJECTS == {}
+
+
+# --- Advanced run switches (thinking, self-check, native tools, fix until cap, slots) --- #
+
+
+def test_advanced_switches_save_and_reach_run(env, runs):
+    body = {
+        "local_thinking": "agent",
+        "self_check": "local",
+        "native_tools": "on",
+        "fix_until_cap": "off",
+        "max_slots": 3,
+    }
+    code, got = _call(env, "POST", "/api/settings", body)
+    assert code == 200, got
+    assert {k: got["settings"][k] for k in body} == body
+    assert got["advanced"]["self_check"] == ["auto", "on", "local", "off"]
+    p, kw = _build(env, runs)
+    assert kw["local_thinking"] == "agent" and kw["self_check"] == "local"
+    assert kw["native_tools"] is True and kw["fix_until_cap"] is False
+    assert kw["max_slots"] == 3 and p.max_slots == 3
+    # the floor's view carries them, so a restart re-sends the same switches
+    assert server._build_kwargs(p)["self_check"] == "local"
+
+
+def test_a_build_body_overrides_the_saved_switches(env, runs):
+    assert _call(env, "POST", "/api/settings", {"local_thinking": "off"})[0] == 200
+    _, kw = _build(env, runs, local_thinking="on", self_check="off")
+    assert kw["local_thinking"] == "on" and kw["self_check"] == "off"
+
+
+def test_auto_switches_are_not_sent_and_slots_follow_the_env(env, runs, monkeypatch):
+    _, kw = _build(env, runs)
+    for key in ("local_thinking", "self_check", "native_tools", "fix_until_cap"):
+        assert key not in kw, key  # auto: run() falls back to the env, as the CLI does
+    assert kw["max_slots"] == foundry.cli.AUTO_SLOTS_CAP
+    monkeypatch.setenv("FOUNDRY_MAX_SLOTS", "5")
+    _, kw = _build(env, runs)
+    assert kw["max_slots"] == 5
+    assert _call(env, "GET", "/api/settings")[1]["max_slots"] == {"max": ws.MAX_SLOTS, "default": 5}
+    assert _call(env, "POST", "/api/settings", {"max_slots": 2})[0] == 200
+    _, kw = _build(env, runs)
+    assert kw["max_slots"] == 2  # the saved value wins over the env
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("local_thinking", "maybe"),
+        ("local_thinking", True),
+        ("self_check", "agent"),
+        ("native_tools", "local"),
+        ("fix_until_cap", 1),
+        ("max_slots", 0),
+        ("max_slots", ws.MAX_SLOTS + 1),
+        ("max_slots", 2.5),
+        ("max_slots", True),
+        ("max_slots", "many"),
+    ],
+)
+def test_bad_advanced_switches_are_refused(env, runs, field, value):
+    assert _call(env, "POST", "/api/settings", {field: value})[0] == 400
+    assert not (env.tmp / "out" / "settings.json").exists()
+    assert _call(env, "POST", "/api/projects", {"request": "x", field: value})[0] == 400
+    assert runs == []
+
+
+# --- defaults follow the env ----------------------------------------------------------- #
+
+
+def test_local_defaults_follow_the_env(env, monkeypatch):
+    monkeypatch.setenv("FOUNDRY_LOCAL_URL", "http://10.0.0.5:1234/v1")
+    monkeypatch.setenv("FOUNDRY_LOCAL_MODEL", "qwen/qwen3-coder-30b")
+    got = _call(env, "GET", "/api/settings")[1]
+    assert got["settings"]["local_url"] == "http://10.0.0.5:1234/v1"
+    assert got["settings"]["local_model"] == "qwen/qwen3-coder-30b"
+    assert got["presets"]["local"]["T1"]["model"] == "qwen/qwen3-coder-30b"
+    # a saved value still wins over the env
+    assert _call(env, "POST", "/api/settings", {"local_model": "llama/x-8b"})[0] == 200
+    assert _call(env, "GET", "/api/settings")[1]["settings"]["local_model"] == "llama/x-8b"
+
+
+def test_an_unusable_env_local_url_falls_back_to_the_default(env, monkeypatch):
+    monkeypatch.setenv("FOUNDRY_LOCAL_URL", "file:///etc/passwd")
+    monkeypatch.setenv("FOUNDRY_LOCAL_MODEL", "not a model id")
+    s = _call(env, "GET", "/api/settings")[1]["settings"]
+    assert s["local_url"] == local_transport.DEFAULT_LOCAL_URL
+    assert s["local_model"] == local_transport.DEFAULT_LOCAL_MODEL
+
+
+# --- live progress lines (`log` events) -------------------------------------------------- #
+
+
+def _fake_run(monkeypatch, lines: list[str], **result: Any) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    sig = inspect.signature(foundry.cli.run)
+
+    def fake(*args: Any, **kwargs: Any) -> Any:
+        sig.bind(*args, **kwargs)
+        calls.append(kwargs)
+        for line in lines:
+            kwargs["log_cb"](line)
+        out = {"passed": True, "phase": "passed", **result}
+        return SimpleNamespace(mode="assistant", artifact_uri=None, gate_statuses={}, **out)
+
+    monkeypatch.setattr(foundry.cli, "run", fake)
+    return calls
+
+
+def test_progress_lines_stream_as_log_events_with_model_calls_coalesced(env, monkeypatch):
+    monkeypatch.setattr(server, "_LOG_CHATTY_GAP", 3600.0)
+    _fake_run(
+        monkeypatch,
+        [
+            "[08:00:00] start model call: planner (T1, ideation)",
+            "[08:00:01] done  model call: planner in 89s, 20k tokens (T1)",
+            "[08:00:02] start model call: coder (T2)",
+            "[08:00:03] self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+            "[08:00:03] self-check T-ORDERS: red (4 own, 0 pre-existing line(s); 1.3s; 8 left)",
+            "[08:00:04] WARNING coder: context truncated: sent ~9000, model saw 4000 (cut)",
+            "[08:00:05] retry model call: coder — timeout [1/3], waiting 0s",
+            "[08:00:06] self-check T-ORDERS: green (0.8s; 7 left)",
+            "",
+        ],
+    )
+    code, got = _call(env, "POST", "/api/projects", {"request": "build a thing"})
+    assert code == 200
+    p = server._PROJECTS[got["id"]]
+    _wait_ended(p)
+    logs = [e for e in p.log if e["type"] == "log"]
+    assert [(e["kind"], e.get("verdict")) for e in logs] == [
+        ("call", None),  # the first model call; the next two are held back
+        ("self-check", "red"),  # an immediate repeat collapses
+        ("warning", None),
+        ("retry", None),
+        ("self-check", "green"),
+    ]
+    assert logs[0]["text"] == "start model call: planner (T1, ideation)"
+    assert all(not e["text"].startswith("[") for e in logs)
+    # durable: a viewer after a restart replays them too
+    assert [e["type"] for e in env.store.events_of(p.id)].count("log") == len(logs)
+
+
+def test_held_back_model_calls_are_counted_on_the_next_one():
+    p = Project(id="t", request="r", mode="assistant", floor=1)
+    assert server.take_log(p, "start model call: a", now=100.0) is not None
+    assert server.take_log(p, "done model call: a in 1s", now=101.0) is None
+    assert server.take_log(p, "start model call: b", now=102.0) is None
+    assert server.take_log(p, "WARNING b: context truncated", now=102.5) is not None
+    ev = server.take_log(p, "start model call: c", now=100.0 + server._LOG_CHATTY_GAP)
+    assert ev is not None and ev["more"] == 2
+    assert "more" not in (server.take_log(p, "x", now=200.0) or {})
+
+
+# --- DRAFT-STATUS for a floor that did not ship ------------------------------------------ #
+
+
+def _get_text(env: Any, path: str) -> tuple[int, str]:
+    conn = http.client.HTTPConnection("127.0.0.1", env.port, timeout=30)
+    conn.request("GET", path)
+    resp = conn.getresponse()
+    out = resp.read().decode("utf-8")
+    conn.close()
+    return resp.status, out
+
+
+_DRAFT = "# Draft status\n\nBuilt: T1. Left: T2 (test gate red).\n"
+
+
+def test_a_non_shipped_floor_shows_its_draft_status(env, monkeypatch):
+    _fake_run(monkeypatch, [], passed=False, phase="halted", draft_status=_DRAFT)
+    code, got = _call(env, "POST", "/api/projects", {"request": "build a thing"})
+    assert code == 200
+    p = server._PROJECTS[got["id"]]
+    _wait_ended(p)
+    assert p.draft_status == _DRAFT
+
+    halt = _call(env, "GET", f"/api/projects/{p.id}/insight")[1]["halt"]
+    assert halt["draft_status"] == _DRAFT
+    code, files = _call(env, "GET", f"/api/files/{p.id}")
+    assert code == 200 and files["draft"] is True
+    assert {"path": "DRAFT-STATUS.md", "size": len(_DRAFT), "virtual": True} in files["files"]
+    assert _get_text(env, f"/api/file/{p.id}?path=DRAFT-STATUS.md") == (200, _DRAFT)
+
+    # A restart restores it from the floor's durable log.
+    server._PROJECTS.clear()
+    server._load_persisted()
+    assert server._PROJECTS[p.id].draft_status == _DRAFT
+    assert _get_text(env, f"/api/file/{p.id}?path=DRAFT-STATUS.md") == (200, _DRAFT)
+
+
+def test_a_shipped_floor_has_no_draft_status(env, monkeypatch):
+    _fake_run(monkeypatch, [], draft_status=_DRAFT)
+    _, got = _call(env, "POST", "/api/projects", {"request": "build a thing"})
+    p = server._PROJECTS[got["id"]]
+    _wait_ended(p)
+    assert p.draft_status == ""
+    assert _get_text(env, f"/api/file/{p.id}?path=DRAFT-STATUS.md")[0] == 404
+
+
+# --- resume with a different model setup ---------------------------------------------------- #
+
+
+def _halted(env: Any, monkeypatch, runs: list[dict[str, Any]], **body: Any) -> Project:
+    p, _ = _build(env, runs, **body)
+    p.passed, p.phase = False, "halted"
+    monkeypatch.setattr(server, "_has_durable_checkpoint", lambda _tid: True)
+    return p
+
+
+def test_resume_with_a_new_model_mode_runs_on_that_modes_levels(env, runs, monkeypatch):
+    p = _halted(env, monkeypatch, runs, scope="demo")
+    assert runs[-1]["model_mode"] == "cloud"
+    code, got = _call(
+        env,
+        "POST",
+        f"/api/projects/{p.id}/resume",
+        {"model_mode": "local", "local_thinking": "agent", "max_slots": 2},
+    )
+    assert code == 200, got
+    _wait_ended(p)
+    kw = runs[-1]
+    assert kw["model_mode"] == "local" and kw["levels"] is None  # the local preset
+    assert kw["local_thinking"] == "agent" and kw["max_slots"] == 2
+    assert kw["scope"] == "demo"  # the plan's scope is kept
+    resumed = [e for e in p.log if e["type"] == "resumed"][-1]
+    assert resumed["build"]["model_mode"] == "local" and resumed["slots"] == 2
+
+    # A restart re-reads the model setup the latest resume set.
+    q = Project(id="q", request="r", mode="assistant", floor=9, log=list(p.log))
+    server._restore_controls(q)
+    assert q.build["model_mode"] == "local" and q.max_slots == 2
+
+
+def test_resume_keeps_an_edited_level_table_unless_the_mode_changes(env, runs, monkeypatch):
+    preset = _call(env, "GET", "/api/settings")[1]["presets"]["cloud"]
+    levels = {**preset, "T1": {"backend": "mock", "model": "custom-1"}}
+    p = _halted(env, monkeypatch, runs, levels=levels)
+    assert _call(env, "POST", f"/api/projects/{p.id}/resume", {"self_check": "off"})[0] == 200
+    _wait_ended(p)
+    assert runs[-1]["levels"]["T1"]["model"] == "custom-1"
+    assert runs[-1]["self_check"] == "off"
+    p.passed, p.phase = False, "halted"
+    code, got = _call(env, "POST", f"/api/projects/{p.id}/resume", {"model_mode": "hybrid"})
+    assert code == 200, got
+    _wait_ended(p)
+    assert runs[-1]["model_mode"] == "hybrid" and runs[-1]["levels"] is None
+
+
+@pytest.mark.parametrize(
+    "body,why",
+    [
+        ({"scope": "standard"}, "scope"),
+        ({"spec": "# new spec"}, "spec"),
+        ({"profile": "go"}, "profile"),
+        ({"model_mode": "turbo"}, "model_mode"),
+        ({"local_url": "ftp://x"}, "URL"),
+        ({"self_check": "maybe"}, "self_check"),
+        ({"max_slots": 0}, "max_slots"),
+    ],
+)
+def test_resume_refuses_plan_changes_and_bad_settings(env, runs, monkeypatch, body, why):
+    p = _halted(env, monkeypatch, runs)
+    before = dict(p.build)
+    code, got = _call(env, "POST", f"/api/projects/{p.id}/resume", body)
+    assert code == 400 and why in got["error"], got
+    assert p.build == before and p.status == "done" and len(runs) == 1

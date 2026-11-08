@@ -2189,10 +2189,14 @@ function routeEvent(floor, ev){
     case "resumed":                // Resume / Retry with…: the floor is back at work
       if ("token_cap" in ev) F.tokenCap = ev.token_cap;
       if ("max_fix_attempts" in ev) F.maxFix = ev.max_fix_attempts;
+      if (ev.build) F.build = ev.build;          // a Retry with… may switch the model setup
+      if (ev.slots){ F.slots = ev.slots; if (S) S.setPool(F.slots); }
       markResumed(F);
+      if (isActive) updateHud(F);
       logTo(F, "gold", "── RESUMED ──");
       break;
     case "narrate": logNarrate(F, ev.text); break;
+    case "log": logRunLine(F, ev); break;   // the run's own progress lines
     case "task": {                 // one ticket's worker started / finished / failed
       const r = taskApply(F, ev);
       if (S){
@@ -2560,6 +2564,17 @@ function logAct(F, ev){
   }
   logTo(F, "", "· "+t);
 }
+// A run progress line (the server's `log` event): model calls, self-checks, retries,
+// warnings, escalations, waits. Self-check verdicts and warnings stand out; model
+// calls stay dim. `more` = model-call lines the server coalesced away before this one.
+const RUN_LINE_CLASS = {warning:"run warn", escalate:"run gold", wait:"run gold", retry:"run retry"};
+function logRunLine(F, ev){
+  const t = String(ev.text || "").trim(); if(!t) return;
+  let cls = RUN_LINE_CLASS[ev.kind] || "run";
+  if (ev.kind === "self-check") cls = ev.verdict === "green" ? "run good" : ev.verdict === "red" ? "run bad" : "run";
+  const mark = ev.kind === "warning" ? "⚠ " : ev.kind === "self-check" ? (ev.verdict === "green" ? "✓ " : ev.verdict === "red" ? "✕ " : "◦ ") : "› ";
+  logTo(F, cls, mark+t+(ev.more ? "  (+"+ev.more+" more)" : ""));
+}
 // An artifact: fold its CONTENT into its producing agent's box body.
 function logArtifact(F, ev){
   const base=artBase(ev.label), agent=ev.agent||"(system)", detail=ev.detail||"";
@@ -2847,7 +2862,7 @@ function renderTree(id, files){
 function fileRow(f, label){
   const li = listRow("file",
     `<span class='ico' aria-hidden='true'>≡</span><span class='nm'>${escapeHtml(label)}</span>`+
-    `<span class='meta'>${f.size}b</span>`, () => viewFile(FILES_ID, f.path, li), f.path);
+    `<span class='meta'>${f.virtual ? "status · " : ""}${f.size}b</span>`, () => viewFile(FILES_ID, f.path, li), f.path);
   return li;
 }
 // The filter box: every file whose path contains the text, shown flat by full path.
@@ -2978,7 +2993,7 @@ function renderControls(){
   if (!F.passed && RESUMABLE.has(F.phase)){
     el.append(
       ctlButton("▶", "RESUME", "Resume from the last checkpoint", () => resumeFloor(F, {}), "primary"),
-      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap, time cap or more fix attempts", () => showRetryForm(F)));
+      ctlButton("↻", "RETRY WITH…", "Resume with a new token cap, time cap, fix attempts or model mode", () => showRetryForm(F)));
   }
   if (F.passed) el.append(ctlButton("✎", "CHANGE", "Change this build — plan and build only the delta on a new floor", () => showNewModal(F)));
   el.append(ctlButton("✕", "DELETE", "Delete this floor and its output", () => showDeleteConfirm(F), "danger"));
@@ -3049,6 +3064,16 @@ function showRetryForm(F){
   const curMin = F.build && F.build.time_cap_minutes;
   const mins = field("Time cap (min)", {min:"0", step:"any", inputmode:"decimal",
     placeholder: curMin ? String(curMin) : "no cap"});
+  // Model mode: the run's own, preset. A different one resumes on that mode's levels;
+  // the plan in the checkpoint (scope, spec, stack) stays as it is.
+  const curMode = (F.build && F.build.model_mode) || "cloud";
+  const ml = document.createElement("label"); ml.textContent = "Model mode";
+  const mode = document.createElement("select");
+  for (const [v, t] of [["cloud", "Cloud"], ["hybrid", "Hybrid"], ["local", "Local"]]){
+    const o = document.createElement("option"); o.value = v; o.textContent = t; mode.appendChild(o);
+  }
+  mode.value = curMode;
+  ml.appendChild(mode); form.appendChild(ml);
   const go = document.createElement("button"); go.type = "submit"; go.className = "primary"; go.textContent = "▶ Resume";
   const no = document.createElement("button"); no.type = "button"; no.textContent = "cancel"; no.onclick = hideCtlPanel;
   no.dataset.dismiss = "";
@@ -3075,6 +3100,7 @@ function showRetryForm(F){
       if (!Number.isFinite(n) || n < 0 || n > MAX_TIME_MIN){ err.textContent = "Time cap: minutes, 0 to "+MAX_TIME_MIN+" (0 = no cap)."; return; }
       body.time_cap_minutes = n;
     }
+    if (mode.value !== curMode) body.model_mode = mode.value;
     resumeFloor(F, body);
   };
   p.appendChild(form);

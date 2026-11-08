@@ -12,6 +12,7 @@ influence a build — it only describes what already happened.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
@@ -514,3 +515,49 @@ def _norm_status(status: Any) -> str:
     if "fail" in s:
         return "fail"
     return "error" if "error" in s else s
+
+
+# --- progress lines (foundry.progress) -> `log` events ------------------------- #
+
+LOG_TEXT_MAX = 240
+# Model-call start/done lines (and unrecognized ones) are the chatty kinds: the
+# server throttles them. The rest are rare and always reported.
+LOG_CHATTY = frozenset({"call", "info"})
+_LOG_STAMP = re.compile(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*")
+_LOG_TAG = re.compile(r"^\[autoresume\]\s*", re.I)
+_SELF_CHECK = re.compile(r"^self-check\s+(?P<ticket>\S+?):\s+(?P<verdict>\w+)", re.I)
+_CALL = re.compile(r"^(?P<phase>start|done)\s+model call\b", re.I)
+_LOG_HEAD = {
+    "retry": "retry",
+    "warning": "warning",
+    "warning:": "warning",
+    "escalate": "escalate",
+    "escalation": "escalate",
+    "waiting": "wait",
+}
+
+
+def event_for_log_line(line: str) -> dict[str, Any] | None:
+    """A ``log`` event for one progress line, or ``None`` for a blank one.
+
+    ``kind`` is call / self-check / retry / warning / escalate / wait / info; a
+    self-check line also carries ``ticket`` and ``verdict`` (red / green / …), a
+    model-call line its ``phase`` (start / done). The timestamp is stripped and the
+    text cut to :data:`LOG_TEXT_MAX`."""
+    text = _LOG_STAMP.sub("", " ".join(str(line or "").split()))
+    if not text:
+        return None
+    ev: dict[str, Any] = {"type": "log"}
+    if tagged := _LOG_TAG.match(text):
+        text = text[tagged.end() :]
+        ev["kind"] = "wait"
+    elif m := _SELF_CHECK.match(text):
+        ev.update(kind="self-check", ticket=m["ticket"], verdict=m["verdict"].lower())
+    elif m := _CALL.match(text):
+        ev.update(kind="call", phase=m["phase"].lower())
+    else:
+        ev["kind"] = _LOG_HEAD.get(text.split(None, 1)[0].lower(), "info")
+    if len(text) > LOG_TEXT_MAX:
+        text = text[: LOG_TEXT_MAX - 1].rstrip() + "…"
+    ev["text"] = text
+    return ev

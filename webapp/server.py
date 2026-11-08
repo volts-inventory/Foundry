@@ -1604,7 +1604,7 @@ class Handler(BaseHTTPRequestHandler):
     def _serve_static(self, rel: str) -> None:
         rel = rel.lstrip("/") or "index.html"
         target = (_STATIC / rel).resolve()
-        if not str(target).startswith(str(_STATIC.resolve())) or not target.is_file():
+        if not target.is_relative_to(_STATIC.resolve()) or not target.is_file():
             self._json(404, {"error": "not found"})
             return
         ctype = {
@@ -1909,7 +1909,7 @@ class Handler(BaseHTTPRequestHandler):
         """Resume a stopped, paused, halted, token-capped, errored or interrupted
         build from its durable checkpoint, optionally with a new token cap and fix
         budget. Pending nodes continue; a halted run re-enters at the boundary that
-        halted it (``cli._resume_seed``) with a fresh fix budget."""
+        halted it (``cli.invoke._resume_seed``) with a fresh fix budget."""
         body = self._read_json()
         with _LOCK:
             known = _PROJECTS.get(pid)

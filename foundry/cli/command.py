@@ -7,6 +7,7 @@ import os
 import sys
 
 from foundry.agents.implementation import DEFAULT_WORKERS
+from foundry.cli import spec
 from foundry.cli.defaults import (
     _MOCK_BACKEND,
     ADAPTERS,
@@ -19,7 +20,6 @@ from foundry.cli.defaults import (
 )
 from foundry.cli.result import _TRUST_POSTURE
 from foundry.cli.runner import run
-from foundry.cli.spec import _load_spec, _request_from_spec
 from foundry.cli.wiring import _TIER_ENV
 from foundry.graph.supervisor import MODE_ASSISTANT
 from foundry.modes import MODEL_MODES
@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     # (exit 2); a deep ValueError from the run itself is not masked. The resolved text
     # is handed to run() (which seeds it onto `spec`).
     try:
-        spec_text = _load_spec(spec_paths) if spec_paths else None
+        spec_text = spec._load_spec(spec_paths) if spec_paths else None
     except (FileNotFoundError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -293,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if not request:
         if spec_text:
-            request = _request_from_spec(spec_text)
+            request = spec._request_from_spec(spec_text)
         else:
             print(
                 "usage: python -m foundry.cli "

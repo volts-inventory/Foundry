@@ -54,12 +54,14 @@ from foundry import progress
 from foundry.agents._common import cas_uri, emit_artifact, journal_entry, persist_prose
 from foundry.agents.plan_contracts import CompileResult
 from foundry.agents.planner.assembly import _assemble, _Fit, _Frame
-from foundry.agents.planner.build import _DROPPED_KEY as _DROPPED_KEY
 from foundry.agents.planner.build import (
+    _DROPPED_KEY,
     _EPIC_KEY,
     _build_adrs,
+    _build_criterion,
     _build_epics,
     _build_interfaces,
+    _build_tickets,
     _contract_text,
     _Epic,
     _epic_content,
@@ -67,23 +69,21 @@ from foundry.agents.planner.build import (
     _interfaces_text,
     _plan_brief,
     _run_parallel,
+    _safe_ticket_ids,
     _tagged,
 )
-from foundry.agents.planner.build import _build_criterion as _build_criterion
-from foundry.agents.planner.build import _build_tickets as _build_tickets
-from foundry.agents.planner.build import _safe_ticket_ids as _safe_ticket_ids
-from foundry.agents.planner.checks import _bdd_quoting as _bdd_quoting
-from foundry.agents.planner.checks import _builtin_method_findings as _builtin_method_findings
 from foundry.agents.planner.checks import (
+    _bdd_quoting,
+    _builtin_method_findings,
     _compile,
+    _contract_findings,
+    _coverage_findings,
     _declaration_only,
     _goals,
     _goals_text,
+    _offline_scenario_findings,
     _stack_command_findings,
 )
-from foundry.agents.planner.checks import _contract_findings as _contract_findings
-from foundry.agents.planner.checks import _coverage_findings as _coverage_findings
-from foundry.agents.planner.checks import _offline_scenario_findings as _offline_scenario_findings
 from foundry.agents.planner.constraints import (
     _build_constraints,
     _ownership_from_tickets,
@@ -92,8 +92,8 @@ from foundry.agents.planner.constraints import (
     _scope_decision,
     _stack_constraints,
     _triage,
+    ticket_owner,
 )
-from foundry.agents.planner.constraints import ticket_owner as ticket_owner
 from foundry.agents.planner.delta import (
     _affected,
     _delta_text,
@@ -103,15 +103,17 @@ from foundry.agents.planner.delta import (
     _rejected,
     _structural_findings,
 )
-from foundry.agents.planner.folds import _add_contract_deps as _add_contract_deps
-from foundry.agents.planner.folds import _add_read_deps as _add_read_deps
-from foundry.agents.planner.folds import _drop_self_consumes as _drop_self_consumes
-from foundry.agents.planner.folds import _fold_test_bindings as _fold_test_bindings
-from foundry.agents.planner.folds import _one_step_module_per_ticket as _one_step_module_per_ticket
-from foundry.agents.planner.folds import _own_scenario_bindings as _own_scenario_bindings
-from foundry.agents.planner.folds import _own_stack_files as _own_stack_files
-from foundry.agents.planner.folds import _wire_entrypoint as _wire_entrypoint
-from foundry.agents.planner.folds import stack_files as stack_files
+from foundry.agents.planner.folds import (
+    _add_contract_deps,
+    _add_read_deps,
+    _drop_self_consumes,
+    _fold_test_bindings,
+    _one_step_module_per_ticket,
+    _own_scenario_bindings,
+    _own_stack_files,
+    _wire_entrypoint,
+    stack_files,
+)
 from foundry.agents.planner.prior import (
     _Draft,
     _draft_prior,
@@ -135,6 +137,7 @@ from foundry.agents.planner.prompt import (
     _GATE,
     _base,
     _criteria_text,
+    _declared_criteria_text,
     _intake_text,
     _retrieve_spans,
     _revision_block,
@@ -143,7 +146,6 @@ from foundry.agents.planner.prompt import (
     _user_content,
     latest_spec_failure,
 )
-from foundry.agents.planner.prompt import _declared_criteria_text as _declared_criteria_text
 from foundry.agents.planner.readers import _int, _objs, _section, _str, _strs
 from foundry.agents.planner.schema import (
     DELIVERABLES,
@@ -152,20 +154,19 @@ from foundry.agents.planner.schema import (
     EPIC_KIND,
     EPIC_SCHEMA,
     EPIC_SOP,
+    MAX_EPIC_TICKETS,
+    MAX_EPICS,
     MAX_PLAN_TICKETS,
     MAX_TICKETS,
     NODE_ID,
+    PLAN_SCHEMA,
     ROLE,
     SOP,
     TICKET_KIND,
     TIER,
     _plan_schema,
 )
-from foundry.agents.planner.schema import MAX_EPIC_TICKETS as MAX_EPIC_TICKETS
-from foundry.agents.planner.schema import MAX_EPICS as MAX_EPICS
-from foundry.agents.planner.schema import PLAN_SCHEMA as PLAN_SCHEMA
-from foundry.agents.planner.stack import _generated_tickets, _stack_decision
-from foundry.agents.planner.stack import _python_deps_rule as _python_deps_rule
+from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
 from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.gates import JudgmentProvenance
@@ -196,7 +197,27 @@ __all__ = [
     "SOP",
     "TICKET_KIND",
     "TIER",
+    "_DROPPED_KEY",
+    "_add_contract_deps",
+    "_add_read_deps",
+    "_bdd_quoting",
+    "_build_criterion",
+    "_build_tickets",
+    "_builtin_method_findings",
+    "_contract_findings",
+    "_coverage_findings",
+    "_declared_criteria_text",
+    "_drop_self_consumes",
+    "_fold_test_bindings",
+    "_offline_scenario_findings",
+    "_one_step_module_per_ticket",
+    "_own_scenario_bindings",
+    "_own_stack_files",
+    "_python_deps_rule",
+    "_safe_ticket_ids",
+    "_wire_entrypoint",
     "make_planner_node",
+    "stack_files",
     "ticket_owner",
 ]
 

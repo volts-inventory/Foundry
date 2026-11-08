@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from foundry.cli.result import _result
+from foundry.cli import result
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
 from foundry.schemas.gates import FixPass, GateResult, GateStatus
 
@@ -205,7 +205,7 @@ def _draft_on_stop(
         draft, _ = _write_draft_on_halt(
             state,
             output_dir,
-            gate_findings=_result(request, thread_id, state).gate_findings,
+            gate_findings=result._result(request, thread_id, state).gate_findings,
             resolve=resolve,
             resolve_blob=resolve_blob,
             stopped=str(exc).splitlines()[0][:300],

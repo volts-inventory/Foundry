@@ -37,7 +37,7 @@ from foundry.state.seq import Seq
 from foundry.state.tree_sha import tree_sha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from foundry.graph.gate_wiring.diffs import BlobResolver
     from foundry.state.factory_state import FactoryState
@@ -593,26 +593,6 @@ def materialize_workdir(
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.
     return tree_sha(dest, toolchain_digest=_toolchain_digest(stack))
-
-
-def apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
-    """Write predecessor slices onto a fresh clone (content ⇒ write, None ⇒
-    delete). Paths are containment-checked defensively even though they come
-    from our own CAS (same posture as the integration boundary, D-R1-03)."""
-    root = worktree.resolve()
-    for rel, content in sorted(overlay.items()):
-        pure = PurePosixPath(rel)
-        if pure.is_absolute() or ".." in pure.parts:
-            raise ValueError(f"overlay path {rel!r} escapes the worktree")
-        target = (root / pure).resolve()
-        if not str(target).startswith(str(root)):
-            raise ValueError(f"overlay path {rel!r} escapes the worktree")
-        if content is None:
-            if target.is_file():
-                target.unlink()
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
 
 
 def _text_files(root: Path) -> dict[str, str]:

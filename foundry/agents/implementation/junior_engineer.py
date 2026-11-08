@@ -31,7 +31,7 @@ from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.canonical import content_digest
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
-from foundry.graph.gate_wiring import apply_overlay
+from foundry.fs import apply_overlay
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import FixPass, GateResult, GateStatus

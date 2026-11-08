@@ -152,7 +152,8 @@ class CheckBase:
         """(the materialized tree, every ticket's planned files). Raises
         :class:`~foundry.graph.gate_wiring.MaterializationError` when the tree
         cannot be built."""
-        from foundry.graph.gate_wiring import apply_overlay, materialize_workdir, planned_files
+        from foundry.fs import apply_overlay
+        from foundry.graph.gate_wiring import materialize_workdir, planned_files
 
         with self._lock:
             if self._built is None:

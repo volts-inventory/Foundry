@@ -18,42 +18,19 @@ from typing import TYPE_CHECKING, Any, cast
 from foundry import progress
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import TICKET_KIND
+from foundry.cli import defaults, doubles, invoke, output, wiring
+from foundry.cli import result as cli_result
+from foundry.cli import spec as cli_spec
 from foundry.cli.defaults import (
     _MOCK_BACKEND,
     AUTO_SLOTS_CAP,
     BACKENDS,
     MODES,
     SCOPES,
-    _default_adapter_for,
 )
-from foundry.cli.doubles import _PASSING_DIFF, _judgment_anchors, _materialization_seam
-from foundry.cli.invoke import (
-    RunCrashed,
-    _has_pending_run,
-    _invoke_with_autoresume,
-    _max_epoch,
-    _prior_values,
-    _resume_seed,
-)
-from foundry.cli.output import (
-    _draft_best,
-    _draft_on_stop,
-    _draft_status,
-    _has_draft_tree,
-    _write_draft_on_halt,
-    _write_output_tree,
-)
-from foundry.cli.result import RunResult, _result
-from foundry.cli.spec import _load_spec
-from foundry.cli.wiring import (
-    _build_level_proxy,
-    _build_proxy,
-    _gate_verifier,
-    _level_adapter,
-    _resolve_coding_adapter,
-    _tier_models,
-    _zone_b_signer,
-)
+from foundry.cli.doubles import _PASSING_DIFF
+from foundry.cli.invoke import RunCrashed
+from foundry.cli.result import RunResult
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import DurableBackends, durable_backends, state_dir_from_env
@@ -318,7 +295,7 @@ def run(
         model_mode=model_mode,
         levels=levels,
         backend=backend,
-        cloud_models=_tier_models(backend),
+        cloud_models=wiring._tier_models(backend),
         cloud_backends=BACKENDS,
         local_url=local_url,
         local_model=local_model,
@@ -338,7 +315,7 @@ def run(
             f"{fix_policy.window_ceiling} passes (set --time-cap to fix for longer)",
             file=sys.stderr,
         )
-    spec_text = _load_spec(spec)
+    spec_text = cli_spec._load_spec(spec)
     base_root, thread_id = _change_base(base_dir, request, thread_id)
     # Single-host durability seam (durability/persistence.py): when
     # FOUNDRY_STATE_DIR is SET, the checkpointer,
@@ -364,23 +341,23 @@ def run(
         records = GlobalRecords()
         ckpt = FoundryCheckpointer()
     if level_table is None:
-        proxy = _build_proxy(backend, local_thinking=local_thinking)
+        proxy = wiring._build_proxy(backend, local_thinking=local_thinking)
         # --adapter omitted (None) ⇒ DERIVE the substrate from the backend so a real
         # brain writes real code (mock→stub, any real backend→raw-react). An explicit
         # adapter — a name OR an injected WorkerAdapter instance (tests) — wins.
         if adapter is None:
-            adapter = _default_adapter_for(backend)
-        coding_adapter = _resolve_coding_adapter(
+            adapter = defaults._default_adapter_for(backend)
+        coding_adapter = wiring._resolve_coding_adapter(
             adapter,
             proxy=proxy,
             thread_id=thread_id,
             activity_cb=activity_cb,
-            tier_models=_tier_models(backend),
+            tier_models=wiring._tier_models(backend),
             native_tools=native_tools,
         )
     else:
-        proxy = _build_level_proxy(level_table, local_thinking=local_thinking)
-        coding_adapter = _level_adapter(
+        proxy = wiring._build_level_proxy(level_table, local_thinking=local_thinking)
+        coding_adapter = wiring._level_adapter(
             adapter,
             backend=backend,
             levels=level_table,
@@ -413,7 +390,7 @@ def run(
     # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
     # gate produces is sealed under the same per-run key the runner verifies.
     runner = TwoZoneGateRunner(
-        _zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV, seal_key=os.urandom(32)
+        wiring._zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV, seal_key=os.urandom(32)
     )
 
     # -- materialization seam (Phase-1 2b) ------------------------------------
@@ -428,7 +405,7 @@ def run(
     # authors no diff; the reviewer then fail-closes honestly — a real build needs
     # a real coding adapter.)
     real_artifacts = backend != _MOCK_BACKEND
-    _resolve, _resolve_blob = _materialization_seam(
+    _resolve, _resolve_blob = doubles._materialization_seam(
         real_artifacts, store=store, diff_body=diff_body
     )
     resolve = resolve or _resolve
@@ -447,7 +424,7 @@ def run(
     configurable: dict[str, Any] = {
         "thread_id": thread_id,
         "verdict_nonce": f"N-{thread_id}",
-        **_judgment_anchors(real_artifacts),
+        **doubles._judgment_anchors(real_artifacts),
     }
     config: RunnableConfig = {
         "configurable": configurable,
@@ -457,7 +434,7 @@ def run(
 
     # Install the dev gate-write verifier so the REAL merge_gates admits the
     # runner-attested verdicts (D4); reset its token in finally so it never leaks.
-    token = set_gate_write_verifier(_gate_verifier(records))
+    token = set_gate_write_verifier(wiring._gate_verifier(records))
     with (
         progress.sink(log_cb) if log_cb is not None else contextlib.nullcontext(),
         tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
@@ -503,9 +480,9 @@ def run(
             # The epoch counter is in-memory: a process continuing this thread's
             # checkpoint must mint Seqs above the run's records, or a re-run gate's
             # verdict would rank below the stale one it supersedes.
-            prior = _prior_values(app, config)
+            prior = invoke._prior_values(app, config)
             if prior:
-                rt.epochs.raise_floor(thread_id, _max_epoch(prior, thread_id))
+                rt.epochs.raise_floor(thread_id, invoke._max_epoch(prior, thread_id))
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
             # nodes read it off the `spec` channel to ground the IntentBrief/PRD.
@@ -636,11 +613,11 @@ def run(
                             result = {**result, "_org": org}
                     _pc(node, scope, phase=phase, result=result)
 
-            start = _resume_seed(app, config, seed)
-            if meter is not None and start is seed and not _has_pending_run(app, config):
+            start = invoke._resume_seed(app, config, seed)
+            if meter is not None and start is seed and not invoke._has_pending_run(app, config):
                 meter.reset()  # a fresh run, not a resumed one: its spend starts at zero
             try:
-                final = _invoke_with_autoresume(
+                final = invoke._invoke_with_autoresume(
                     app,
                     start,
                     config,
@@ -656,7 +633,7 @@ def run(
             except Exception as exc:
                 # A capped, stopped or unavailable run still hands back its best tree.
                 if output_dir is not None:
-                    _draft_on_stop(
+                    output._draft_on_stop(
                         app,
                         config,
                         exc,
@@ -679,7 +656,7 @@ def run(
                 ckpt.close()
 
     final_state = final
-    result = _result(
+    result = cli_result._result(
         request,
         thread_id,
         final_state,
@@ -701,14 +678,14 @@ def run(
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
         # terminal gates ran against) and write the real source files to disk.
         # A HALTED run writes a best-effort DRAFT instead (see the elif below).
-        output_root = _write_output_tree(
+        output_root = output._write_output_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
     elif output_dir is not None and not result.passed:
         # HALTED with an output dir: still hand back a usable DRAFT (the best attempt
         # + a DRAFT-STATUS.md saying what's failing), so the run is never empty-handed.
-        draft_root, status = _write_draft_on_halt(
+        draft_root, status = output._write_draft_on_halt(
             final_state,
             output_dir,
             gate_findings=result.gate_findings,
@@ -716,11 +693,11 @@ def run(
             resolve_blob=resolve_blob,
         )
         result = replace(result, draft_root=draft_root, draft_status=status if draft_root else None)
-    elif not result.passed and _has_draft_tree(final_state):
-        status = _draft_status(
+    elif not result.passed and output._has_draft_tree(final_state):
+        status = output._draft_status(
             final_state,
             gate_findings=result.gate_findings,
-            best=_draft_best(final_state, resolve),
+            best=output._draft_best(final_state, resolve),
         )
         result = replace(result, draft_status=status)
     manifest_root = output_dir if (result.output_root or result.draft_root) else manifest_dir

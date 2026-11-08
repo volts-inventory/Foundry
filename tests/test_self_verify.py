@@ -317,7 +317,7 @@ def test_plan_wave_count() -> None:
 def test_the_default_fix_budget_is_three() -> None:
     # None means "the model mode's default"; with no mode (cloud) that is three.
     assert inspect.signature(cli.run).parameters["max_fix_attempts"].default is None
-    assert cli.DEFAULT_FIX_ATTEMPTS["cloud"] == 3
+    assert cli.runner.DEFAULT_FIX_ATTEMPTS["cloud"] == 3
 
 
 # ---- the agent sandbox can run the stack's commands --------------------------------

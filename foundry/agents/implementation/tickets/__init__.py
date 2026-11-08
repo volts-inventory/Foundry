@@ -50,11 +50,11 @@ from foundry.agents.implementation.junior_engineer import (
 )
 from foundry.agents.implementation.senior_engineer import NODE_ID as SENIOR_NODE_ID
 from foundry.agents.implementation.stubs import is_stub
-from foundry.agents.implementation.tickets.adapter import EmptyTicketError as EmptyTicketError
 from foundry.agents.implementation.tickets.adapter import (
-    _require_scope_written as _require_scope_written,
+    EmptyTicketError,
+    _require_scope_written,
+    _ScopedAdapter,
 )
-from foundry.agents.implementation.tickets.adapter import _ScopedAdapter
 from foundry.agents.implementation.tickets.constants import (
     _CRITERION_KIND,
     _DEFAULT_COST_BUDGET_MICROUSD,
@@ -73,9 +73,10 @@ from foundry.agents.implementation.tickets.constants import (
     TICKET_KIND,
 )
 from foundry.agents.implementation.tickets.contracts import (
-    _flag_contract_duplicates as _flag_contract_duplicates,
+    _flag_contract_duplicates,
+    contract_duplicates,
+    contract_members,
 )
-from foundry.agents.implementation.tickets.contracts import contract_duplicates, contract_members
 from foundry.agents.implementation.tickets.escalation import (
     _escalated_packet,
     _escalation_context,
@@ -104,20 +105,18 @@ from foundry.agents.implementation.tickets.restart import (
     _restart_prep,
     _retry_restarts,
 )
-from foundry.agents.implementation.tickets.rules import CHECK_RULE as CHECK_RULE
 from foundry.agents.implementation.tickets.rules import (
+    CHECK_RULE,
     group_failures_by_ticket,
+    scenario_rules,
+    scenario_verify,
+    unwritten_ticket_files,
     verify_commands,
     verify_rules,
 )
-from foundry.agents.implementation.tickets.rules import scenario_rules as scenario_rules
-from foundry.agents.implementation.tickets.rules import scenario_verify as scenario_verify
-from foundry.agents.implementation.tickets.rules import (
-    unwritten_ticket_files as unwritten_ticket_files,
-)
-from foundry.agents.implementation.tickets.scope import _LOCKFILES as _LOCKFILES
-from foundry.agents.implementation.tickets.scope import _is_gate_input as _is_gate_input
 from foundry.agents.implementation.tickets.scope import (
+    _LOCKFILES,
+    _is_gate_input,
     in_write_scope,
     note_fix_writes,
     trim_to_write_scope,
@@ -141,12 +140,12 @@ from foundry.agents.implementation.tickets.tasks import (
 from foundry.agents.implementation.tickets.waves import (
     _order_after_integrated,
     _round_robin,
+    _scopes_overlap,
     next_wave,
     pending_wave,
     plan_wave_count,
     tickets_settled,
 )
-from foundry.agents.implementation.tickets.waves import _scopes_overlap as _scopes_overlap
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
     ESCALATE_DECLINED_TRIAGE,
@@ -163,7 +162,7 @@ from foundry.execution.work_pool import (
     TaskEventHook,
     allocate_lineage_quotas,
 )
-from foundry.graph.gate_wiring import apply_overlay
+from foundry.fs import apply_overlay
 from foundry.proxy.token_meter import RunCapExceeded
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
@@ -189,11 +188,18 @@ if TYPE_CHECKING:
     ArtifactResolver = Callable[[Artifact], Any]
 
 __all__ = [
+    "CHECK_RULE",
     "CONTRACT_DUP_TRIAGE",
     "CONTRACT_KIND",
     "DEFAULT_WORKERS",
     "NODE_ID",
     "TICKET_KIND",
+    "_LOCKFILES",
+    "EmptyTicketError",
+    "_flag_contract_duplicates",
+    "_is_gate_input",
+    "_require_scope_written",
+    "_scopes_overlap",
     "built_task_ids",
     "cap_stopped",
     "contract_duplicates",
@@ -209,12 +215,15 @@ __all__ = [
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
+    "scenario_rules",
+    "scenario_verify",
     "stopped_tickets",
     "task_from_ticket",
     "task_id_for_ticket",
     "tickets_settled",
     "tier_for",
     "trim_to_write_scope",
+    "unwritten_ticket_files",
     "verify_commands",
     "verify_rules",
 ]

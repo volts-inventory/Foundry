@@ -43,10 +43,6 @@ ALL model egress stays behind the proxy (L6) — this module never imports
 as an :class:`ExternalAction` on the ``actions`` channel (FG2).
 """
 
-# Re-exports: callers (and tests) import these names from the package path, private
-# ones included, so the imports below are kept though only __all__ names are public.
-# ruff: noqa: F401
-
 from __future__ import annotations
 
 from foundry.cli.command import main, parse_ticket_tiers, parse_workers
@@ -91,7 +87,47 @@ from foundry.cli.wiring import (
     _tier_models,
     make_coding_adapter,
 )
-from foundry.graph.factory_graph import build_factory_graph
-from foundry.modes import DEFAULT_FIX_ATTEMPTS
 
-__all__ = ["MODES", "RunResult", "main", "run"]
+__all__ = [
+    "ADAPTERS",
+    "AUTO_SLOTS_CAP",
+    "BACKENDS",
+    "MODES",
+    "SCOPES",
+    "_DIFF_BODY_URI",
+    "_KEY",
+    "_KEY_ID",
+    "_LINEAGE_REV",
+    "_MOCK_BACKEND",
+    "_PASSING_DIFF",
+    "_SCANNER_REV",
+    "_SCRIPTS",
+    "_SPEC_MAX_BYTES",
+    "RunCrashed",
+    "RunResult",
+    "_build_proxy",
+    "_default_adapter_for",
+    "_default_tier_models",
+    "_detailed_artifacts",
+    "_invoke_with_autoresume",
+    "_judgment_anchors",
+    "_load_spec",
+    "_materialization_seam",
+    "_max_epoch",
+    "_request_from_spec",
+    "_resolve_coding_adapter",
+    "_synthetic_resolve",
+    "_synthetic_resolve_blob",
+    "_tier_models",
+    "_write_draft_on_halt",
+    "_write_output_tree",
+    "env_local_model",
+    "env_local_url",
+    "env_max_slots",
+    "fix_until_cap_for",
+    "main",
+    "make_coding_adapter",
+    "parse_ticket_tiers",
+    "parse_workers",
+    "run",
+]

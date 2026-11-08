@@ -44,7 +44,7 @@ def _patchable(
 
 def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
     """What the Spec gate checks of the criteria themselves, beside the critique,
-    run over the entries it would materialize (``gate_wiring._criteria_list``)."""
+    run over the entries it would materialize (``gate_wiring.materialize._criteria_list``)."""
     if not criteria:
         return ("criteria set is empty",)
     out: list[str] = []

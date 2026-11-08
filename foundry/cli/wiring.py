@@ -8,14 +8,13 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry import progress
+from foundry.cli import defaults, doubles
 from foundry.cli.defaults import (
     _DEFAULT_ADAPTER,
     _MOCK_BACKEND,
     ADAPTERS,
     BACKENDS,
-    _default_adapter_for,
 )
-from foundry.cli.doubles import _SCRIPTS
 from foundry.execution.adapter_contract import current_packet_tier
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, ZoneBSigner
@@ -248,7 +247,7 @@ def _build_proxy(backend: str, *, local_thinking: str | None = None) -> ModelPro
     signer = _zone_b_signer()
     drift = _drift_policy()
     if backend == _MOCK_BACKEND:
-        tx = MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+        tx = MockTransport.scripted(dict(doubles._SCRIPTS), default_verdict="approve")
         return ModelProviderProxy(
             tx, signer=signer, drift_policy=drift, local_thinking=local_thinking
         )
@@ -267,7 +266,7 @@ def _build_proxy(backend: str, *, local_thinking: str | None = None) -> ModelPro
 def _cloud_transport(backend: str) -> ProviderTransport:
     """The egress of one cloud level ("mock" is the scripted keyless double)."""
     if backend == _MOCK_BACKEND:
-        return MockTransport.scripted(dict(_SCRIPTS), default_verdict="approve")
+        return MockTransport.scripted(dict(doubles._SCRIPTS), default_verdict="approve")
     from foundry.proxy.cli_transports import transport_for
 
     return transport_for(cast("BackendName", backend))
@@ -320,7 +319,7 @@ def _level_adapter(
     cloud = local
     if cloud_models:
         cloud = _resolve_coding_adapter(
-            adapter if adapter is not None else _default_adapter_for(backend),
+            adapter if adapter is not None else defaults._default_adapter_for(backend),
             proxy=proxy,
             thread_id=thread_id,
             activity_cb=activity_cb,

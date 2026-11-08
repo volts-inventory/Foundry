@@ -159,7 +159,7 @@ def test_a_run_halted_in_planning_has_no_draft_status(monkeypatch: pytest.Monkey
     import foundry.cli as cli
 
     # An empty plan fails the Spec gate before any ticket is built.
-    monkeypatch.setattr(cli.wiring, "_SCRIPTS", {"You are the Planner": "{}"})
+    monkeypatch.setattr(cli.doubles, "_SCRIPTS", {"You are the Planner": "{}"})
     result = run("build a tiny service", thread_id="cli-status-plan-halt", max_fix_attempts=1)
 
     assert result.passed is False and result.gate_statuses.get("spec") is GateStatus.FAIL

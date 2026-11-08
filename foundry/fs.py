@@ -5,7 +5,8 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-from pathlib import Path
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 
 
 def force_rmtree(root: Path) -> None:
@@ -30,3 +31,24 @@ def _chmod_dir_nofollow(path: str) -> None:
             os.fchmod(fd, 0o700)
         finally:
             os.close(fd)
+
+
+def apply_overlay(worktree: Path, overlay: Mapping[str, str | None]) -> None:
+    """Write predecessor slices onto a fresh clone (content ⇒ write, None ⇒
+    delete). Paths are containment-checked defensively even though they come
+    from our own CAS (same posture as the integration boundary, D-R1-03)."""
+    root = worktree.resolve()
+    for rel, content in sorted(overlay.items()):
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        target = (root / pure).resolve()
+        # Not a string prefix: a symlink to sibling /wt2 must not pass for root /wt.
+        if not target.is_relative_to(root):
+            raise ValueError(f"overlay path {rel!r} escapes the worktree")
+        if content is None:
+            if target.is_file():
+                target.unlink()
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")

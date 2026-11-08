@@ -37,18 +37,11 @@ What this module is careful about (the invariants the next waves reuse):
   latch); a flake-quarantine ERROR (N=2 split) does NOT fail the boundary.
 """
 
-# Re-exports: callers (and tests) import these names from the package path, private
-# ones included, so the imports below are kept though only __all__ names are public.
-# ruff: noqa: F401
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from foundry.graph.gate_wiring.best import (
-    keep_best,
-    materialize_best,
-)
+from foundry.graph.gate_wiring.best import keep_best, materialize_best
 from foundry.graph.gate_wiring.diffs import (
     FeatureDiffBodyError,
     MaterializationError,
@@ -61,11 +54,7 @@ from foundry.graph.gate_wiring.diffs import (
     _parse_addition_diff,
     _parse_patch_diff,
 )
-from foundry.graph.gate_wiring.fix_policy import (
-    FIX_STOP_TRIAGE,
-    FixPolicy,
-    fix_stop,
-)
+from foundry.graph.gate_wiring.fix_policy import FIX_STOP_TRIAGE, FixPolicy, fix_stop
 from foundry.graph.gate_wiring.ledger import (
     RESTARTED_TRIAGE,
     REVERT_SKIPPED_TRIAGE,
@@ -96,7 +85,6 @@ from foundry.graph.gate_wiring.materialize import (
     _scaffold_manifest,
     _with_base_features,
     _write_sources,
-    apply_overlay,
     contract_paths,
     integrated_files,
     lift_epoch,
@@ -156,41 +144,109 @@ from foundry.graph.gate_wiring.runs import (
     wave_stack,
     wave_typecheck,
 )
-from foundry.graph.gate_wiring.wave_check import (
-    NO_FIX_PROGRESS_TRIAGE,
-    WaveBuildCheck,
-)
+from foundry.graph.gate_wiring.wave_check import NO_FIX_PROGRESS_TRIAGE, WaveBuildCheck
 
 if TYPE_CHECKING:
     from foundry.graph.gate_wiring.diffs import BlobResolver
     from foundry.graph.gate_wiring.materialize import ArtifactResolver
 
 __all__ = [
+    "ADVANCE",
     "BUILD_BOUNDARY",
+    "BUILD_TEST_BOUNDARY",
     "BUILD_TEST_SMOKE_BOUNDARY",
     "CRITERIA_CRITIQUE_KIND",
     "CRITERION_KIND",
     "ESCALATE",
     "FEATURE_DIFF_KIND",
+    "FIX",
+    "FIX_STOP_TRIAGE",
+    "GATE_INPUT_FILES",
+    "HALT",
+    "NO_FIX_PROGRESS_TRIAGE",
+    "PIP_MANIFESTS",
+    "RESET_PREFIX",
+    "RESTART",
+    "RESTARTED_TRIAGE",
+    "RESTART_PREFIX",
+    "REVERT_SKIPPED_TRIAGE",
+    "SPEC_BOUNDARY",
+    "TICKET_KIND",
+    "_BOUNDARY_GATES",
+    "_PY_FRAME",
+    "_SOURCE_LINE",
+    "_VOLATILE",
+    "ArtifactResolver",
+    "BlobResolver",
+    "FailureCluster",
     "FeatureDiffBodyError",
+    "FixPolicy",
     "MaterializationError",
     "PathContainmentError",
     "UnpinnedSmokeGate",
     "WaveBuildCheck",
+    "_DiffOps",
+    "_apply_hunks",
+    "_build_env",
+    "_build_gate",
+    "_contained_target",
+    "_criteria_list",
+    "_criteria_payload",
+    "_diff_ops",
+    "_fix_attempts",
+    "_maybe_snapshot_files",
+    "_of_kind",
+    "_outcome",
+    "_parse_addition_diff",
+    "_parse_patch_diff",
+    "_resolve_typed",
+    "_scaffold_manifest",
+    "_snapshot_blob",
+    "_unchanged_tree_recheck",
+    "_wave_test_gate",
+    "_with_base_features",
+    "_write_sources",
+    "best_entry",
     "bump_fix_attempts",
     "contract_paths",
+    "draft_best",
+    "failing_ids",
     "failing_streak",
+    "failure_clusters",
+    "failure_files",
     "fix_cap",
+    "fix_score",
+    "fix_stop",
+    "fix_window",
     "flake_quarantined",
     "gate_profile",
+    "integrated_files",
+    "keep_best",
+    "lift_epoch",
+    "materialize_best",
     "materialize_workdir",
+    "no_fix_progress",
+    "pending_restarts",
+    "pip_manifest_failure",
+    "plan_next_pass",
+    "planned_files",
     "planned_paths",
+    "regressions",
     "render_feature",
+    "restart_cluster",
+    "restart_set",
+    "restore_diff",
     "route_after_gates",
     "run_build_gate",
     "run_build_test_gates",
     "run_spec_gate",
     "settle_fix_attempts",
+    "snapshot_diff",
+    "ticket_reset",
+    "typecheck_only",
     "unbuilt_manifests",
+    "wave_scenarios",
+    "wave_stack",
     "wave_typecheck",
+    "window_passes",
 ]

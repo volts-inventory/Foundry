@@ -357,7 +357,7 @@ def test_a_hybrid_run_routes_tickets_and_calls_by_level(
 
     monkeypatch.setattr(cli.wiring, "_local_transport", _local)
     seen: dict[str, Any] = {}
-    real_graph = cli.build_factory_graph
+    real_graph = cli.runner.build_factory_graph
 
     def _graph(rt: Any, **kw: Any) -> Any:
         seen["max_fix_attempts"] = kw["max_fix_attempts"]
@@ -409,7 +409,7 @@ def test_a_run_without_a_mode_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(cli.wiring, "_local_transport", _no_local)
     seen: dict[str, Any] = {}
-    real_graph = cli.build_factory_graph
+    real_graph = cli.runner.build_factory_graph
 
     def _graph(rt: Any, **kw: Any) -> Any:
         seen["max_fix_attempts"] = kw["max_fix_attempts"]
@@ -432,7 +432,7 @@ def test_local_mode_defaults_to_three_fix_attempts_and_one_slot(
     server = FakeLocalServer()
     monkeypatch.setattr(cli.wiring, "_local_transport", lambda url: server)
     seen: dict[str, Any] = {}
-    real_graph = cli.build_factory_graph
+    real_graph = cli.runner.build_factory_graph
 
     def _graph(rt: Any, **kw: Any) -> Any:
         seen.update(kw)

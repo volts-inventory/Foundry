@@ -48,7 +48,7 @@ from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
 
 from . import cucumber
-from .bdd_scaffold import parse_feature, parse_fields, step_matches
+from .bdd_scaffold import parse_feature, parse_fields, step_captures, step_matches
 from .build import MISSING_BINARY_EXIT_CODES, commands_digest
 from .runner import ZoneAObservation, observe
 
@@ -688,6 +688,7 @@ class _StepDef:
     parser: str = ""  # "" (plain text), "parse", "cfparse", "re", ...
     function: str = ""
     params: tuple[str, ...] = ()  # parameters without a default (pytest fills them)
+    reads: frozenset[str] = frozenset()  # names the function body loads
 
 
 def _step_def(module: str, d: ast.expr) -> _StepDef | None:
@@ -735,7 +736,9 @@ def _module_step_defs(rel: str, tree: ast.Module) -> list[_StepDef]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             params = _required_params(node)
-            out.extend(replace(s, function=node.name, params=params)
+            reads = frozenset(n.id for b in node.body for n in ast.walk(b)
+                              if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load))
+            out.extend(replace(s, function=node.name, params=params, reads=reads)
                        for d in node.decorator_list if (s := _step_def(rel, d)))
     return out
 
@@ -938,6 +941,45 @@ def _unmatched_notes(defs: Iterable[_StepDef], features: Mapping[str, str]) -> l
     return out
 
 
+_PLACEHOLDER = re.compile(r"<[^<>]+>")
+
+
+def _literal_placeholder_notes(defs: Iterable[_StepDef],
+                               features: Mapping[str, str]) -> list[str]:
+    """A step function that reads a field captured from a plain Scenario's
+    ``<name>``: no Examples row fills it, so the step gets the literal text (the
+    local notes run: ``PUT /notes/<id>`` hit no note, and three fix passes chased
+    SQLAlchemy sessions instead)."""
+    plain: dict[tuple[str, str], str] = {}
+    for path, text in features.items():
+        for sc in parse_feature(text):
+            if sc.examples:
+                continue
+            for s in sc.steps:
+                if _PLACEHOLDER.search(s.text):
+                    plain.setdefault((s.kind, s.text), f"{path}::{sc.name}")
+    out: list[str] = []
+    for d in defs:
+        for (kind, line), ref in plain.items():
+            if kind != d.kind or not (got := step_captures(d.parser, d.text, line)):
+                continue
+            hit = {k: v for k, v in got.items() if k in d.reads and _PLACEHOLDER.search(v)}
+            if not hit:
+                continue
+            args = ", ".join(f"`{k}` = \"{v}\"" for k, v in hit.items())
+            out.append(
+                f"`@{d.kind}(\"{d.text}\")` ({d.module}:{d.line}) reads {args}: {ref} "
+                f"is a plain Scenario (no Examples table), so `<...>` in its step line "
+                f"\"{line}\" is literal text that pytest-bdd passes as is, never a value "
+                "it fills — a URL or query built from it names no real record. Use the "
+                "value an earlier step of the scenario created instead (the id of the "
+                "record its Given step saved, kept in context or a target_fixture), and "
+                "ignore that argument; the .feature file is gate-owned"
+            )
+            break
+    return out
+
+
 def _unprovided_notes(defs: Sequence[_StepDef], provided: set[str]) -> list[str]:
     targets = {d.target for d in defs if d.target}
     out: list[str] = []
@@ -990,7 +1032,8 @@ def step_module_notes(
     except (OSError, UnicodeDecodeError):
         return ()
     defs = sorted(_module_step_defs(module, tree), key=lambda s: s.line)
-    out = [*_duplicate_notes(defs), *(_unmatched_notes(defs, features) if features else ())]
+    out = [*_duplicate_notes(defs), *(_unmatched_notes(defs, features) if features else ()),
+           *_literal_placeholder_notes(defs, features)]
     if params:
         fixtures, star = _fixture_names(tree)
         names, shared = conftest if conftest is not None else _conftest_fixtures(root)

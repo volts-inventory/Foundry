@@ -164,3 +164,81 @@ def test_a_conftest_fixture_or_target_counts_as_provided(tmp_path: Path) -> None
     (root / "tests/conftest.py").write_text(
         "import pytest\n\n\n@pytest.fixture(name='basket')\ndef _basket():\n    return []\n")
     assert step_module_notes(root, "tests/test_t1.py") == ()
+
+
+_PLAIN_PLACEHOLDER = """\
+Feature: Notes
+
+  Scenario: AC-1
+    Given a saved note
+    When I fetch /notes/<id>
+    Then I get the note
+"""
+
+
+def _plain_project(tmp_path: Path, body: str) -> Path:
+    (tmp_path / "features").mkdir()
+    (tmp_path / "features/T-1.feature").write_text(_PLAIN_PLACEHOLDER)
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_t1.py").write_text(body)
+    return tmp_path
+
+
+def test_scaffold_keeps_a_plain_scenarios_placeholder_literal(tmp_path: Path) -> None:
+    scaffold = step_scaffold("tests/test_t1.py", {"features/T-1.feature": _PLAIN_PLACEHOLDER})
+    assert "@when(\"I fetch /notes/<id>\")\ndef when_i_fetch_notes_id(context):" in scaffold
+    assert "parsers" not in scaffold
+    assert "# <id> is literal text in this plain Scenario" in scaffold
+    root = _plain_project(tmp_path, scaffold.replace("raise NotImplementedError", "pass"))
+    run = _pytest(root)
+    assert run.returncode == 0, run.stdout
+
+
+_PLAIN_STEPS = '''\
+from pytest_bdd import given, parsers, scenarios, then, when
+
+scenarios("../features/T-1.feature")
+_seen = {}
+
+
+@given("a saved note")
+def _saved():
+    _seen["id"] = 7
+
+
+@when(parsers.parse("I fetch /notes/{id}"))
+def _fetch(id):
+    _seen["got"] = f"/notes/{id}"
+
+
+@then("I get the note")
+def _got():
+    assert _seen["got"] == "/notes/7", _seen["got"]
+'''
+
+
+def _placeholder_notes(root: Path) -> list[str]:
+    return [n for n in step_module_notes(root, "tests/test_t1.py") if "plain Scenario" in n]
+
+
+def test_static_notes_name_a_step_reading_a_plain_scenarios_placeholder(
+    tmp_path: Path,
+) -> None:
+    root = _plain_project(tmp_path, _PLAIN_STEPS)
+    run = _pytest(root)
+    assert run.returncode == 1 and "/notes/<id>" in run.stdout  # the literal text arrives
+    [note] = [n for n in static_step_notes(root, {"features/T-1.feature"}, params=False)
+              if "plain Scenario" in n]
+    assert note.startswith('`@when("I fetch /notes/{id}")` (tests/test_t1.py:')
+    assert '`id` = "<id>"' in note and "features/T-1.feature::AC-1" in note
+    # Ignoring the argument is fine, and so is an outline whose Examples fill it.
+    (root / "tests/test_t1.py").write_text(
+        _PLAIN_STEPS.replace('f"/notes/{id}"', "f\"/notes/{_seen['id']}\""))
+    assert _placeholder_notes(root) == []
+    assert _pytest(root).returncode == 0
+    (root / "tests/test_t1.py").write_text(_PLAIN_STEPS)
+    (root / "features/T-1.feature").write_text(
+        _PLAIN_PLACEHOLDER.replace("Scenario:", "Scenario Outline:")
+        + "\n    Examples:\n      | id |\n      | 7  |\n")
+    assert _placeholder_notes(root) == []
+    assert _pytest(root).returncode == 0

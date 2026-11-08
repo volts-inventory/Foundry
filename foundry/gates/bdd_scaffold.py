@@ -127,10 +127,27 @@ def parse_regex(pattern: str) -> re.Pattern[str]:
     text = _unescape_braces(pattern)
     for m in _PARSE_FIELD.finditer(text):
         out.append(re.escape(text[pos:m.start()]))
-        out.append(r"[-+]?\d+" if (m.group(2) or "") in ("d", "n") else r".+?")
+        out.append(r"([-+]?\d+)" if (m.group(2) or "") in ("d", "n") else r"(.+?)")
         pos = m.end()
     out.append(re.escape(text[pos:]))
     return re.compile("".join(out).replace("\0", r"\{").replace("\1", r"\}"))
+
+
+def step_captures(parser: str, pattern: str, line: str) -> dict[str, str] | None:
+    """Field name -> the text a step definition captures from a feature step line;
+    ``None`` when it does not match or its parser is not one this check can judge."""
+    if parser in ("parse", "cfparse"):
+        m = parse_regex(pattern).fullmatch(line)
+        names = [f.group(1) for f in _PARSE_FIELD.finditer(_unescape_braces(pattern))]
+        return None if m is None else {
+            n: v for n, v in zip(names, m.groups(), strict=True) if n}
+    if parser == "re":
+        try:
+            r = re.fullmatch(pattern, line)
+        except re.error:
+            return None
+        return None if r is None else {k: v for k, v in r.groupdict().items() if v}
+    return None
 
 
 def step_matches(parser: str, pattern: str, line: str) -> bool | None:
@@ -162,10 +179,12 @@ def _ident(name: str, taken: set[str]) -> str:
     return out
 
 
-def _pattern(step: FeatureStep) -> tuple[str, tuple[str, ...]]:
+def _pattern(step: FeatureStep, outline: bool) -> tuple[str, tuple[str, ...]]:
     """(``parsers.parse`` pattern, parameter names) for an outline step; the step's
-    own text and no parameters for a literal one."""
-    if not _PLACEHOLDER.search(step.text):
+    own text and no parameters for a literal one. A plain Scenario's ``<name>`` is
+    literal text (no Examples row fills it): a field there would hand the step the
+    string ``"<name>"`` (a request to ``/notes/<id>``, a search for ``<term>``)."""
+    if not outline or not _PLACEHOLDER.search(step.text):
         return step.text, ()
     taken: set[str] = set()
     names: dict[str, str] = {}
@@ -186,12 +205,13 @@ def scaffold_steps(features: Mapping[str, str]) -> list[tuple[FeatureStep, str, 
     order. A concrete step line an outline's pattern already matches is left to
     that pattern (two definitions would both match it)."""
     seen: dict[tuple[str, str], tuple[FeatureStep, str, tuple[str, ...]]] = {}
-    for text in features.values():
-        for sc in parse_feature(text):
-            for step in sc.steps:
-                if (step.kind, step.text) not in seen:
-                    pat, params = _pattern(step)
-                    seen[(step.kind, step.text)] = (step, pat, params)
+    scenarios = [sc for text in features.values() for sc in parse_feature(text)]
+    outlined = {(s.kind, s.text) for sc in scenarios if sc.examples for s in sc.steps}
+    for sc in scenarios:
+        for step in sc.steps:
+            if (step.kind, step.text) not in seen:
+                pat, params = _pattern(step, (step.kind, step.text) in outlined)
+                seen[(step.kind, step.text)] = (step, pat, params)
     patterns = [(s.kind, parse_regex(pat)) for s, pat, params in seen.values() if params]
     return [
         entry for (kind, text), entry in seen.items()
@@ -233,6 +253,10 @@ def step_scaffold(module: str, features: Mapping[str, str]) -> str:
                     taken)
         lines += ["", "", f"@{step.kind}({arg})",
                   f"def {fn}({', '.join(('context', *params))}):"]
+        if not params and (literal := _PLACEHOLDER.findall(step.text)):
+            lines.append(f"    # {', '.join(f'<{n}>' for n in dict.fromkeys(literal))} is "
+                         "literal text in this plain Scenario (no Examples fill it): use "
+                         "the value an earlier step stored in context")
         if step.kind != "then":
             lines.append('    # store what later steps need: context["name"] = value '
                          '(or add target_fixture="name" and return it)')

@@ -308,7 +308,7 @@ def test_classify_request_defaults_to_greenfield() -> None:
 
 def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[Any, MockTransport]:
     """A supervisor whose first plan FAILs the Spec gate (no security/abuse
-    criterion) and whose REVISION PASS plan passes it."""
+    criterion) and whose REPAIR PASS plan passes it."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
@@ -327,11 +327,11 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
             )
         )
 
-    # First match wins: the revision prompt gets the fixed plan, the first pass
+    # First match wins: the repair prompt gets the fixed plan, the first pass
     # a plan with no security/abuse criterion (a Spec FAIL); an empty delta falls
-    # back to that full re-plan.
+    # back to that repair.
     scripts = {
-        "REVISION PASS": _plan(PRD_PAYLOAD),
+        "REPAIR PASS": _plan(PRD_PAYLOAD),
         DELTA_SOP_KEY: "{}",
         **_SCRIPTS,
         PLANNER_SOP_KEY: _plan(no_abuse),
@@ -375,8 +375,8 @@ def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -
 
     planner_prompts = [json.dumps(r) for r in tx.requests if PLANNER_SOP_KEY in json.dumps(r)]
     assert len(planner_prompts) == 2
-    assert "REVISION PASS" not in planner_prompts[0]
-    assert "REVISION PASS" in planner_prompts[1]
+    assert "REPAIR PASS" not in planner_prompts[0]
+    assert "REPAIR PASS" in planner_prompts[1]
     assert "no criterion flags security_abuse=true" in planner_prompts[1]
 
     spec = [g for g in final["gates"] if g.name == "spec"]

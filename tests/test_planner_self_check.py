@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 
+from foundry import telemetry
 from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
@@ -29,6 +30,7 @@ from foundry.agents.planner import (
     _wire_entrypoint,
     make_planner_node,
 )
+from foundry.agents.planner.checks import finding_kind
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -51,6 +53,8 @@ from tests.test_planner import (
     KEY_ID,
     PLAN,
     _bodies,
+    _content,
+    _efforts,
     _epic_of,
     _epic_runtime,
     _epic_scripts,
@@ -83,22 +87,52 @@ def _uncovered() -> dict[str, Any]:
     return plan
 
 
-def test_the_in_node_revision_fixes_a_finding_without_a_gate_round_trip() -> None:
+def test_the_in_node_revision_repairs_the_failed_plan_without_a_fresh_replan() -> None:
     cas = ArtifactStore()
-    # An empty delta: the full re-plan runs as the fallback.
+    # An empty delta: the repair runs, and closes the finding.
     rt, tx = runtime_for(_uncovered(), {}, PLAN, cas=cas)
-    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 3
-    revision = json.dumps(tx.requests[2], ensure_ascii=False)
-    assert "REVISION PASS — the planner's own plan check" in revision
-    assert "Plan check findings:\\n- Must-have MH-1 ('add todo') has no covering" in revision
-    assert "id=AC-001 (ticket=T-002)" in revision  # the criteria to keep
+    assert len(tx.requests) == 3  # plan, delta, repair: no fresh re-plan
+    assert efforts == [None, "medium", "medium"]
+    repair = _content(tx.requests[2])
+    assert "REPAIR PASS — the planner's own plan check" in repair
+    assert "Plan check findings:\n- Must-have MH-1 ('add todo') has no covering" in repair
+    plan = repair.split("YOUR PREVIOUS PLAN:\n", 1)[1]
+    assert '"id": "T-002"' in plan and '"AC-001"' in plan  # the failed plan, whole
+    assert "todo/api.py" in plan
     critique = _critique(cas, writes)
     assert critique.coverage_findings == () and critique.contract_findings == ()
     assert not critique.spec_gate_blocking()
     summary = writes["agent_journal"][0].summary
     assert "Revised the plan once in-node after its own plan check: 1 -> 0 finding(s)." in summary
+    got = counts.snapshot()
+    assert got["planner.repair.closed"] == 1 and "planner.repair.fallback" not in got
+    assert got["planner.finding.goal-uncovered"] == 1
+    assert got["planner.delta.rejected"] == 1
+
+
+def test_a_repair_leaving_a_finding_falls_back_to_one_fresh_replan() -> None:
+    cas = ArtifactStore()
+    # The delta changes nothing, the repair returns the plan unchanged, the fresh
+    # re-plan fixes it.
+    rt, tx = runtime_for(_uncovered(), {}, _uncovered(), PLAN, cas=cas)
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 4
+    assert efforts == [None, "medium", "medium", None]
+    fresh = _content(tx.requests[3])
+    assert "REVISION PASS — the planner's own plan check" in fresh
+    assert "id=AC-001 (ticket=T-002)" in fresh  # the criteria to keep
+    assert fresh != _content(tx.requests[2])
+    assert _critique(cas, writes).coverage_findings == ()
+    got = counts.snapshot()
+    assert got["planner.repair.fallback"] == 1 and got["planner.replan.used"] == 1
+    assert "planner.repair.closed" not in got
 
 
 def test_a_worse_revision_is_discarded() -> None:
@@ -108,7 +142,7 @@ def test_a_worse_revision_is_discarded() -> None:
     rt, tx = runtime_for(_uncovered(), {}, worse, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 3  # one delta, then one full revision, never more
+    assert len(tx.requests) == 4  # one delta, one repair, one fresh revision, never more
     assert _critique(cas, writes).coverage_findings == (
         "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers lists MH-1.",
     )
@@ -162,10 +196,67 @@ def test_a_gate_replan_gets_its_own_in_node_rerun() -> None:
     second = node(
         _failed(first, "criterion E2-AC01: scenario has no then step"), config_for("r", step=5)
     )
+    # The gate's epic repair leaves a finding: ONE fresh re-run of that epic.
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
-    assert "Plan check findings" in json.dumps(tx.requests[5])
+    repair, fresh = (_content(r) for r in tx.requests[4:])
+    assert "REPAIR PASS — the signed Spec gate" in repair and "E2-T02" in repair
+    assert "Plan check findings" in fresh and "REPAIR PASS" not in fresh
     assert _critique(cas, second).coverage_findings == ()
     assert "Revised epic(s) E2 once in-node" in second["agent_journal"][0].summary
+
+
+def test_an_epic_repair_leaving_a_finding_falls_back_to_one_fresh_epic_call() -> None:
+    plan, replies = multi_epic_plan()
+    clean = replies["E2"]
+    replies["E2"] = _with_unscenarioed(clean)
+    fixed = ResponseScript(json.dumps(clean), match=_match("YOUR EPIC: E2", "REVISION PASS"))
+    rt, tx = _epic_runtime(*_epic_scripts(plan, replies, fixed), cas=ArtifactStore())
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
+    assert efforts[4:] == ["medium", None]
+    repair, fresh = (_content(r) for r in tx.requests[4:])
+    assert "REPAIR PASS" in repair and "E2-T03" in repair and "REPAIR PASS" not in fresh
+    got = counts.snapshot()
+    assert got["planner.repair.fallback"] == 1 and got["planner.replan.used"] == 1
+    assert got["planner.finding.ticket-no-scenarios"] == 1
+
+
+def test_finding_kinds_are_stable_slugs_of_the_check_templates() -> None:
+    assert [
+        finding_kind(f)
+        for f in (
+            "Ticket T-002 consumes contract Store.add, but no ticket implements it.",
+            "Ticket T-002 consumes contract Store.add but does not depend on T-001, which "
+            "implements it.",
+            "contract fit: Contract Store.add is implemented by 2 tickets (T-001, T-003); "
+            "exactly one ticket may implement it.",
+            "coverage: Must-have MH-1 ('add') has no covering scenario; add one whose covers "
+            "lists MH-1.",
+            "criteria-completeness critic flagged a security/abuse omission",
+            "criterion AC-1: scenario has no then step",
+            "something new",
+        )
+    ] == [
+        "contract-unimplemented",
+        "contract-dep-missing",
+        "contract-multi-impl",
+        "goal-uncovered",
+        "security-gap",
+        "scenario-steps-missing",
+        "other",
+    ]
+
+
+def test_each_fold_that_fires_is_counted_once_per_assembly() -> None:
+    plan = _copy(PLAN)
+    plan["tickets"][0]["consumes"] = ["TodoStore.add"]  # a contract it implements itself
+    rt, _ = runtime_for(plan)
+    with telemetry.counting() as counts:
+        make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert counts.snapshot()["planner.fold.drop_self_consumes"] == 1
 
 
 # ---- patch, don't re-plan: one delta call instead of a full plan call ----------------
@@ -414,7 +505,7 @@ def test_a_delta_leaving_a_finding_falls_back_to_the_full_replan() -> None:
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
-    assert "REVISION PASS — the planner's own plan check" in json.dumps(
+    assert "REPAIR PASS — the planner's own plan check" in json.dumps(
         tx.requests[2], ensure_ascii=False
     )
     assert _critique(cas, writes).contract_findings == ()
@@ -452,8 +543,8 @@ def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
 
     cas = ArtifactStore()
     broken = _two_implementers()
-    # The first pass keeps both findings (empty delta, unchanged full re-plan).
-    rt, tx = runtime_for(broken, {}, broken, _DROP_CONTRACTS_1, cas=cas)
+    # The first pass keeps both findings (empty delta, unchanged repair and re-plan).
+    rt, tx = runtime_for(broken, {}, broken, broken, _DROP_CONTRACTS_1, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
     assert len(_critique(cas, first).contract_findings) == 1
@@ -471,8 +562,8 @@ def test_a_spec_gate_failure_is_patched_with_one_delta_call() -> None:
     }
     second = node(state, config_for("r", step=5))
 
-    assert len(tx.requests) == 4 and _is_delta(tx.requests[3])
-    assert "(T-001, contracts-1)" in json.dumps(tx.requests[3])
+    assert len(tx.requests) == 5 and _is_delta(tx.requests[4])
+    assert "(T-001, contracts-1)" in json.dumps(tx.requests[4])
     assert {a.kind for a in second["artifacts"]} == {
         "prd",
         "acceptance_criterion",
@@ -509,7 +600,7 @@ def test_a_gate_delta_leaving_an_omission_falls_back_to_the_full_replan() -> Non
     }
     node(state, config_for("r", step=5))
     assert len(tx.requests) == 3 and _is_delta(tx.requests[1])
-    assert "REVISION PASS" in json.dumps(tx.requests[2])
+    assert "REPAIR PASS" in json.dumps(tx.requests[2])
 
 
 _SHOWN = {"A", "B"}

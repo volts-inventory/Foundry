@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text, demo_directives, scope_directive
+from foundry.agents.planner.build import _BRIEF_CAP
 from foundry.agents.planner.checks import _goals_text
 from foundry.agents.planner.readers import _newest_by_id, _newest_intent, _section, _strs
 from foundry.agents.planner.schema import _RETRIEVAL_K, _SPEC_GATE, _SPEC_PROMPT_CAP
@@ -182,11 +183,54 @@ def _revision_block(
     )
 
 
-def _revision_text(state: FactoryState, rt: AgentRuntime) -> str:
-    """The re-entry block (spec_fix -> planner), or "" on the first pass."""
+_SELF = ("your own criteria_review", "Flagged gaps")
+
+
+def _repair_block(
+    findings: Iterable[str], plan: str, source: tuple[str, str] = _GATE, what: str = "plan"
+) -> str:
+    """A repair of the failed ``plan`` (shown whole) rather than a re-plan from
+    scratch: it runs at lower thinking effort, so it must not re-derive the rest."""
+    return (
+        f"\n\nREPAIR PASS — {source[0]} faulted your previous {what}, shown in full below. "
+        "Correct it in place: keep every id (epics, tickets, scenarios, must-haves, "
+        "success criteria) and everything no finding faults exactly as it is, but "
+        "restructure what a finding shows is wrong in the design itself (give a contract "
+        "its one implementing ticket, add the missing dependency, split or merge the "
+        f"tickets involved). Return the FULL {what}, not only the changes; list under "
+        "criteria_review only gaps that genuinely remain.\n"
+        f"{source[1]}:\n- " + "\n- ".join(findings) + f"\n\nYOUR PREVIOUS {what.upper()}:\n{plan}"
+    )
+
+
+def _capped(value: Any) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= _BRIEF_CAP else value[:_BRIEF_CAP] + "…"
+    if isinstance(value, list):
+        return [_capped(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _capped(v) for k, v in value.items()}
+    return value
+
+
+def _payload_text(payload: dict[str, Any], tickets: list[dict[str, Any]] | None = None) -> str:
+    """A plan reply, compact but whole, for its repair: prose capped at
+    ``_BRIEF_CAP``, the review dropped (the findings replace it), ``tickets`` (the
+    checked ones) in place of the raw ones when given."""
+    shown = {k: v for k, v in payload.items() if k != "criteria_review"}
+    if tickets is not None:
+        shown["tickets"] = tickets
+    return as_text(_capped(shown))
+
+
+def _revision_text(state: FactoryState, rt: AgentRuntime, plan: str = "") -> str:
+    """The re-entry block (spec_fix -> planner), or "" on the first pass. With the
+    previous pass's ``plan`` it is a repair of that plan instead."""
     findings = latest_spec_failure(state)
     if findings is None:
         return ""
+    if plan:
+        return _repair_block(findings, plan)
     return _revision_block(
         findings, _declared_criteria_text(state, rt), _goals_text(_newest_intent(state, rt))
     )
@@ -238,12 +282,13 @@ def _user_content(
     rt: AgentRuntime,
     spans: tuple[Span, ...],
     toolchains: Sequence[Toolchain] = (),
+    plan: str = "",
 ) -> str:
     retrieved = [{"file": s.file, "lines": [s.line, s.end_line], "symbol": s.symbol} for s in spans]
     body = _intake_text(state)
     if retrieved:
         body += "\n\nRETRIEVED CODE SPANS (existing code):\n" + as_text(retrieved)
-    revision = _revision_text(state, rt)
+    revision = _revision_text(state, rt, plan)
     return (
         body
         + _stack_text(state, toolchains)

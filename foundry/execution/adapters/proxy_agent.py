@@ -230,6 +230,8 @@ _OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] =
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 # The note of a session whose final tree no check judged.
 CHECK_UNVERIFIED = "unverified"
+# The note of a session whose done was accepted only because its refusals ran out.
+CHECK_OVERRIDDEN = "done accepted with the gate still red"
 _DIGEST_PATHS = 12
 _DIGEST_ACTIONS = 5
 _DIGEST_LINES = 4
@@ -338,6 +340,8 @@ class _Loop:
     done: bool = False
     actions: list[str] = field(default_factory=list)  # _summarize of each action, in order
     last_check: str = ""  # the newest check/run outcome, for the stopped-early digest
+    # The per-write mypy's extra flags; None = no type check on write (self-check off).
+    write_check: tuple[str, ...] | None = None
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -433,6 +437,7 @@ class ProxyAgentAdapter:
             start=before if packet.prior_failures else None,
             checker=checker,
             origin=before,
+            write_check=_write_check_flags(),
         )
         turns = 0
         while turns < st.budget and not st.stopped:
@@ -466,6 +471,12 @@ class ProxyAgentAdapter:
                 st.triage.append(
                     f"{CHECK_EXHAUSTED} — partial work recorded; its last "
                     "check: " + " | ".join(last.yours[:6])[:1500]
+                )
+            elif last is not None and last.red and st.done:
+                # Not a stop: the wave check judges the tree; the record says why it ended.
+                st.triage.append(
+                    f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s); its "
+                    "last check: " + " | ".join(last.yours[:6])[:1500]
                 )
             elif last is None:
                 # Not a stop: the wave check judges the tree as for any session.
@@ -640,7 +651,7 @@ class ProxyAgentAdapter:
             elif action == "check":
                 observation = _check(st)
             else:
-                observation = self._execute(act, sandbox, worktree, st.files)
+                observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
         if action == "run":
@@ -683,6 +694,7 @@ class ProxyAgentAdapter:
         sandbox: Sandbox,
         worktree: Path,
         files: tuple[str, ...] | None = None,
+        write_check: tuple[str, ...] | None = None,
     ) -> str:
         action = act.get("action")
         if action in ("write_file", "delete_file") and files is not None:
@@ -717,8 +729,8 @@ class ProxyAgentAdapter:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             obs = f"wrote {rel} ({len(content)} chars){note}"
-            if target.suffix == ".py":
-                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix())
+            if target.suffix == ".py" and write_check is not None:
+                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix(), write_check)
             return obs
         if action == "delete_file":
             target = _contained(worktree, str(act.get("path", "")))
@@ -1092,6 +1104,7 @@ def _red_done(st: _Loop) -> str | None:
         except Exception as exc:
             progress.log(f"proxy-agent: gate check failed at done: {type(exc).__name__}: {exc}")
             return None
+        st.last_check = "check at done: " + _head(render(verdict, left=c.left))
     if not verdict.red:
         return None
     st.check_refusals += 1
@@ -1401,35 +1414,51 @@ def _located(content: str, line: int | None, col: int | None, msg: str, kind: st
     return out + "\n" + "\n".join(ctx)
 
 
-# Fast advisory type feedback: --follow-imports=silent checks only the written file
-# (~0.3s); the gate's lenient import flags; no cache written into the worktree.
-_MYPY_ADVISORY = (
-    "python",
-    "-m",
-    "mypy",
-    "--follow-imports=silent",
-    "--cache-dir=/dev/null",
-    "--no-error-summary",
-    "--ignore-missing-imports",
-    "--disable-error-code",
-    "import-not-found",
-    "--disable-error-code",
-    "import-untyped",
-)
-_MYPY_TIMEOUT_S = 5
+# Fast type/import feedback on each written .py: --follow-imports=silent reports only
+# the written file. The cache sits beside the worktree (never in the diff) and lives
+# as long as the sandbox: with /dev/null every write re-analysed every import from
+# scratch, and a project importing a few heavy libraries ran past the timeout, which
+# was dropped silently.
+_MYPY_WRITE = ("--follow-imports=silent", "--no-error-summary", "--show-error-codes")
+_MYPY_CACHE = "mypy-cache"
+_MYPY_TIMEOUT_S = 15
 _MYPY_MAX_LINES = 10
 
 
-def _mypy_advisory(sandbox: Sandbox, rel: str) -> str:
-    """mypy's errors in just-written ``rel``, as advice (a ticket's modules are
-    expected to be partial mid-session, so a type error never rejects a write).
-    Empty when mypy is absent, slow or crashes."""
+def _write_check_flags() -> tuple[str, ...] | None:
+    """The per-write mypy's flags: the Build gate's lenient mypy flags, plus
+    ``--strict`` when the stack's typecheck is strict; None when this session's
+    self-check is off."""
+    from foundry.gates.profiles import _MYPY_LENIENT
+    from foundry.gates.self_check import current_check, wanted
+
+    spec = current_check()
+    if not wanted(spec.base.settings.mode if spec is not None else None):
+        return None
+    stack = spec.base.state.get("stack") if spec is not None else None
+    strict = stack is not None and "--strict" in stack.typecheck
+    return (*shlex.split(_MYPY_LENIENT)[1:], *(("--strict",) if strict else ()))
+
+
+def _mypy_advisory(sandbox: Sandbox, rel: str, flags: Sequence[str]) -> str:
+    """mypy's errors in just-written ``rel`` on the sandbox's interpreter, as advice
+    (a ticket's modules are expected to be partial mid-session, so a type error never
+    rejects a write). Empty when mypy is absent or crashes."""
+    cache = Path(sandbox.worktree).parent / _MYPY_CACHE
+    argv = ["python", "-m", "mypy", *_MYPY_WRITE, f"--cache-dir={cache}", *flags, rel]
     try:
-        result = sandbox.run([*_MYPY_ADVISORY, rel], timeout_s=_MYPY_TIMEOUT_S)
+        result = sandbox.run(argv, timeout_s=_MYPY_TIMEOUT_S)
     except OSError:
         return ""
-    if result.timed_out or result.returncode not in (0, 1):
+    if result.timed_out:
+        return (
+            f"\nNOTE: type check timed out ({_MYPY_TIMEOUT_S}s, mypy on this file only) — "
+            "run the project's typecheck before done"
+        )
+    if result.returncode not in (0, 1):
         return ""
+    # Errors only: notes (an [annotation-unchecked] on every annotated line of an
+    # untyped function) would crowd the capped lines.
     errors = [
         ln for ln in result.stdout.splitlines() if ln.startswith(f"{rel}:") and ": error:" in ln
     ]

@@ -322,13 +322,14 @@ def test_epic_mode_coverage_spans_every_epic() -> None:
 def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: Path) -> None:
     uncovered = _plan(tickets=_tickets_with(T_002={"scenarios": _scenarios_covering("SC-1")}))
     cas = ArtifactStore()
-    # Empty deltas fall back to full re-plans; the in-node one returns the same plan,
-    # so the finding reaches the gate.
-    rt, tx = runtime_for(uncovered, {}, uncovered, {}, PLAN, cas=cas)
+    # Empty deltas fall back to repairs; the in-node repair and its fresh re-plan
+    # return the same plan, so the finding reaches the gate.
+    rt, tx = runtime_for(uncovered, {}, uncovered, uncovered, {}, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
-    assert len(tx.requests) == 3
+    assert len(tx.requests) == 4
     assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[2])
+    assert "Plan check findings:\\n- Must-have MH-1" in json.dumps(tx.requests[3])
 
     doc = _criteria_payload({"artifacts": first["artifacts"]}, cas.resolve)
     assert isinstance(doc, dict)
@@ -352,7 +353,7 @@ def test_coverage_findings_fail_the_spec_gate_and_reach_the_revision(tmp_path: P
     }
     second = node(state, config_for("r", step=5))
     prompt = _prompt(tx)
-    assert "REVISION PASS" in prompt
+    assert "REPAIR PASS" in prompt
     assert "coverage: Must-have MH-1 ('add todo') has no covering scenario" in prompt
     assert "MH-1 (must-have): add todo" in prompt  # the ids to keep
     [critique] = [cas.resolve(a) for a in second["artifacts"] if a.kind == "criteria_findings"]

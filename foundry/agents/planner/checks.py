@@ -432,3 +432,41 @@ def _compile(
         ] + code
     strict = stack is not None and "--strict" in stack.typecheck
     return check_contracts(code, language, strict=strict)
+
+
+# Telemetry slugs for the finding templates above (and the Spec gate's own), most
+# specific first; a finding none of them matches counts as "other".
+_FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(p), kind)
+    for p, kind in (
+        (r"^Contract \S.* is implemented by \d+ tickets", "contract-multi-impl"),
+        (r"consumes contract .*, but no ticket implements it", "contract-unimplemented"),
+        (r"consumes contract .* but does not depend on", "contract-dep-missing"),
+        (r"after a builtin its own annotations use", "contract-builtin-method"),
+        (r"already exists in the base tree", "contract-redeclared"),
+        (r"^Contract \S.* does not compile", "contract-compile"),
+        (r"more \S+ error\(s\)\.$", "contract-compile"),
+        (r"^Scenario \S+ is not owned by a live ticket", "scenario-orphan"),
+        (r"^Scenario \S+ covers unknown id", "scenario-unknown-cover"),
+        (r"^Scenario \S+ asserts that installing dependencies", "scenario-offline-install"),
+        (r"has no covering scenario", "goal-uncovered"),
+        (r"^Feature ticket \S+ has no scenarios", "ticket-no-scenarios"),
+        (r"^No entrypoint ticket", "entrypoint-missing"),
+        (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
+        (r"^stack\.run is empty", "run-missing"),
+        (r"starts the server, which never exits", "run-server"),
+        (r"^stack\.bdd ", "bdd-command"),
+        (r"^Stack command file \S+ is written by no ticket", "stack-file-unowned"),
+        (r"exceed the (per-epic )?cap of", "overflow"),
+        (r"^criterion \S+: missing/empty", "criterion-incomplete"),
+        (r"^criterion \S+: scenario has no", "scenario-steps-missing"),
+        (r"security/abuse|security_abuse", "security-gap"),
+    )
+)
+
+
+def finding_kind(finding: str) -> str:
+    """A short stable slug for ``finding``'s template, e.g. ``contract-unimplemented``.
+    The Spec gate's ``contract fit:`` / ``coverage:`` prefixes are looked through."""
+    text = re.sub(r"^(contract fit|coverage): ", "", finding.strip())
+    return next((kind for pattern, kind in _FINDING_KINDS if pattern.search(text)), "other")

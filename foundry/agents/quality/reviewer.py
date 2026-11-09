@@ -21,9 +21,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.quality._common import ArtifactResolver, emit_artifact, read_criteria
-from foundry.agents.quality.reviewer_critic import review
+from foundry.agents.quality.reviewer_critic import (
+    REVIEWED_TREE_KIND,
+    review,
+    snapshot_blob,
+    tree_files,
+)
 from foundry.schemas.product import Criticality
-from foundry.schemas.quality import E2EReport, OracleBinding, OracleKind, TestPlan, TestReport
+from foundry.schemas.quality import (
+    E2EReport,
+    OracleBinding,
+    OracleKind,
+    ReviewedTree,
+    TestPlan,
+    TestReport,
+)
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -57,6 +69,7 @@ def make_reviewer_node(
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         criteria = read_criteria(state, resolve)
+        files = tree_files(state, resolve, resolve_blob)
         result, note = review(
             rt,
             state,
@@ -66,6 +79,7 @@ def make_reviewer_node(
             criteria=criteria,
             resolve=resolve,
             resolve_blob=resolve_blob,
+            files=files,
         )
         verdict = result.gate_result
         request_id = result.completion.request_id
@@ -113,6 +127,14 @@ def make_reviewer_node(
             emit_artifact(report, "test_report", _NODE_ID, report_seq, store=rt.cas),
             emit_artifact(e2e, "e2e_report", _NODE_ID, e2e_seq, store=rt.cas),
         ]
+        if files is not None and rt.cas is not None:
+            tree_seq = rt.seq(config, _NODE_ID, "artifact:reviewed_tree")
+            reviewed = ReviewedTree(
+                verdict_seq=verdict.seq, snapshot_uri=rt.cas.put_blob(snapshot_blob(files))
+            )
+            artifacts.append(
+                emit_artifact(reviewed, REVIEWED_TREE_KIND, _NODE_ID, tree_seq, store=rt.cas)
+            )
         return {"gates": [verdict], "artifacts": artifacts, "agent_journal": [note]}
 
     return _node

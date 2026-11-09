@@ -1342,6 +1342,7 @@ class ModelProviderProxy:
         gate_name: str = "review",
         failing_gates: Iterable[str] = (),
         failing_tests: Iterable[str] = (),
+        effort: Literal["medium", "xhigh"] | None = None,
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -1354,7 +1355,7 @@ class ModelProviderProxy:
         ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
         ids that failed on the reviewed tree in the caller's attested gate results;
         a finding citing anything else blocks only with a differing reproduction
-        (:func:`_verdict_findings`).
+        (:func:`_verdict_findings`). ``effort`` is :meth:`complete`'s.
         """
         if self._signer is None:
             raise RuntimeError(
@@ -1367,7 +1368,13 @@ class ModelProviderProxy:
                 "signs seq.node_id; a mismatched record would never verify coherently"
             )
         completion = self.complete(
-            node_id, tier, system_sop, messages, purpose="judgment", schema=VERDICT_SCHEMA
+            node_id,
+            tier,
+            system_sop,
+            messages,
+            purpose="judgment",
+            schema=VERDICT_SCHEMA,
+            effort=effort,
         )
         verdict = completion.parsed
         if not isinstance(verdict, dict) or verdict.get("status") not in _STATUS_BY_VERDICT:

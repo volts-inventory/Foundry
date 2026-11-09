@@ -23,6 +23,7 @@ honored: the agent emitted a verdict it could never have signed itself.
 
 from __future__ import annotations
 
+import difflib
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,9 +39,10 @@ from foundry.agents.quality._common import (
 from foundry.durability.artifact_store import UnknownArtifactError
 from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff
+from foundry.schemas.quality import ReviewedTree
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -66,6 +68,9 @@ _REVIEW_TIER = _os.environ.get("FOUNDRY_REVIEW_TIER", "T2").strip() or "T2"
 # (foundry/agents/implementation/junior_engineer.py) — the artifact this reviewer
 # judges when the runner has not pinned an explicit subject on the config.
 _FEATURE_DIFF_KIND = "feature_diff"
+# The snapshot of the tree a verdict judged (reviewer.py emits it), so the next
+# review in the run judges only the change since.
+REVIEWED_TREE_KIND = "reviewed_tree"
 
 
 def _newest_feature_diff_uri(artifacts: Sequence[Artifact]) -> str | None:
@@ -198,6 +203,86 @@ def _diff_text(rt: AgentRuntime, state: FactoryState) -> str:
     return out
 
 
+def tree_files(
+    state: FactoryState, resolve: ArtifactResolver | None, resolve_blob: BlobResolver | None
+) -> dict[str, str] | None:
+    """The text files of the tree under review, or ``None`` when it cannot be built
+    here (no resolvers, or a body the materializer rejects): the review then falls
+    back to judging the feature diffs whole."""
+    if resolve is None or resolve_blob is None:
+        return None
+    from foundry.graph.gate_wiring import MaterializationError, integrated_files
+
+    try:
+        return integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
+    except (MaterializationError, UnknownArtifactError):
+        return None
+
+
+def snapshot_blob(files: Mapping[str, str]) -> bytes:
+    """``files`` as the full-file snapshot blob a :class:`ReviewedTree` names."""
+    from foundry.graph.gate_wiring.ledger import _snapshot_blob
+
+    return _snapshot_blob(files)
+
+
+def _prior_review(
+    state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> tuple[GateResult, dict[str, str]] | None:
+    """The run's newest review verdict and the files of the tree it judged, or
+    ``None`` before the first review, or when that tree's snapshot is not on state
+    or no longer resolves (a resume without the store): the review is then full."""
+    from foundry.graph.gate_wiring import MaterializationError
+    from foundry.graph.gate_wiring.ledger import _snapshot_files
+
+    reviews = [g for g in state.get("gates") or () if g.name == _GATE_NAME]
+    if not reviews:
+        return None
+    prior = max(reviews, key=lambda g: g.seq)
+    for handle in state.get("artifacts") or ():
+        if handle.kind != REVIEWED_TREE_KIND:
+            continue
+        try:
+            body = resolve(handle)
+        except UnknownArtifactError:
+            continue
+        if isinstance(body, ReviewedTree) and body.verdict_seq == prior.seq:
+            try:
+                return prior, _snapshot_files(body.snapshot_uri, resolve_blob)
+            except (UnknownArtifactError, MaterializationError):
+                return None
+    return None
+
+
+def _delta_text(before: Mapping[str, str], after: Mapping[str, str]) -> str:
+    """The change from ``before`` to ``after`` as unified diffs, path by path,
+    capped like :func:`_diff_text`."""
+    parts: list[str] = []
+    for path in sorted({*before, *after}):
+        old, new = before.get(path), after.get(path)
+        if old == new:
+            continue
+        parts.append(
+            "".join(
+                difflib.unified_diff(
+                    (old or "").splitlines(keepends=True),
+                    (new or "").splitlines(keepends=True),
+                    fromfile=f"a/{path}" if old is not None else "/dev/null",
+                    tofile=f"b/{path}" if new is not None else "/dev/null",
+                )
+            )
+        )
+    if not parts:
+        return "(No file changed since the tree you reviewed.)"
+    out = "\n".join(parts)
+    if len(out) > _DIFF_CHAR_CAP:
+        out = (
+            out[:_DIFF_CHAR_CAP]
+            + f"\n\n[TRUNCATED: showing the first {_DIFF_CHAR_CAP} of {len(out)} chars.]"
+        )
+    return out
+
+
 _SOP = (
     "You are the Reviewer/Critic, the evaluator side of the evaluator-optimizer "
     "loop. Review the diff for correctness, design adherence, readability, and "
@@ -225,6 +310,7 @@ def review(
     criteria: Sequence[AcceptanceCriterion] = (),
     resolve: ArtifactResolver | None = None,
     resolve_blob: BlobResolver | None = None,
+    files: Mapping[str, str] | None = None,
 ) -> tuple[JudgmentResult, JournalEntry]:
     """Issue ONE proxy-stamped review verdict for ``node_id`` and its journal note.
 
@@ -233,8 +319,11 @@ def review(
     per-request nonce, so two reviewers in one run must use distinct ids (H3).
     ``criteria`` (when given) are put in front of the judge so it reviews against
     them. ``resolve`` / ``resolve_blob`` rebuild the tree under review so only gate
-    verdicts on that tree can back a finding. Returns the :class:`JudgmentResult`
-    and the advisory journal entry.
+    verdicts on that tree can back a finding. ``files`` is that tree's text
+    (:func:`tree_files`): when the run's last review left a snapshot of the tree it
+    judged, this review is sent only the change since and that verdict's findings,
+    at medium local thinking, and still answers for the whole tree. Returns the
+    :class:`JudgmentResult` and the advisory journal entry.
     """
     # Seq.node_id MUST equal the node_id passed to judge() — the binding
     # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
@@ -272,6 +361,11 @@ def review(
         config, node_id=node_id, subject_uri=subject_uri, state_sha=run_against
     )
 
+    prior = (
+        _prior_review(state, resolve, resolve_blob)
+        if files is not None and resolve is not None and resolve_blob is not None
+        else None
+    )
     content = (
         f"Review the artifact under {subject_uri} against the interfaces and "
         "acceptance criteria. Emit your verdict."
@@ -280,7 +374,22 @@ def review(
         content += "\n\nAcceptance criteria:\n" + "\n".join(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
         )
-    content += "\n\nThe change (unified diffs, applied in order):\n" + _diff_text(rt, state)
+    if prior is None or files is None:
+        content += "\n\nThe change (unified diffs, applied in order):\n" + _diff_text(rt, state)
+    else:
+        verdict, before = prior
+        content += (
+            "\n\nThis is a re-review: you already judged an earlier tree of this build "
+            f"({verdict.status.value}), and a fix pass has changed it since. Your verdict is "
+            "still for the WHOLE current tree. For each of your earlier findings below, "
+            "decide from the change whether it is resolved: drop a resolved one, and "
+            "repeat every unresolved one in your findings, with its evidence. Add only "
+            "the new problems the change introduced; the rest of the tree is what you "
+            "already reviewed.\n\nYour earlier findings:\n"
+            + ("\n".join(f"- {f}" for f in verdict.findings) or "(none)")
+            + "\n\nThe change since the tree you reviewed (unified diffs):\n"
+            + _delta_text(before, files)
+        )
     # Without this the judge flags every build: the .feature files and criteria.json
     # never appear in the tickets' diffs because the gates write them.
     content += (
@@ -306,6 +415,7 @@ def review(
         gate_name=_GATE_NAME,
         failing_gates=gates,
         failing_tests=tests,
+        effort=None if prior is None else "medium",
     )
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict

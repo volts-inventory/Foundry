@@ -39,7 +39,7 @@ def _patchable(
     finding: one the contracts or the run command cause needs a full re-plan."""
     if not items or overflow:
         return False
-    fit = _assemble(items, _ticket_frame(frame), probe=True)
+    fit = _assemble(items, _ticket_frame(frame))
     return not fit.overflow and set(findings) <= set(fit.blocking)
 
 

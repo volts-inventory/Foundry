@@ -246,6 +246,15 @@ def test_a_failed_scenario_says_not_to_write_its_generated_test(tmp_path: Path) 
     assert "never write a test function of that name yourself" in hit
 
 
+def test_a_step_module_that_fails_to_import_is_a_fail_not_an_error(tmp_path: Path) -> None:
+    """pytest exits 2 on a collection error; as an ERROR the fix loop scored the
+    tree None, so a pass that broke the import was never judged worse or rolled back."""
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "from admin import AdminServiceImpl\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.FAIL
+
+
 def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
     root = _project(tmp_path, None)
     (root / "tests").mkdir(exist_ok=True)

@@ -876,16 +876,28 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
 
 
 def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) -> CheckSpec:
-    """A fixer session's gate check: the scenarios a wave check judges, its own the
-    planned failure cluster's items (every failure when no cluster is planned)."""
+    """A fixer session's gate check: the scenarios a wave check judges plus every
+    scenario the failed Test gate names, its own the planned failure cluster's items
+    (every failure when no cluster is planned)."""
     from foundry.gates.self_check import CheckSpec
-    from foundry.graph.gate_wiring import wave_scenarios
+    from foundry.graph.gate_wiring import failing_ids, wave_scenarios
 
-    cluster, _ = fix_target(state, resolve, _failed_gates(state))
+    failed = _failed_gates(state)
+    cluster, _ = fix_target(state, resolve, failed)
     items = cluster.items if cluster is not None else ()
+    # The final gate runs every scenario, an unbuilt ticket's too: a check scoped to
+    # the built tickets' alone opened green on the very scenarios the fixer was sent
+    # to make run.
+    red = {
+        ref
+        for g in failed
+        if g.name == "test"
+        for ref in failing_ids(g.findings)
+        if ".feature::" in ref
+    }
     return CheckSpec(
         base=base,
-        scope=wave_scenarios(state, resolve),
+        scope=wave_scenarios(state, resolve) | red,
         own_refs=(
             frozenset(i.partition(":")[2] for i in items if i.startswith("test:"))
             if cluster is not None

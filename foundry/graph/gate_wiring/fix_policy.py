@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 
 FIX_STOP_TRIAGE = "fix-stop"
 _PASS_HEADROOM = 1.3
+# However slow its passes, a rule still needs two of them: one bad pass is no trend.
+_MIN_SLOW_LIMIT = 2
 
 
 @dataclass(frozen=True)
@@ -33,7 +36,9 @@ class FixPolicy:
     landed on a tree the window already checked, one failure signature came back
     ``same_sig_limit`` times from one base tree, ``plateau`` passes went by since
     the best score last improved (a lateral move is not one), ``error_limit``
-    passes in a row ERRORed; or when the time cap leaves less than
+    passes in a row ERRORed — the last three limits scaled down by
+    ``default_pass_s / median pass`` when the window's passes run slower than
+    ``default_pass_s`` (never below two passes); or when the time cap leaves less than
     ``_PASS_HEADROOM`` x the window's median pass (``default_pass_s`` before any)
     — with ``wave_share``, a wave's loop gets only its share of the time left
     when it started, ``1 / (unbuilt waves + 2)``, and running out of it moves the
@@ -98,6 +103,16 @@ def fix_stop(
             n += 1
         return n
 
+    spent = [p.elapsed_s for p in passes if p.elapsed_s is not None]
+    pass_s = _median(spent) if spent else policy.default_pass_s
+
+    def limit(n: int) -> int:
+        # The pass counts are sized for ~default_pass_s passes; a local model's pass
+        # can take an hour, and six of those that never improve is a run's whole cap.
+        if pass_s <= policy.default_pass_s:
+            return n
+        return max(_MIN_SLOW_LIMIT, min(n, math.ceil(n * policy.default_pass_s / pass_s)))
+
     if streak(lambda p: not p.touched) >= policy.no_edit_limit:
         return ("no-edit", f"the last {policy.no_edit_limit} fix passes edited no file")
     revisits = sum(any(q.tree == p.tree for q in passes[:i]) for i, p in judged)
@@ -107,16 +122,17 @@ def fix_stop(
     for i, p in judged:
         key = (passes[i - 1].tree, p.failing)
         sigs[key] = sigs.get(key, 0) + 1
-        if p.failing and sigs[key] >= policy.same_sig_limit:
+        if p.failing and sigs[key] >= limit(policy.same_sig_limit):
             return (
                 "same-signature",
                 f"{sigs[key]} fix passes from one tree left the same checks failing",
             )
     since = streak(lambda p: p.outcome != "improved")
-    if since >= policy.plateau:
+    if since >= limit(policy.plateau):
         return ("plateau", f"{since} fix passes went by without improving on the best tree")
-    if streak(lambda p: p.outcome == "error") >= policy.error_limit:
-        return ("errors", f"the last {policy.error_limit} checks ERRORed")
+    errors = streak(lambda p: p.outcome == "error")
+    if errors >= limit(policy.error_limit):
+        return ("errors", f"the last {errors} checks ERRORed")
     meter = policy._meter()
     remaining = None if meter is None else meter.remaining_s
     if remaining is None:
@@ -127,8 +143,7 @@ def fix_stop(
                 f"ceiling is {policy.window_ceiling})",
             )
         return None
-    spent = [p.elapsed_s for p in passes if p.elapsed_s is not None]
-    need = _PASS_HEADROOM * (_median(spent) if spent else policy.default_pass_s)
+    need = _PASS_HEADROOM * pass_s
     left, rule = float(remaining), "time"
     first = run[0]
     if (

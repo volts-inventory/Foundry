@@ -162,6 +162,21 @@ def test_each_dead_end_rule_stops_the_loop_and_names_itself() -> None:
     assert _rule(resumed) is None
 
 
+def test_slow_passes_reach_the_dead_end_rules_in_fewer_passes() -> None:
+    """The shop run (local): hour-long passes that never improved ran on, the
+    count limits being sized for ten-minute cloud passes."""
+    first = _pass(0, "t0", "initial", restart=True)
+    hour = [_pass(n, f"t{n}", "lateral", elapsed=3500.0) for n in range(1, 3)]
+    assert _rule([first, hour[0]]) is None  # one slow pass is no trend
+    assert _rule([first, *hour]) == "plateau"
+    errors = [_pass(n, f"e{n}", "error", elapsed=3500.0) for n in range(1, 3)]
+    assert _rule([first, *errors]) == "plateau"  # a dead end: a restart is tried first
+    assert _rule([first, *errors], FixPolicy(until_cap=True, plateau=99)) == "errors"
+    # Ten-minute passes keep the limits as they are.
+    quick = [_pass(n, f"t{n}", "lateral", elapsed=500.0) for n in range(1, 6)]
+    assert _rule([first, *quick]) is None
+
+
 def test_without_a_time_cap_a_window_stops_at_its_ceiling() -> None:
     policy = FixPolicy(until_cap=True, plateau=99, window_ceiling=5)
     passes = [

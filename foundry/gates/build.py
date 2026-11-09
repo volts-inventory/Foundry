@@ -97,6 +97,9 @@ UNDECLARED_IMPORTS = "the build passed, but the project imports modules it does 
 _MYPY_FOUND = re.compile(
     r"^Found \d+ errors? in \d+ files? \(checked \d+ source files?\)$", re.MULTILINE
 )
+# mypy's advisory note on each annotated line of an untyped function: never an
+# error, and enough of them filled the bounded tail and hid the errors it closes on.
+_MYPY_UNCHECKED_NOTE = re.compile(r": note: .*\[annotation-unchecked\]\s*$")
 _MYPY_NAME_DEFINED = re.compile(
     r"^(?P<path>[^\s:]+\.pyi?):(?P<line>\d+)(?::\d+)?: error: "
     r'Name "(?P<name>\w+)" is not defined\s+\[name-defined\]',
@@ -200,7 +203,11 @@ def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
     root = str(Path(workdir).resolve())
     text = text.replace(root + "/", "./").replace(root, ".")
     text = _CONTROL_RE.sub("", _ANSI_RE.sub("", text))
-    lines = [ln.rstrip()[:_LINE_CHARS] for ln in text.splitlines() if ln.strip()]
+    lines = [
+        ln.rstrip()[:_LINE_CHARS]
+        for ln in text.splitlines()
+        if ln.strip() and not _MYPY_UNCHECKED_NOTE.search(ln)
+    ]
     tail: list[str] = []
     used = 0
     for ln in reversed(lines[-_EXCERPT_LINES:]):

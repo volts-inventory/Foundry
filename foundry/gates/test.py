@@ -16,7 +16,8 @@ fidelity machinery is Phase 2; its reuse-key binding is wired NOW —
 a rotation boundary when rotation arrives.
 
 Exit-code semantics (pytest): 0 green, 1 test failures, 2/3/4 harness/usage
-errors (→ ERROR: infra, not a verdict), 5 no tests collected (→ adequacy FAIL
+errors (→ ERROR: infra, not a verdict; but 2 with a test module that failed to
+collect → FAIL, the tree's own import error), 5 no tests collected (→ adequacy FAIL
 when a floor is set). A stack-provided command (``stack_harness``: npm test, go
 test, the Cucumber ``bdd`` command) is not pytest: 0 passes, 126/127 (the shell
 could not find or run a binary — missing toolchain) is ERROR, anything else FAIL.
@@ -71,6 +72,7 @@ _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
 # pytest exit codes that are harness/usage failures, not verdicts.
 _INFRA_EXIT_CODES = frozenset({2, 3, 4})
+_INTERRUPTED = 2
 _NO_TESTS_COLLECTED = 5
 
 # Env key naming the host paths to FENCE OFF from the pinned-harness subprocess.
@@ -1528,6 +1530,10 @@ class TestGate:
                 return GateStatus.ERROR  # missing toolchain: infra, never latched
             if rc != 0:
                 return GateStatus.FAIL
+        elif rc == _INTERRUPTED and _COLLECT_ERROR.search(obs.stdout + "\n" + obs.stderr):
+            # A test module of the tree that fails to import is a verdict on the tree:
+            # as an ERROR the fix loop could neither score it nor restore the best tree.
+            return GateStatus.FAIL
         elif rc in _INFRA_EXIT_CODES:
             return GateStatus.ERROR  # harness failure is not a verdict (DS7)
         if rc == _NO_TESTS_COLLECTED:

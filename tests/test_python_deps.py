@@ -700,3 +700,25 @@ def test_local_content_is_never_reused(
     assert len(built) == 2
     wd = _write(tmp_path / "m", {"requirements.txt": "./vendor/pkg\n"})
     assert manifest_digest(wd, declared_requirements(wd)) is None
+
+
+def test_mypy_unchecked_notes_do_not_crowd_the_errors_out_of_a_build_tail(
+    tmp_path: Path,
+) -> None:
+    """The shop run: 30+ ``[annotation-unchecked]`` notes after the errors filled the
+    bounded tail, so the fixer saw 27 notes and not one of the 4 errors."""
+    note = (
+        "tests/test_T05.py:{n}: note: By default the bodies of untyped functions are not "
+        "checked, consider using --check-untyped-defs  [annotation-unchecked]"
+    )
+    error = 'tests/test_T08.py:13: error: Module "admin" has no attribute "X"  [attr-defined]'
+    out = "\n".join(
+        [
+            error,
+            *(note.format(n=n) for n in range(60)),
+            "Found 1 error in 1 file (checked 9 source files)",
+        ]
+    )
+    findings = build_findings(1, out, "", tmp_path)
+    assert error in findings
+    assert not any("annotation-unchecked" in f for f in findings)

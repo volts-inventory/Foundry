@@ -2201,3 +2201,28 @@ def test_a_reset_a_kept_rebuild_shares_with_a_failed_tickets_build_is_not_narrow
     assert narrow(("f.py", "src/app/a.py")) == ({}, ("src/app/a.py",))
     # Resetting T-001's scope would delete T-003's earlier helper: no cut keeps both.
     assert narrow(("f.py", "src/app/a.py", "src/app/f_helpers.py")) is None
+
+
+def test_a_fixer_check_runs_the_scenarios_the_failed_gate_names(monkeypatch) -> None:
+    """The shop run: T08 was never built, so the final gate failed its scenarios
+    while the fixer's check, scoped to the built tickets' scenarios, opened green."""
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+
+    built = "features/T01.feature::S01"
+    red = "features/T08.feature::S17"
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset({built}))
+    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    state = _state(
+        _gate("build", "t", 1, _OK),
+        _gate(
+            "test",
+            "t",
+            2,
+            _RED,
+            f"BDD criterion S17: scenario {red} was not executed",
+            "FAILED tests/test_app.py::test_add - assert 1 == 2",
+        ),
+    )
+    spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
+    assert spec.scope == frozenset({built, red})

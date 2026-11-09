@@ -27,7 +27,7 @@ from foundry.modes import (
     preset_levels,
     resolve_levels,
 )
-from foundry.proxy import ModelProviderProxy, ProviderResponse
+from foundry.proxy import ModelProviderProxy, ProviderResponse, ProxyUnavailable
 from foundry.proxy import token_meter as tm
 from foundry.proxy.local_transport import (
     DEFAULT_LOCAL_MODEL,
@@ -652,10 +652,34 @@ def test_a_thinking_reply_cut_off_at_the_cap_is_retried_a_level_lower() -> None:
     retry = _with_parse_correction(request, cut, 1)
     assert retry["local_thinking"] is True and retry["local_effort"] == "medium"
     assert _with_parse_correction(retry, cut, 2)["local_thinking"] is False
-    stopped = ProviderResponse(
-        served_model="m", request_id="r", text="{", usage={}, stop_reason="stop"
-    )
-    assert _with_parse_correction(request, stopped, 1)["local_thinking"] is True
+
+
+def test_any_parse_miss_retry_carries_the_replys_tail_and_steps_effort_down() -> None:
+    local = RecordingTransport(text="Here is my review. " + "x" * 5000 + " TAIL-END")
+    proxy = _local_proxy(local)
+    with pytest.raises(ProxyUnavailable, match="no parseable structured reply"):
+        proxy.complete(
+            "reviewer",
+            "T2",
+            "SOP",
+            [{"role": "user", "content": "r"}],
+            purpose="judgment",
+            schema=SCHEMA,
+        )
+    _, second, third = local.requests
+    assert [(r["local_thinking"], r.get("local_effort")) for r in local.requests] == [
+        (True, "xhigh"),
+        (True, "medium"),
+        (False, "medium"),
+    ]
+    note = second["messages"][-1]["content"]
+    assert note.startswith("r\n\n[Retry 1:") and "'stop'" in note
+    assert "no parseable JSON object" in note and "ONLY that JSON object" in note
+    assert "TAIL-END" in note and "Here is my review" not in note
+    assert len(note) < 2600
+    assert third["messages"][-1]["content"].startswith("r\n\n[Retry 2:")
+    seeds = {r["local_sampling"]["seed"] for r in local.requests}
+    assert len(seeds) == 3
 
 
 def test_the_local_effort_overrides_the_transports_xhigh() -> None:

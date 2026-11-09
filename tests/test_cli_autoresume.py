@@ -169,3 +169,64 @@ def test_a_backoff_past_the_time_cap_stops_the_run_now(monkeypatch: Any) -> None
     with pytest.raises(TimeCapExceeded, match="time cap reached"):
         _call(resumable=True, meter=meter)
     assert waited == [300.0]
+
+
+def _proxy_failure(send: Any) -> Exception:
+    """The ProxyUnavailable a real proxy raises once ``send`` exhausts its budget."""
+    from foundry.gates.attestation import ZoneBSigner
+    from foundry.proxy import LineageMap, ModelProviderProxy
+
+    class _Transport:
+        def send(self, request: dict[str, Any]) -> Any:
+            send()
+
+    proxy = ModelProviderProxy(
+        _Transport(),
+        LineageMap(),
+        ZoneBSigner(b"k", "k"),
+        sleeper=lambda _s: None,
+        rate_limit_max_retries=1,
+        rate_limit_backoff_base_s=0.0,
+        local_tiers={"T2"},
+    )
+    with pytest.raises(Exception) as caught:
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    return caught.value
+
+
+def _raising(exc: Exception, calls: dict[str, int]) -> Any:
+    def _fake(*_a: Any, **_k: Any) -> Any:
+        calls["n"] += 1
+        raise exc
+
+    return _fake
+
+
+def test_a_spent_timeout_budget_is_not_resumed(monkeypatch: Any) -> None:
+    """A local call that timed out twice (once a level lower) would time out again:
+    autoresume replaying it cost the notes bench 75+ minutes of back-off."""
+
+    def _timeout() -> None:
+        raise RuntimeError("Request timed out.")
+
+    failure = _proxy_failure(_timeout)
+    waited = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+    monkeypatch.setattr(cli.invoke, "_invoke", _raising(failure, calls))
+    with pytest.raises(type(failure), match="not resumed"):
+        _call(resumable=True)
+    assert calls["n"] == 1 and waited == []
+
+
+def test_a_rate_limit_failure_still_autoresumes(monkeypatch: Any) -> None:
+    def _throttled() -> None:
+        raise RuntimeError("429 too many requests")
+
+    failure = _proxy_failure(_throttled)
+    waited = _no_sleep(monkeypatch)
+    calls = {"n": 0}
+    monkeypatch.setattr(cli.invoke, "_invoke", _raising(failure, calls))
+    monkeypatch.setenv("FOUNDRY_CLI_AUTORESUME", "1")
+    with pytest.raises(type(failure), match="rate-limited"):
+        _call(resumable=True)
+    assert calls["n"] == 2 and waited == [300.0]

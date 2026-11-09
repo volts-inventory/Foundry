@@ -506,7 +506,14 @@ def default_drift_policy() -> DriftPolicy:
 
 class ProxyUnavailable(RuntimeError):
     """Transport exhausted retries. Judgment nodes pause-and-escalate —
-    there is no silent fallback to another model or family (fail-closed)."""
+    there is no silent fallback to another model or family (fail-closed).
+
+    ``replayable`` is False when the budget spent was a call that already ran its
+    whole time cap (a CLI hard-kill, a local timeout): a resume would replay it."""
+
+    def __init__(self, message: str, *, replayable: bool = True) -> None:
+        super().__init__(message)
+        self.replayable = replayable
 
 
 class PinnedIdDriftError(RuntimeError):
@@ -583,23 +590,56 @@ def is_transient_failure(exc: BaseException) -> bool:
     ProxyUnavailable / pause-and-escalate, not a real build failure. An
     unparseable structured reply is not transient: the re-invoked node sends the
     same prompt and a deterministic model (temperature 0, or a local model's
-    request-derived seed) answers the same."""
+    request-derived seed) answers the same. Nor is a spent time-cap budget (a
+    CLI hard-kill or local timeout, already retried a level lower): a resume
+    would run the same call into the same cap."""
     if isinstance(exc.__cause__, StructuredOutputError):
+        return False
+    if getattr(exc, "replayable", True) is False:
         return False
     return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
 
 
+_MISS_TAIL_CHARS = 2000
+
+
+def _lower_effort(request: dict[str, Any]) -> dict[str, Any]:
+    """``request`` one local thinking level lower (xhigh -> medium -> off) when it
+    thinks, its local seed re-derived from the new request."""
+    lowered = dict(request)
+    if lowered.get("local_thinking") is True:
+        if lowered.get("local_effort") == "xhigh":
+            lowered["local_effort"] = "medium"
+        else:
+            lowered["local_thinking"] = False
+    if "local_sampling" in lowered:
+        profile = {k: v for k, v in lowered["local_sampling"].items() if k != "seed"}
+        lowered["local_sampling"] = _seeded(lowered, profile)
+    return lowered
+
+
 def _with_parse_correction(
-    request: dict[str, Any], miss: ProviderResponse, attempt: int
+    request: dict[str, Any],
+    miss: ProviderResponse,
+    attempt: int,
+    error: str = "",
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """``request`` with the previous unparseable reply named in its last user turn,
-    so the re-roll is a different prompt: a temperature-0 (or seeded) call resent
-    unchanged returns the same reply (and the call cache would replay it)."""
+    """``request`` with the previous unparseable reply's error and tail in its last
+    user turn, one thinking level below ``previous`` (the attempt that missed;
+    default ``request``): a temperature-0 (or seeded) call resent unchanged
+    returns the same reply (and the call cache would replay it), and a model that
+    rambled past a parseable answer at one effort will again."""
+    text = miss.text or ""
+    tail = text[-_MISS_TAIL_CHARS:]
+    shown = f" It ended with:\n<<<\n{tail}\n>>>\n" if tail.strip() else " It was empty. "
     note = (
-        f"\n\n[Retry {attempt}: your previous reply ({len(miss.text)} chars, stop reason "
-        f"{miss.stop_reason!r}) was not one complete JSON object. Reply with ONLY that "
-        "JSON object. If it was cut off it ran past the output limit: be concise, with "
-        "short strings and no repeated or near-duplicate entries.]"
+        f"\n\n[Retry {attempt}: your previous reply ({len(text)} chars, stop reason "
+        f"{miss.stop_reason!r}) was not one complete JSON object"
+        f"{f' ({error})' if error else ''}.{shown}"
+        "Reply with ONLY that JSON object, complete, with no prose before or after it. "
+        "If it was cut off it ran past the output limit: be concise, with short strings "
+        "and no repeated or near-duplicate entries.]"
     )
     messages = [dict(m) for m in request.get("messages") or ()]
     last = messages[-1] if messages else None
@@ -609,17 +649,9 @@ def _with_parse_correction(
         last["content"] = [*last["content"], {"type": "text", "text": note.strip()}]
     else:
         messages.append({"role": "user", "content": note.strip()})
-    corrected = {**request, "messages": messages}
-    if miss.stop_reason == "length" and corrected.get("local_thinking") is True:
-        # The reasoning ran out the budget; a second attempt at the same effort would
-        # too, so step down a level (xhigh -> medium -> off).
-        if corrected.get("local_effort") == "xhigh":
-            corrected["local_effort"] = "medium"
-        else:
-            corrected["local_thinking"] = False
-    if "local_sampling" in request:
-        corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
-    return corrected
+    base = previous if previous is not None else request
+    effort = {k: base[k] for k in ("local_thinking", "local_effort") if k in base}
+    return _lower_effort({**request, **effort, "messages": messages})
 
 
 @dataclass(frozen=True, slots=True)
@@ -1549,7 +1581,9 @@ class ModelProviderProxy:
                     try:
                         parsed = _extract_json_object(response.text)
                     except StructuredOutputError as miss:
-                        sent = _with_parse_correction(request, response, attempt + 1)
+                        sent = _with_parse_correction(
+                            request, response, attempt + 1, str(miss), previous=sent
+                        )
                         raise StructuredOutputError(
                             f"{miss} (stop reason {response.stop_reason!r})"
                         ) from None
@@ -1560,13 +1594,16 @@ class ModelProviderProxy:
                 if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):
                     if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:
                         raise ProxyUnavailable(
-                            f"{exc} on {kill_attempt + 1} attempt(s); "
-                            "judgment nodes must pause-and-escalate"
+                            f"{exc} on {kill_attempt + 1} attempt(s); not resumed: "
+                            "a resume would rerun the same call into the same cap",
+                            replayable=False,
                         ) from exc
                     wait = self._retry.backoff_base_s * (2**kill_attempt)
                     log_retry(exc, kill_attempt + 1, _WALL_CLOCK_KILL_RETRIES, wait)
                     self._retry.sleep_before_retry(kill_attempt)
                     kill_attempt += 1
+                    if local:
+                        sent = _lower_effort(sent)
                     continue
                 is_rl, retry_after = _classify_rate_limit(exc)
                 if is_rl:

@@ -994,6 +994,31 @@ def test_local_timeout_retries_once_then_fails_closed():
     assert transport.attempts == 2
 
 
+def test_a_local_timeout_retry_thinks_a_level_lower():
+    class _Recording(_TimeoutTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: list[dict[str, Any]] = []
+
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.requests.append(request)
+            return super().send(request)
+
+    transport = _Recording()
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        sleeper=lambda _s: None,
+        local_tiers={"T2"},
+        local_thinking="on",
+    )
+    with pytest.raises(ProxyUnavailable, match="not resumed") as caught:
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert [r["local_effort"] for r in transport.requests] == ["xhigh", "medium"]
+    assert caught.value.replayable is False
+
+
 def test_cloud_timeout_still_rides_the_rate_limit_budget():
     waits: list[float] = []
     transport = _TimeoutTransport()

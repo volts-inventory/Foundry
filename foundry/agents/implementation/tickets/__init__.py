@@ -761,7 +761,15 @@ def make_engineering_node(
         else:
             skeleton_concerns = ()
         _order_after_integrated(state, merged)
-        if restarts and built and (reset[0] or reset[1]):
+        if restarts and len(built) < len(wave) and blobs is None:
+            # Without the blob store the reset cannot be narrowed, and landing it
+            # whole would delete the code of a ticket whose rebuild failed.
+            merged["artifacts"] = [
+                a
+                for a in merged.get("artifacts") or ()
+                if not (a.task_id or "").startswith(RESTART_PREFIX)
+            ]
+        elif restarts and built and (reset[0] or reset[1]):
             if len(built) < len(wave) and blobs is not None:
                 # A failed rebuild keeps its earlier build: the reset lands only where
                 # a rebuild replaces it (the wave check judges the mixed tree).

@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text
 from foundry.agents.planner.assembly import _Fit, _Frame
-from foundry.agents.planner.build import _BRIEF_CAP, _EPIC_KEY, _contract_text, _Epic
+from foundry.agents.planner.build import _BRIEF_CAP, _EPIC_KEY, _clip, _contract_text, _Epic
 from foundry.agents.planner.checks import _declaration_only, _goals_text
-from foundry.agents.planner.prompt import _GATE, _capped
+from foundry.agents.planner.prompt import _GATE
 from foundry.agents.planner.readers import (
     _newest_by_id,
     _newest_intent,
@@ -173,9 +173,9 @@ def _prior_plan(
     intent = _newest_intent(state, rt)
     brief = (
         "PLAN (from the previous pass):\n"
-        f"Product: {prd.title}\n{_prose(rt, prd.prd_uri)[:_BRIEF_CAP]}"
+        f"Product: {prd.title}\n{_clip(_prose(rt, prd.prd_uri))}"
         + (
-            f"\nArchitecture: {design.title}\n{_prose(rt, design.design_uri)[:_BRIEF_CAP]}\n"
+            f"\nArchitecture: {design.title}\n{_clip(_prose(rt, design.design_uri))}\n"
             f"Components: {', '.join(design.components) or '(none)'}"
             if design
             else ""
@@ -389,7 +389,7 @@ def _prior_plan_text(prior: _PriorPlan) -> str:
         }
         for e in prior.epics
     ]
-    contracts = "\n".join(f"- {n}: {spec[:_BRIEF_CAP]}" for n, spec in prior.interfaces)
+    contracts = "\n".join(f"- {n}: {spec}" for n, spec in prior.interfaces)
     return (
         prior.brief
         + f"\nInterface contracts:\n{contracts or '(none)'}"
@@ -397,8 +397,7 @@ def _prior_plan_text(prior: _PriorPlan) -> str:
         + (
             ""
             if prior.epics
-            else "\nTickets: "
-            + as_text(_capped(_ticket_items(prior.tickets, prior.criteria.values(), {})))
+            else "\nTickets: " + as_text(_ticket_items(prior.tickets, prior.criteria.values(), {}))
         )
     )
 

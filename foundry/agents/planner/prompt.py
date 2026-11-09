@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import as_text, demo_directives, scope_directive
-from foundry.agents.planner.build import _BRIEF_CAP
+from foundry.agents.planner.build import _TRUNCATED
 from foundry.agents.planner.checks import _goals_text
 from foundry.agents.planner.readers import _newest_by_id, _newest_intent, _section, _strs
 from foundry.agents.planner.schema import _RETRIEVAL_K, _SPEC_GATE, _SPEC_PROMPT_CAP
@@ -199,28 +199,26 @@ def _repair_block(
         "its one implementing ticket, add the missing dependency, split or merge the "
         f"tickets involved). Return the FULL {what}, not only the changes; list under "
         "criteria_review only gaps that genuinely remain.\n"
-        f"{source[1]}:\n- " + "\n- ".join(findings) + f"\n\nYOUR PREVIOUS {what.upper()}:\n{plan}"
+        + (
+            f"A field below ending in '{_TRUNCATED.strip()}' was cut for length: write it "
+            "out in full again, never copy the cut text.\n"
+            if _TRUNCATED in plan
+            else ""
+        )
+        + f"{source[1]}:\n- "
+        + "\n- ".join(findings)
+        + f"\n\nYOUR PREVIOUS {what.upper()}:\n{plan}"
     )
 
 
-def _capped(value: Any) -> Any:
-    if isinstance(value, str):
-        return value if len(value) <= _BRIEF_CAP else value[:_BRIEF_CAP] + "…"
-    if isinstance(value, list):
-        return [_capped(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _capped(v) for k, v in value.items()}
-    return value
-
-
 def _payload_text(payload: dict[str, Any], tickets: list[dict[str, Any]] | None = None) -> str:
-    """A plan reply, compact but whole, for its repair: prose capped at
-    ``_BRIEF_CAP``, the review dropped (the findings replace it), ``tickets`` (the
-    checked ones) in place of the raw ones when given."""
+    """A plan reply, whole and uncut, for its repair (the model wrote it, so it
+    fits, and every field is to be reproduced): the review dropped (the findings
+    replace it), ``tickets`` (the checked ones) in place of the raw ones when given."""
     shown = {k: v for k, v in payload.items() if k != "criteria_review"}
     if tickets is not None:
         shown["tickets"] = tickets
-    return as_text(_capped(shown))
+    return as_text(shown)
 
 
 def _revision_text(state: FactoryState, rt: AgentRuntime, plan: str = "") -> str:

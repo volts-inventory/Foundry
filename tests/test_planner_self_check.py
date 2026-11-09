@@ -44,6 +44,7 @@ from tests.planner_payload import (
     DELTA_SOP_KEY,
     PLANNER_SOP_KEY,
     PYTHON_STACK,
+    _review,
     _scn,
     _ticket,
     multi_epic_plan,
@@ -250,13 +251,159 @@ def test_finding_kinds_are_stable_slugs_of_the_check_templates() -> None:
     ]
 
 
-def test_each_fold_that_fires_is_counted_once_per_assembly() -> None:
+def test_each_fold_that_fires_is_counted_once_per_emitted_plan() -> None:
     plan = _copy(PLAN)
     plan["tickets"][0]["consumes"] = ["TodoStore.add"]  # a contract it implements itself
-    rt, _ = runtime_for(plan)
+    failing = _copy(plan)
+    failing["tickets"][1]["scenarios"][0]["covers"] = ["SC-1"]
+    # The fold fires in the failed draft, the delta's probe and the repair: the
+    # emitted plan counts it once.
+    rt, tx = runtime_for(failing, {}, plan)
     with telemetry.counting() as counts:
         make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 3
     assert counts.snapshot()["planner.fold.drop_self_consumes"] == 1
+
+
+def _unscenarioed_inline(plan: dict[str, Any]) -> dict[str, Any]:
+    return {**plan, "tickets": [*plan["tickets"], _ticket("T-009", "backend")]}
+
+
+def test_a_repair_better_than_both_the_original_and_the_fresh_replan_is_kept() -> None:
+    two = _copy(PLAN)
+    two["tickets"][1]["scenarios"][0]["covers"] = []  # MH-1 and SC-1 uncovered
+    three = _unscenarioed_inline(two)
+    cas = ArtifactStore()
+    # Original 2 findings, delta no-op, repair 1, fresh re-plan 3.
+    rt, tx = runtime_for(two, {}, _uncovered(), three, cas=cas)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 4
+    assert _critique(cas, writes).coverage_findings == (
+        "Must-have MH-1 ('add todo') has no covering scenario; add one whose covers lists MH-1.",
+    )
+    summary = writes["agent_journal"][0].summary
+    assert "Revised the plan once in-node after its own plan check: 2 -> 1 finding(s)." in summary
+    got = counts.snapshot()
+    assert got["planner.replan.kept_repair"] == 1 and "planner.replan.used" not in got
+
+
+def test_a_tie_goes_to_the_later_revision() -> None:
+    cas = ArtifactStore()
+    # Original 1, repair 1 (unchanged), fresh 1: the fresh re-plan is kept.
+    fresh = _uncovered()
+    fresh["prd"]["title"] = "Fresh"
+    rt, _ = runtime_for(_uncovered(), {}, _uncovered(), fresh, cas=cas)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    [prd] = _bodies(cas, writes, "prd")
+    assert prd.title == "Fresh"
+    assert counts.snapshot()["planner.replan.used"] == 1
+
+
+def test_the_gate_repair_view_shows_contracts_and_tickets_whole() -> None:
+    plan = _copy(PLAN)
+    spec = "add(todo) -> id. " + "x" * 7000
+    plan["interfaces"][0]["spec"] = spec
+    plan["tickets"][1]["description"] = "d" * 7000
+    plan["prd"]["body"] = "p" * 7000
+    rt, tx = runtime_for(plan, {}, plan, cas=ArtifactStore())
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
+
+    repair = _content(tx.requests[2])
+    assert "REPAIR PASS — the signed Spec gate" in repair
+    view = repair.split("YOUR PREVIOUS PLAN:\n", 1)[1]
+    assert spec in view and "d" * 7000 in view  # never cut: they are reproduced
+    assert "p" * 6000 + " …[truncated]" in view and "p" * 6001 not in view
+    assert "was cut for length: write it out in full again" in repair
+
+
+def test_the_in_node_repair_shows_the_failed_reply_uncut() -> None:
+    plan = _uncovered()
+    plan["prd"]["body"] = "p" * 7000
+    plan["tickets"][1]["description"] = "d" * 7000
+    rt, tx = runtime_for(plan, {}, PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    repair = _content(tx.requests[2])
+    view = repair.split("YOUR PREVIOUS PLAN:\n", 1)[1]
+    assert "p" * 7000 in view and "d" * 7000 in view
+    assert "truncated" not in repair
+
+
+def test_an_epic_with_no_previous_one_to_repair_is_planned_at_the_default_effort() -> None:
+    multi, replies = multi_epic_plan()
+    scripts = _epic_scripts(
+        PLAN,
+        replies,
+        ResponseScript(json.dumps(multi), match=_match(PLANNER_SOP_KEY, "REPAIR PASS")),
+    )
+    rt, _ = _epic_runtime(*scripts, cas=ArtifactStore())
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))  # inline: no epic to continue
+    seen: list[tuple[str | None, str | None]] = []
+    real = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append((_epic_of({"args": args}), kwargs.get("effort")))
+        return real(*args, **kwargs)
+
+    rt.proxy.complete = spy  # type: ignore[method-assign]
+    node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
+
+    epic_efforts = [effort for epic, effort in seen if epic is not None]
+    assert len(epic_efforts) >= 3 and set(epic_efforts) == {None}
+    assert "medium" in {effort for epic, effort in seen if epic is None}
+
+
+def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None:
+    _, replies = multi_epic_plan()
+    flagged = {**replies["E2"], "criteria_review": _review("no paging scenario")}
+    gate_fix = ResponseScript(
+        json.dumps(flagged), match=_match("YOUR EPIC: E2", "Spec gate findings")
+    )
+    check_fix = ResponseScript(
+        json.dumps(replies["E2"]), match=_match("YOUR EPIC: E2", "Plan check findings")
+    )
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(cas, gate_fix, check_fix)
+    with telemetry.counting() as counts:
+        second = node(
+            _failed(first, "criterion E2-AC01: scenario has no then step"),
+            config_for("r", step=5),
+        )
+
+    # The repair and its self-review's two calls leave the gap open: one fresh re-run.
+    e2 = [r for r in tx.requests[4:] if _epic_of(r) == "E2"]
+    assert len(e2) == 4
+    last = _content(e2[-1])
+    assert "Plan check findings" in last and "[E2] no paging scenario" in last
+    assert _critique(cas, second).missing == ()
+    got = counts.snapshot()
+    assert got["planner.replan.used"] == 1 and "planner.repair.closed" not in got
+
+
+def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
+    _, replies = multi_epic_plan()
+    unflagged = _copy(replies["E1"])
+    unflagged["tickets"][1]["scenarios"][0]["security_abuse"] = False  # the only one
+    gate_fix = ResponseScript(
+        json.dumps(unflagged), match=_match("YOUR EPIC: E1", "Spec gate findings")
+    )
+    cas = ArtifactStore()
+    node, tx, first = _first_pass(cas, gate_fix)
+    with telemetry.counting() as counts:
+        node(
+            _failed(first, "criterion E1-AC02: scenario has no then step"),
+            config_for("r", step=5),
+        )
+
+    assert [_epic_of(r) for r in tx.requests[4:]] == ["E1"]  # no fresh re-run to run
+    got = counts.snapshot()
+    assert "planner.repair.fallback" not in got and "planner.repair.closed" not in got
 
 
 # ---- patch, don't re-plan: one delta call instead of a full plan call ----------------

@@ -42,8 +42,10 @@ leaves the merged plan failing a check, falls back to the full re-plan.
 Repair before re-planning: every revision (the self-review's, the in-node plan
 check's, a Spec-gate re-entry's, an epic's) is first a REPAIR — the failed plan
 itself plus its findings in, the full corrected plan out — at medium thinking
-effort, as is the delta. A repair still leaving a finding is discarded for ONE
-fresh revision at the default effort, so a revision is at most two calls.
+effort, as is the delta. A repair still leaving a finding gets ONE fresh
+revision at the default effort, so a revision is at most two calls; the plan
+check keeps whichever draft has the fewest findings, a tie going to the later.
+An epic with no previous one to repair is planned at the default effort.
 
 Trust posture is unchanged: the node emits no ``GateResult`` (L5), reaches the
 model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
@@ -264,23 +266,42 @@ def _outcome(event: str, where: str, findings: Sequence[str]) -> None:
     )
 
 
-def _open(draft: _Draft, findings: Sequence[str], prior: _PriorPlan) -> tuple[str, ...]:
+def _count_folds(fit: _Fit) -> None:
+    """Count ``planner.fold.<name>`` once per emitted plan whose assembly that fold
+    changed: drafts a revision replaced are not counted."""
+    for name in fit.folds:
+        count(f"planner.fold.{name}")
+
+
+def _open(
+    fit: _Fit,
+    missing: Sequence[str],
+    omissions: Sequence[str],
+    findings: Sequence[str],
+    prior: _PriorPlan,
+) -> tuple[str, ...]:
     """What a repair of ``prior`` against the Spec gate's ``findings`` leaves failing:
     its check findings, review gaps, and the structural criteria problems the gate
     named or the repair introduced (one the gate let pass, e.g. an optional
     security criterion, stays allowed)."""
     known = set(_structural_findings(tuple(prior.criteria.values())))
     return (
-        *draft.fit.blocking,
-        *draft.fit.overflow,
-        *draft.omissions,
-        *draft.missing,
+        *fit.blocking,
+        *fit.overflow,
+        *omissions,
+        *missing,
         *(
             s
-            for s in _structural_findings(draft.fit.criteria)
+            for s in _structural_findings(fit.criteria)
             if s not in known or any(f.startswith(s) for f in findings)
         ),
     )
+
+
+def _best(*fits: _Fit) -> int:
+    """The index of the fit with the fewest blocking findings; a tie goes to the
+    later one, a revision over what it revised."""
+    return min(range(len(fits)), key=lambda i: (len(fits[i].blocking), -i))
 
 
 def make_planner_node(
@@ -358,12 +379,14 @@ def make_planner_node(
         overflow: list[str],
         *,
         self_review: bool = True,
-        effort: Effort = None,
+        efforts: Sequence[Effort] = (),
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str], list[str]]:
-        """Run the epic calls; returns their raw items, tagged review gaps
-        (missing, omissions), the self-revised epic ids and concerns. Tickets an
-        epic loses at its cap are named in ``overflow``."""
-        results = _run_parallel(lambda c: _plan_epic(c, self_review, effort), contents)
+        """Run the epic calls, each at its ``efforts`` entry (default: the default
+        effort); returns their raw items, tagged review gaps (missing, omissions),
+        the self-revised epic ids and concerns. Tickets an epic loses at its cap
+        are named in ``overflow``."""
+        calls = list(zip(contents, efforts or [None] * len(contents), strict=True))
+        results = _run_parallel(lambda ce: _plan_epic(ce[0], self_review, ce[1]), calls)
         raw: list[dict[str, Any]] = []
         missing: list[str] = []
         omissions: list[str] = []
@@ -420,7 +443,7 @@ def make_planner_node(
             contents,
             overflow,
             self_review=False,
-            effort=_REPAIR_EFFORT if repair else None,
+            efforts=[_REPAIR_EFFORT if repair else None] * len(chosen),
         )
         merged = [
             item
@@ -572,7 +595,8 @@ def make_planner_node(
                 contents,
                 overflow,
                 self_review=self_review,
-                effort=_REPAIR_EFFORT if repair else None,
+                # An epic with no previous one to repair is planned afresh.
+                efforts=[_REPAIR_EFFORT if repair and continues.get(e.id) else None for e in epics],
             )
             missing += epic_missing
             omissions += epic_omissions
@@ -654,9 +678,10 @@ def make_planner_node(
         """The one in-node revision of a plan the checks still fault: an epic plan
         re-runs only the epics the findings name; a finding naming none (or an
         inline plan) re-plans call 1 with every finding. Each revision is first a
-        repair of the failed plan at lower effort; a repair leaving any finding is
-        discarded for one fresh revision at the default effort. The revision is
-        kept unless it leaves more findings. Returns the draft and a journal note."""
+        repair of the failed plan at lower effort; a repair leaving any finding gets
+        one fresh revision at the default effort. Of the original, the repair and
+        the fresh revision the one with the fewest findings is kept, a tie going to
+        the later. Returns the draft and a journal note."""
         blocking = draft.fit.blocking
         if not blocking:
             return draft, ""
@@ -689,12 +714,11 @@ def make_planner_node(
                     fit=_assemble(raw, draft.frame, over),
                 )
 
-            revised = rerun(repair=True)
-            left = (*revised.fit.blocking, *revised.fit.overflow)
-            fresh = bool(left)
-            if fresh:
+            repaired = rerun(repair=True)
+            replanned: _Draft | None = None
+            if left := (*repaired.fit.blocking, *repaired.fit.overflow):
                 _outcome("repair.fallback", what, left)
-                revised = rerun(repair=False)
+                replanned = rerun(repair=False)
             else:
                 _outcome("repair.closed", what, blocking)
         else:
@@ -725,7 +749,7 @@ def make_planner_node(
             what = "the plan"
             # An epic plan's tickets reach their own epic calls, not call 1.
             plan = _payload_text(draft.payload, None if draft.per_epic else items)
-            revised = _draft(
+            repaired = _draft(
                 state,
                 _call(SOP, schema, content + _repair_block(notes, plan, _CHECK), _REPAIR_EFFORT),
                 seqs,
@@ -736,14 +760,13 @@ def make_planner_node(
                 self_review=False,
                 repair=True,
             )
-            left = (*revised.fit.blocking, *revised.fit.overflow)
-            fresh = bool(left)
-            if fresh:
+            replanned = None
+            if left := (*repaired.fit.blocking, *repaired.fit.overflow):
                 _outcome("repair.fallback", what, left)
                 text = _revision_block(
                     notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
                 )
-                revised = _draft(
+                replanned = _draft(
                     state,
                     _call(SOP, schema, content + text),
                     seqs,
@@ -755,13 +778,17 @@ def make_planner_node(
                 )
             else:
                 _outcome("repair.closed", what, blocking)
-        before, after = len(blocking), len(revised.fit.blocking)
-        kept = after > before
-        if fresh:
-            _outcome("replan.kept_original" if kept else "replan.used", what, revised.fit.blocking)
-        if kept:
+        revisions = (repaired,) if replanned is None else (repaired, replanned)
+        pick = _best(draft.fit, *(r.fit for r in revisions))
+        chosen = (draft, *revisions)[pick]
+        if replanned is not None:
+            event = ("replan.kept_original", "replan.kept_repair", "replan.used")[pick]
+            _outcome(event, what, chosen.fit.blocking)
+        before = len(blocking)
+        if pick == 0:
+            after = min(len(r.fit.blocking) for r in revisions)
             return draft, _revision_note(what, before, after, kept=True)
-        return revised, _revision_note(what, before, after, kept=False)
+        return chosen, _revision_note(what, before, len(chosen.fit.blocking), kept=False)
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         findings = latest_spec_failure(state)
@@ -819,7 +846,9 @@ def make_planner_node(
                 self_review=False,
                 repair=True,
             )
-            if left := _open(repaired, findings or (), earlier):
+            if left := _open(
+                repaired.fit, repaired.missing, repaired.omissions, findings or (), earlier
+            ):
                 _outcome("repair.fallback", "Spec-gate re-plan", left)
             else:
                 _outcome("repair.closed", "Spec-gate re-plan", findings or ())
@@ -833,6 +862,7 @@ def make_planner_node(
                 payload = _self_revise(SOP, schema, content, payload, gaps, "plan")
             draft = _draft(state, payload, seqs, languages, findings, prior)
         draft, check_note = _self_check(state, draft, content, schema, seqs, languages)
+        _count_folds(draft.fit)
         payload, brief, interfaces, epics = (
             draft.payload,
             draft.brief,
@@ -1025,8 +1055,9 @@ def make_planner_node(
         Re-emits what the re-planned tickets change (tickets + tombstones,
         criteria, PRD criterion ids, critique, ownership); the plan-level
         records of the earlier pass stay current. The epic calls repair the epics'
-        previous tickets at lower effort; findings the merged plan still has get
-        one fresh in-node re-run, at the default effort, of the epics they name."""
+        previous tickets at lower effort; what the merged plan still leaves open
+        (the test :func:`_open` applies to a call-1 repair) gets one fresh in-node
+        re-run, at the default effort, of the epics it names."""
 
         def seq(key: str) -> Seq:
             return rt.seq(config, NODE_ID, key)
@@ -1052,7 +1083,7 @@ def make_planner_node(
         ]
         overflow: list[str] = []
         fresh, missing, omissions, revised, concerns = _plan_epics(
-            chosen, contents, overflow, effort=_REPAIR_EFFORT
+            chosen, contents, overflow, efforts=[_REPAIR_EFFORT] * len(chosen)
         )
         raw = [
             item
@@ -1069,30 +1100,29 @@ def make_planner_node(
         rerun: tuple[str, ...] = ()
         check_note = ""
         where = f"Spec-gate re-plan of epic(s) {', '.join(targets)}"
-        if not fit.blocking:
+        left = _open(fit, missing, omissions, findings, prior)
+        if not left:
             _outcome("repair.closed", where, findings)
         else:
-            _outcome("repair.fallback", where, fit.blocking)
             _count_findings((*fit.blocking, *fit.overflow))
             mem = _with_fit(prior, fit)
-            rerun = _named_epics(fit.blocking, mem)
-            if rerun:
+            rerun = _named_epics(left, mem)
+            if not rerun:
+                progress.log(
+                    f"planner repair ({where}) left {len(left)} finding(s) naming no epic: "
+                    + " | ".join(left)[:400]
+                )
+            else:
+                _outcome("repair.fallback", where, left)
                 over = _not_of(overflow, rerun)
                 raw2, missing2, omissions2, concerns2 = _rerun_epics(
-                    prior.epics,
-                    raw,
-                    rerun,
-                    (*fit.blocking, *fit.overflow),
-                    mem,
-                    inputs,
-                    over,
-                    repair=False,
+                    prior.epics, raw, rerun, left, mem, inputs, over, repair=False
                 )
                 fit2 = _assemble(raw2, frame, over)
                 before, after = len(fit.blocking), len(fit2.blocking)
-                kept = after > before
+                kept = _best(fit, fit2) == 0
                 _outcome(
-                    "replan.kept_original" if kept else "replan.used",
+                    "replan.kept_repair" if kept else "replan.used",
                     f"epic(s) {', '.join(rerun)}",
                     fit2.blocking,
                 )
@@ -1222,6 +1252,7 @@ def make_planner_node(
         def seq(key: str) -> Seq:
             return rt.seq(config, NODE_ID, key)
 
+        _count_folds(fit)
         tickets, criteria = fit.tickets, fit.criteria
         dropped = _retired_tickets(state, rt, tickets, tickets_seq)
         prd_seq = seq("artifact:prd")

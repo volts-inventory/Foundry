@@ -33,7 +33,6 @@ from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import StackDecision, Ticket
 from foundry.schemas.product import AcceptanceCriterion, IntentBrief
-from foundry.telemetry import count
 
 if TYPE_CHECKING:
     from foundry.state.seq import Seq
@@ -71,24 +70,23 @@ class _Fit:
     contract_findings: tuple[str, ...]
     coverage_findings: tuple[str, ...]
     overflow: tuple[str, ...]  # work dropped at a cap: a concern, fed to a revision
+    folds: tuple[str, ...] = ()  # the repairs that changed something, for telemetry
 
     @property
     def blocking(self) -> tuple[str, ...]:
         return (*self.contract_findings, *self.coverage_findings)
 
 
-def _assemble(
-    raw: Any, frame: _Frame, overflow: Sequence[str] = (), *, probe: bool = False
-) -> _Fit:
+def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     """Raw ticket items -> the repaired, checked plan. Repairs run first (each one
     mechanical, leaving what it cannot fix to the checks); only the checks' leftovers
-    are findings. ``overflow`` names work already dropped at the epic caps. Each fold
-    that fires counts ``planner.fold.<name>`` once, unless this is a ``probe``."""
+    are findings. ``overflow`` names work already dropped at the epic caps. The fit
+    names each fold that fired; the planner counts them only for the plan it emits."""
     fired: list[str] = []
 
     def fold(name: str, more: Sequence[str]) -> list[str]:
         if more:
-            fired.append(name)
+            fired.append(name.lstrip("_"))
         return list(more)
 
     over = list(overflow)
@@ -128,9 +126,6 @@ def _assemble(
     concerns += fold(_drop_orphan_scenarios.__name__, more)
     criteria, more = _fix_covers(criteria, frame.brief)
     concerns += fold(_fix_covers.__name__, more)
-    if not probe:
-        for name in fired:
-            count(f"planner.fold.{name.lstrip('_')}")
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
@@ -145,4 +140,4 @@ def _assemble(
         *_offline_scenario_findings(criteria),
         *frame.stack_findings,
     )
-    return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over))
+    return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over), tuple(fired))

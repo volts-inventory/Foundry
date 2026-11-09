@@ -27,6 +27,8 @@ CONTRACT_DRIFT_TRIAGE = "contract-drift"
 # An implementation ticket's last attempt still changed a stubbed public signature.
 SIGNATURE_CHANGE_TRIAGE = "signature-change"
 SKELETON_TRIAGE = "skeleton"
+# A failed attempt's written files its retry starts from (explanation: their snapshot blob).
+CARRY_TRIAGE = "ticket-carry"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2

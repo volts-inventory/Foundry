@@ -62,6 +62,7 @@ from foundry.agents.implementation.tickets.constants import (
     _FEATURE_DIFF_KIND,
     _LOCAL_TURN_BUDGET,
     CAP_TRIAGE,
+    CARRY_TRIAGE,
     CONTRACT_DUP_TRIAGE,
     CONTRACT_KIND,
     DEFAULT_WORKERS,
@@ -124,6 +125,7 @@ from foundry.agents.implementation.tickets.scope import (
 )
 from foundry.agents.implementation.tickets.skeleton import (
     _skeleton_diff,
+    shared_stub_names,
     skeleton_files,
     stub_rules,
 )
@@ -324,6 +326,17 @@ def make_engineering_node(
         contract_files = contract_paths(state, resolve)
         built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
         skeleton = skeleton_files(state, resolve, blobs)
+        # A retry after a named violation starts from its failed attempt's files.
+        carried: dict[str, dict[str, str]] = {}
+        for tid, kept in _ticket_notes(state, CARRY_TRIAGE).items():
+            note = max(kept, key=lambda n: n.seq)
+            last = max(failures.get(tid, ()), key=lambda n: n.seq, default=None)
+            if blobs is None or tid in requested or tid in restarts:
+                continue
+            if last is None or last.seq <= note.seq:  # minted in the same pass
+                from foundry.graph.gate_wiring import snapshot_files
+
+                carried[tid] = snapshot_files(note.explanation, blobs)
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.
@@ -414,7 +427,10 @@ def make_engineering_node(
             sandbox = _sandbox_for(rt, source_dir, snapshot_store, str(tier) if tier else None)
             if overlay:
                 apply_overlay(sandbox.worktree, overlay)
-            bases[str(etask.packet.task["id"])] = sandbox.snapshot()
+            tid = str(etask.packet.task["id"])
+            bases[tid] = sandbox.snapshot()
+            if tid in carried:  # after the base: the diff the retry lands must carry them
+                apply_overlay(sandbox.worktree, carried[tid])
             return sandbox
 
         names: dict[str, tuple[Mapping[str, Sequence[str]], bool]] = {}
@@ -430,6 +446,7 @@ def make_engineering_node(
                 tid = task_id_for_ticket(t.id)
                 names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
         stubs: dict[str, tuple[Mapping[str, str], bool]] = {}
+        shared: dict[str, frozenset[str]] = {}
         for t in wave:
             # Judged against the stub as the ticket finds it (a wave-0 fixer may have
             # re-signed it to satisfy the type checker), unless that is no longer a stub.
@@ -441,6 +458,7 @@ def make_engineering_node(
             if stubbed:
                 tid = task_id_for_ticket(t.id)
                 stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
+                shared[tid] = shared_stub_names(t, tickets, stubbed, contracts, overlay)
         for table in (names, stubs):
             for tid in restarts:
                 if tid in table:  # a restart's first attempt is strict, its retry lenient
@@ -471,6 +489,8 @@ def make_engineering_node(
             stubs,
             skeleton,
             checks,
+            shared,
+            carried,
         )
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
@@ -521,6 +541,12 @@ def make_engineering_node(
                 own = tuple(
                     n.explanation for n in sorted(failures.get(tid, ()), key=lambda n: n.seq)
                 )
+                if tid in carried and own:
+                    own = (
+                        f"[continuing attempt {len(own)}] {', '.join(sorted(carried[tid]))} "
+                        "already hold your previous attempt's work as it left it: keep that "
+                        f"work and fix only this one violation, then finish. {own[-1]}",
+                    )
                 packet = _ticket_packet(
                     tasks[tid],
                     ticket,
@@ -728,9 +754,26 @@ def make_engineering_node(
                     if tid in restart_memo:  # its earlier build stays integrated
                         progress.log(f"restart of {tid} failed: {exc}")
                         continue
+                    attempt = len(failures.get(tid, ())) + 1
                     merged.setdefault("gate_triage", []).extend(
-                        _failure_notes(rt, config, tid, len(failures.get(tid, ())) + 1, exc)
+                        _failure_notes(rt, config, tid, attempt, exc)
                     )
+                    if (
+                        (wrote := scoped.carry.get(tid))
+                        and attempt < MAX_TICKET_ATTEMPTS
+                        and rt.cas is not None
+                    ):
+                        from foundry.graph.gate_wiring import snapshot_blob
+
+                        merged["gate_triage"].append(
+                            GateTriage(
+                                name=CARRY_TRIAGE,
+                                run_against=f"task/{tid}",
+                                explanation=rt.cas.put_blob(snapshot_blob(wrote)),
+                                produced_by=NODE_ID,
+                                seq=rt.seq(config, NODE_ID, f"{CARRY_TRIAGE}:{tid}"),
+                            )
+                        )
                     continue
                 built.append(ticket)
                 for channel, records in out.items():

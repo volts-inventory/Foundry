@@ -9,6 +9,7 @@ an implementation ticket that changes a stubbed public signature fails its attem
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -23,16 +24,25 @@ from foundry.agents.implementation.tickets import (
     skeleton_files,
     stub_rules,
 )
+from foundry.agents.implementation.tickets.adapter import _ScopedAdapter
+from foundry.agents.implementation.tickets.contracts import ContractDriftError
 from foundry.agents.planner import _safe_ticket_ids
 from foundry.durability.artifact_store import ArtifactStore
-from foundry.execution.adapter_contract import AdapterResult
+from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
 from foundry.graph.gate_wiring import materialize_workdir
 from foundry.schemas.architecture import InterfaceContract
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.gates import GateStatus, GateTriage
 from foundry.schemas.implementation import SKELETON_TASK_ID, Specialty, StackDecision, Ticket
 from foundry.state.seq import Seq
-from tests.test_ticket_scheduler import _builds, _diffs, _Recorder, _ticket, _wave_run
+from tests.test_ticket_scheduler import (
+    _builds,
+    _diffs,
+    _Recorder,
+    _runtime,
+    _ticket,
+    _wave_run,
+)
 
 _SEQ = Seq("run", 1, 1, "planner", 0)
 
@@ -229,7 +239,15 @@ def test_signature_changes_name_renames_parameters_and_returns() -> None:
     renamed = stub.replace("def recent(", "def latest(")
     assert signature_changes(stub, renamed) == (
         "TodoStoreImpl.recent was removed or renamed (planned: "
-        "`def recent(self, n: int=5) -> list[Todo] | None`)",
+        "`def recent(self, n: int=5) -> list[Todo] | None`; class TodoStoreImpl declares "
+        "instead: `def latest(self, n: int=5) -> list[Todo] | None`)",
+    )
+    # A class swapped for a factory: the planned declaration is shown as source spells
+    # it (not as a rename to its base), with what was written in its place.
+    factory = "from app.contracts import TodoStore\n\n\ndef make_store() -> TodoStore:\n    ...\n"
+    assert signature_changes(stub, factory) == (
+        "TodoStoreImpl was removed or renamed (planned: `class TodoStoreImpl(TodoStore)`; "
+        "the file declares instead: `def make_store() -> TodoStore`)",
     )
     params = stub.replace("def add(self, title: str)", "def add(self, title: str, tag: str)")
     assert (
@@ -240,7 +258,9 @@ def test_signature_changes_name_renames_parameters_and_returns() -> None:
     assert any("TodoStoreImpl.find changed" in f for f in signature_changes(stub, ret))
     unbased = stub.replace("class TodoStoreImpl(TodoStore):", "class TodoStoreImpl:")
     assert signature_changes(stub, unbased) == ("class TodoStoreImpl dropped its base TodoStore",)
-    assert len(signature_changes(stub, None)) == 4  # file deleted: the class and its 3 methods
+    assert signature_changes(stub, None) == (
+        "`class TodoStoreImpl(TodoStore)` was removed (the file is gone)",
+    )
 
 
 def test_the_skeleton_id_is_reserved_from_the_plan() -> None:
@@ -277,6 +297,7 @@ def _graph_case(
     *,
     signature: str = _STORE_CONTRACT,
     max_fix_attempts: int = 3,
+    consumed: bool = True,
 ) -> tuple[dict, list[str], ArtifactStore]:
     store = ArtifactStore()
     contract = InterfaceContract(
@@ -290,7 +311,13 @@ def _graph_case(
     tickets = [
         _ticket("contracts", 0, files=("contracts.py",), implements=("TodoStore",)),
         _ticket("T-001", 1, files=("store.py",), deps=("contracts",), implements=("TodoStore",)),
-        _ticket("T-002", 2, files=("main.py",), deps=("T-001",), consumes=("TodoStore",)),
+        _ticket(
+            "T-002",
+            2,
+            files=("main.py",),
+            deps=("T-001",),
+            consumes=("TodoStore",) if consumed else (),
+        ),
     ]
     stack = StackDecision(
         language="python",
@@ -368,7 +395,102 @@ def test_a_changed_signature_fails_the_first_attempt_and_is_noted_on_the_last(
     notes = {t.name: t.explanation for t in out["gate_triage"] if t.run_against == "task/T-001"}
     assert "ticket-skipped" not in notes
     assert "TodoStoreImpl.count was removed or renamed" in notes["signature-change"]
+    assert "Adding `__init__`, private helpers, extra methods" in notes["signature-change"]
     assert "T-001" in _diffs(out)  # the last attempt is kept, with the change noted
+
+
+class _WritesOnce(_Recorder):
+    """T-001's first session writes its ``writes``; every later one writes nothing."""
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        if packet.task["id"] == "T-001" and "T-001" in self.calls:
+            self.writes.pop("T-001", None)
+            self.silent = frozenset({"T-001"})
+        return super().run(packet, sandbox)
+
+
+def test_a_retry_after_a_changed_signature_starts_from_the_failed_attempts_files(
+    tmp_path: Path,
+) -> None:
+    # The retry writes nothing: it builds on attempt 1's kept files (lenient on the
+    # last attempt) instead of counting as an empty session and being skipped.
+    renamed = _GOOD_IMPL.replace("def count(self)", "def size(self)")
+    rec = _WritesOnce(
+        writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}, "T-001": {"store.py": renamed}}
+    )
+    out, _, store = _graph_case(tmp_path, rec)
+    first, retry = [p for p in rec.history if p.task["id"] == "T-001"]
+    assert rec.seen["T-001"]["store.py"] == renamed
+    assert retry.prior_failures[0].startswith(
+        "[continuing attempt 1] store.py already hold your previous attempt's work"
+    )
+    assert "TodoStoreImpl.count was removed or renamed" in retry.prior_failures[0]
+    assert retry.prior_failures != first.prior_failures  # a call-cache miss
+    notes = {t.name for t in out["gate_triage"] if t.run_against == "task/T-001"}
+    assert "ticket-skipped" not in notes
+    assert "signature-change" in notes
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "store.py").read_text() == renamed
+
+
+def test_a_changed_signature_no_other_ticket_uses_is_only_noted(tmp_path: Path) -> None:
+    renamed = _GOOD_IMPL.replace("def count(self)", "def size(self)")
+    rec = _Recorder(
+        writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}, "T-001": {"store.py": renamed}}
+    )
+    out, _, _ = _graph_case(tmp_path, rec, consumed=False)
+    assert rec.calls.count("T-001") == 1
+    notes = {t.name: t.explanation for t in out["gate_triage"] if t.run_against == "task/T-001"}
+    assert "TodoStoreImpl.count was removed or renamed" in notes["signature-change"]
+    assert "T-001" in _diffs(out)
+
+
+def test_a_turn_capped_attempt_that_fails_its_contract_check_keeps_its_files(
+    tmp_path: Path,
+) -> None:
+    drifted = "class Other:\n    pass\n"
+
+    class _Capped:
+        supports_turn_snapshots = True
+        stop = True
+
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            blob = json.dumps({"kind": "full-file-snapshot", "files": {"contracts.py": drifted}})
+            report = GateTriage(
+                name="adapter-report",
+                run_against="task/contracts",
+                explanation="turn budget exhausted before 'done' — partial work recorded",
+                produced_by="proxy-agent",
+                seq=_SEQ,
+            )
+            return AdapterResult(
+                diff_uri=sandbox.put_blob(blob.encode()),
+                snapshot_digest=sandbox.snapshot(),
+                triage=(report,) if self.stop else (),
+            )
+
+    adapter = _Capped()
+    scoped = _ScopedAdapter(
+        _runtime(adapter, ArtifactStore()),
+        {"contracts": ("contracts.py",)},
+        names={"contracts": ({"TodoStore": ("TodoStore",)}, True)},
+    )
+    packet = TaskPacket(
+        task={"id": "contracts"},
+        persona="p",
+        worktree_path="w",
+        turn_budget=1,
+        cost_budget_microusd=1,
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    for stop in (False, True):
+        adapter.stop = stop
+        with Sandbox(src) as sb, pytest.raises(ContractDriftError):
+            scoped.run(packet, sb)
+        # Only the session cut off mid-way keeps its files for the retry.
+        assert scoped.carry == ({"contracts": {"contracts.py": drifted}} if stop else {})
 
 
 def test_a_ticket_that_leaves_its_stub_untouched_counts_as_unwritten(tmp_path: Path) -> None:

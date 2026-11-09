@@ -22,7 +22,7 @@ from foundry.graph.supervisor import MODE_ASSISTANT
 from foundry.schemas.gates import GateStatus
 
 # A compiling module whose test COLLECTION fails (imports a missing module):
-# Build PASS, Test ERROR -> bounded fix, never advances -> no PR.
+# Build PASS, Test FAIL (a test module that fails to import) -> bounded fix, never advances -> no PR.
 _ERROR_DIFF = (
     "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"
@@ -75,7 +75,7 @@ def test_idempotency_key_is_deterministic_across_runs() -> None:
 
 
 def test_halted_run_emits_no_pr() -> None:
-    """A Test ERROR routes to bounded fix, never reaches an attested PASS; the
+    """A Test FAIL routes to bounded fix, never reaches an attested PASS; the
     emit guard opens NO PR (governance §1/§5)."""
     result = run(
         "build a broken service",
@@ -83,7 +83,7 @@ def test_halted_run_emits_no_pr() -> None:
         diff_body=_ERROR_DIFF,
         max_fix_attempts=2,
     )
-    assert result.gate_statuses.get("test") is GateStatus.ERROR
+    assert result.gate_statuses.get("test") is GateStatus.FAIL
     assert result.passed is False
     assert result.open_pr_idempotency_key is None
     assert result.artifact_uri is None

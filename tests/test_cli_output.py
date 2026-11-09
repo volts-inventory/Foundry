@@ -21,7 +21,7 @@ from foundry.cli import main, run
 from foundry.schemas.gates import GateStatus
 
 # Mirrors tests/test_cli_smoke.py: a compiling module whose test COLLECTION fails
-# (Build PASS, Test ERROR) -> bounded fix, never advances -> halted, no PR.
+# (Build PASS, Test FAIL) -> bounded fix, never advances -> halted, no PR.
 _ERROR_DIFF = (
     "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"
@@ -73,7 +73,7 @@ def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
         output_dir=str(out),
     )
 
-    assert result.gate_statuses.get("test") is GateStatus.ERROR
+    assert result.gate_statuses.get("test") is GateStatus.FAIL
     assert result.passed is False
     # NOT shipped: there is no accepted tree.
     assert result.output_root is None

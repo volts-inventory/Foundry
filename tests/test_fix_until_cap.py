@@ -177,6 +177,12 @@ def test_slow_passes_reach_the_dead_end_rules_in_fewer_passes() -> None:
     assert _rule([first, *quick]) is None
 
 
+def test_slow_scaling_never_raises_a_configured_limit_of_one() -> None:
+    first = _pass(0, "t0", "initial", restart=True)
+    slow = [first, _pass(1, "t1", "lateral", elapsed=3500.0)]
+    assert _rule(slow, FixPolicy(until_cap=True, plateau=1)) == "plateau"
+
+
 def test_without_a_time_cap_a_window_stops_at_its_ceiling() -> None:
     policy = FixPolicy(until_cap=True, plateau=99, window_ceiling=5)
     passes = [

@@ -151,6 +151,34 @@ _TOP_FUNCTION = re.compile(
     r"^(?:async\s+)?def\s+\w+\s*\(|^(?:export\s+)?(?:async\s+)?function\s+\w+",
     re.MULTILINE,
 )
+_RETURNS = re.compile(r"\)\s*(?:->|:)\s*([^\n{]*)")
+_PY_BASES = re.compile(r"\bclass\s+\w+\s*\(([^)]*)\)")
+_TS_BASES = re.compile(r"\b(?:extends|implements)\s+([\w.,\s]+?)\s*\{")
+
+
+def _bases(signature: str) -> set[str]:
+    found = _PY_BASES.findall(signature) + _TS_BASES.findall(signature)
+    return {w for group in found for w in re.findall(r"\w+", group)}
+
+
+def _top_functions(signature: str) -> list[str]:
+    """Each top-level function of ``signature``, up to the next unindented line."""
+    starts = [m.start() for m in _TOP_FUNCTION.finditer(signature)]
+    out: list[str] = []
+    for start in starts:
+        nxt = re.search(r"^\S", signature[start + 1 :], re.MULTILINE)
+        out.append(signature[start : start + 1 + nxt.start() if nxt else len(signature)])
+    return out
+
+
+def _builds(function: str, made: set[str], deps: Sequence[str]) -> bool:
+    """A function is a factory for a class only if it returns the class (or a base
+    of it) or takes one of the dependencies: a ``def main() -> None`` beside the
+    class hands it nothing."""
+    m = _RETURNS.search(function)
+    params, returned = (function[: m.start()], m.group(1)) if m else (function, "")
+    named = set(re.findall(r"\w+", returned))
+    return bool(named & made) or any(re.search(rf"\b{re.escape(d)}\b", params) for d in deps)
 
 
 def _wiring_findings(
@@ -177,21 +205,21 @@ def _wiring_findings(
         )
         if not deps:
             continue
-        factory = any(
-            (i := by_name.get(n)) is not None
-            and (
-                (i.kind == "function" and "." not in n) or n.endswith((".__init__", ".constructor"))
-            )
+        ctor = any(n.endswith((".__init__", ".constructor")) for n in t.implements)
+        functions = [
+            f.signature
             for n in t.implements
-        )
+            if (f := by_name.get(n)) is not None and f.kind == "function" and "." not in n
+        ]
         for name in t.implements:
             i = by_name.get(name)
-            if i is None or i.kind != "class" or _declaration_only(i) or factory:
+            if i is None or i.kind != "class" or _declaration_only(i) or ctor:
                 continue
             sig = i.signature
+            made = {name, *_bases(sig)}
             if (
                 _CTOR_ARGS.search(sig)
-                or _TOP_FUNCTION.search(sig)
+                or any(_builds(f, made, deps) for f in (*functions, *_top_functions(sig)))
                 or any(re.search(rf"\b{re.escape(d)}\b", sig) for d in deps)
             ):
                 continue

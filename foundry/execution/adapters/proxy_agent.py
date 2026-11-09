@@ -232,6 +232,8 @@ CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 CHECK_UNVERIFIED = "unverified"
 # The note of a session whose done was accepted only because its refusals ran out.
 CHECK_OVERRIDDEN = "done accepted with the gate still red"
+# The note of a session whose done came on its last turn, red, with no turn left to refuse it.
+CHECK_RED_LAST_TURN = "done on the last turn with the gate red"
 _DIGEST_PATHS = 12
 _DIGEST_ACTIONS = 5
 _DIGEST_LINES = 4
@@ -340,7 +342,7 @@ class _Loop:
     done: bool = False
     actions: list[str] = field(default_factory=list)  # _summarize of each action, in order
     last_check: str = ""  # the newest check/run outcome, for the stopped-early digest
-    # The per-write mypy's extra flags; None = no type check on write (self-check off).
+    # The per-write mypy's extra flags; None = no type check on write.
     write_check: tuple[str, ...] | None = None
 
 
@@ -474,10 +476,12 @@ class ProxyAgentAdapter:
                 )
             elif last is not None and last.red and st.done:
                 # Not a stop: the wave check judges the tree; the record says why it ended.
-                st.triage.append(
-                    f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s); its "
-                    "last check: " + " | ".join(last.yours[:6])[:1500]
+                how = (
+                    f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s)"
+                    if st.check_refusals
+                    else CHECK_RED_LAST_TURN
                 )
+                st.triage.append(f"{how}; its last check: " + " | ".join(last.yours[:6])[:1500])
             elif last is None:
                 # Not a stop: the wave check judges the tree as for any session.
                 why = (
@@ -1425,18 +1429,17 @@ _MYPY_TIMEOUT_S = 15
 _MYPY_MAX_LINES = 10
 
 
-def _write_check_flags() -> tuple[str, ...] | None:
+def _write_check_flags() -> tuple[str, ...]:
     """The per-write mypy's flags: the Build gate's lenient mypy flags, plus
-    ``--strict`` when the stack's typecheck is strict; None when this session's
-    self-check is off."""
+    ``--strict`` when the stack's typecheck is strict. On whatever the self-check
+    mode: with the cache it is cheap, and a cloud-tier or self-check-off session
+    otherwise learns of a type or import error only at the gate."""
     from foundry.gates.profiles import _MYPY_LENIENT
-    from foundry.gates.self_check import current_check, wanted
+    from foundry.gates.self_check import current_check
 
     spec = current_check()
-    if not wanted(spec.base.settings.mode if spec is not None else None):
-        return None
     stack = spec.base.state.get("stack") if spec is not None else None
-    strict = stack is not None and "--strict" in stack.typecheck
+    strict = stack is not None and "--strict" in stack.typecheck.split()
     return (*shlex.split(_MYPY_LENIENT)[1:], *(("--strict",) if strict else ()))
 
 

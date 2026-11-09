@@ -716,10 +716,11 @@ def test_a_written_module_importing_a_missing_name_is_reported_at_once(
     assert not any("mypy" in p for p in tree)
 
 
-def test_no_type_check_on_write_when_the_self_check_is_off(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("mode", ["off", "local"])
+def test_every_python_write_is_type_checked_whatever_the_self_check_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "off")
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", mode)
     obs, _ = write_session(
         tmp_path,
         [
@@ -730,7 +731,30 @@ def test_no_type_check_on_write_when_the_self_check_is_off(
             }
         ],
     )
-    assert obs[0] == "OBSERVATION:\nwrote typed.py (29 chars)"
+    assert "typed.py:2: error: Incompatible return value type" in obs[0], obs[0]
+
+
+@pytest.mark.parametrize(
+    ("typecheck", "strict"),
+    [
+        ("mypy --strict .", True),
+        ("mypy --strict-optional --strict-equality .", False),
+        ("mypy .", False),
+    ],
+)
+def test_the_write_check_is_strict_only_on_the_exact_strict_flag(
+    monkeypatch: pytest.MonkeyPatch, typecheck: str, strict: bool
+) -> None:
+    from types import SimpleNamespace
+
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+    import foundry.gates.self_check as self_check
+
+    spec = SimpleNamespace(
+        base=SimpleNamespace(state={"stack": SimpleNamespace(typecheck=typecheck)})
+    )
+    monkeypatch.setattr(self_check, "current_check", lambda: spec)
+    assert ("--strict" in proxy_agent._write_check_flags()) is strict
 
 
 def test_a_type_check_that_times_out_says_so(

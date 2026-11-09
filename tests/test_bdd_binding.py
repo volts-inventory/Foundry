@@ -255,6 +255,32 @@ def test_a_step_module_that_fails_to_import_is_a_fail_not_an_error(tmp_path: Pat
     assert gate.decide(obs) is GateStatus.FAIL
 
 
+def test_a_tree_syntax_error_at_collection_is_a_fail(tmp_path: Path) -> None:
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "def (:\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.FAIL
+
+
+def test_a_collection_error_naming_the_harness_stays_an_error(tmp_path: Path) -> None:
+    """An import error naming pytest / pytest-bdd is the pinned harness's, not a
+    verdict on the tree: no edit to the tree's own code fixes it."""
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "from pytest_bdd import no_such_api\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.ERROR
+
+
+def test_a_collection_error_outside_the_tree_stays_an_error(tmp_path: Path) -> None:
+    out = (
+        "____ ERROR collecting ../harness/gen_steps.py ____\n"
+        "E   ModuleNotFoundError: No module named 'app'\n"
+    )
+    from foundry.gates.test import collect_error_owners
+
+    assert collect_error_owners(out, tmp_path) == {"../harness/gen_steps.py": "harness"}
+
+
 def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
     root = _project(tmp_path, None)
     (root / "tests").mkdir(exist_ok=True)

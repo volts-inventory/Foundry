@@ -267,7 +267,7 @@ def _pass_fix(
                 return task_id.removeprefix(RESTART_PREFIX) in restarted
             return (
                 task_id.startswith(RESET_PREFIX)
-                and set(task_id.removeprefix(RESET_PREFIX).split("+")) == restarted
+                and set(task_id.removeprefix(RESET_PREFIX).split("+")) <= restarted
             )
 
         group = [

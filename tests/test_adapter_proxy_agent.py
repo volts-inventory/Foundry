@@ -18,8 +18,10 @@ import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
+from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy import ToolsUnsupported
+from foundry.state.reducers import union_triage
 
 
 def make_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
@@ -135,6 +137,51 @@ def test_turn_budget_bounds_the_loop(tmp_path: Path) -> None:
         result = adapter.run(make_packet(sb.worktree, turn_budget=3), sb)
     assert result.turns_used == 3
     assert any("turn budget exhausted" in t.explanation for t in result.triage)
+
+
+def test_a_session_cut_off_before_done_leaves_a_digest_summary(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "data.txt").write_text("x\n")
+    failing = "python -c 'assert 1 == 2, \"boom\"'"
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "read_file", "path": "data.txt"},
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "run", "cmd": failing},
+                {"action": "search", "pattern": "X ="},
+            ]
+        )
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=4), sb)
+    head, *rest = result.triage
+    assert head.name == DIGEST_TRIAGE and head.explanation.startswith(STOPPED_DIGEST)
+    digest = head.explanation
+    assert "files written: mod.py" in digest and "files read: data.txt" in digest
+    assert "FAILED: exit 1" in digest and "AssertionError: boom" in digest
+    assert digest.endswith(
+        "last actions: read_file data.txt -> write_file mod.py -> "
+        f"run {failing!r} -> search 'X =' in ."
+    )
+    assert [t.name for t in rest] == ["adapter-report"]
+    assert rest[0].explanation.startswith("turn budget exhausted")
+    # Its own record name: the stop note folding into the task's one adapter-report
+    # on the state channel does not take the digest with it.
+    assert {t.name for t in union_triage([], list(result.triage))} == {
+        DIGEST_TRIAGE,
+        "adapter-report",
+    }
+
+
+def test_a_finished_session_has_no_digest(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(scripted([{"action": "done", "summary": "built"}]))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert all(t.name != DIGEST_TRIAGE for t in result.triage)
 
 
 def _repair_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:

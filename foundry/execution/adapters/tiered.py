@@ -34,10 +34,13 @@ if TYPE_CHECKING:
     from foundry.execution.sandbox import Sandbox
 
 __all__ = [
+    "DIGEST_CAP",
+    "DIGEST_TRIAGE",
     "ESCALATED_TRIAGE",
     "ESCALATE_DECLINED_TRIAGE",
     "ESCALATE_FALLBACK_TRIAGE",
     "ESCALATE_REQUEST_TRIAGE",
+    "STOPPED_DIGEST",
     "STOPPED_TRIAGE",
     "TieredAdapter",
     "session_stop_reason",
@@ -58,6 +61,12 @@ STOPPED_TRIAGE = "stopped-early"
 # How a proxy-agent session reports that it ended without finishing (the last: it
 # spent its gate checks and its own work was still red, proxy_agent.CHECK_EXHAUSTED).
 _STOP_MARKERS = ("stopped early:", "turn budget exhausted", "check budget exhausted")
+# The note standing in for the summary of a proxy-agent session that ended without
+# `done`: what it did, from the loop's own record, for the escalation or restart
+# that picks the ticket up. Not a stop marker: the stop's own note follows it.
+DIGEST_TRIAGE = "session-digest"
+STOPPED_DIGEST = "stopped-early digest:"
+DIGEST_CAP = 1_500
 
 
 def session_stop_reason(triage: Iterable[Any]) -> str | None:

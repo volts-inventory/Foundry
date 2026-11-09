@@ -56,13 +56,14 @@ from foundry.execution.adapter_contract import (
     packet_tier_scope,
 )
 from foundry.execution.adapters.claude_code import changed_files, walk_worktree
+from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE, STOPPED_DIGEST
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from foundry.gates.self_check import SessionCheck
 
@@ -229,6 +230,9 @@ _OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] =
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 # The note of a session whose final tree no check judged.
 CHECK_UNVERIFIED = "unverified"
+_DIGEST_PATHS = 12
+_DIGEST_ACTIONS = 5
+_DIGEST_LINES = 4
 
 # The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
 # agent's sandbox does not, so a runner there wrote to "" and the agent never saw
@@ -331,6 +335,9 @@ class _Loop:
     checker: SessionCheck | None = None
     origin: dict[str, bytes] = field(default_factory=dict)  # the starting worktree
     check_refusals: int = 0
+    done: bool = False
+    actions: list[str] = field(default_factory=list)  # _summarize of each action, in order
+    last_check: str = ""  # the newest check/run outcome, for the stopped-early digest
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -484,16 +491,23 @@ class ProxyAgentAdapter:
         notes += [
             f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
         ]
+        # Ended without done, the session has no summary of its own: the digest
+        # stands in, under its own name — every adapter-report of a task folds into
+        # one record on the state channel (GateTriage.union_key), so the last note
+        # would hide it.
+        heads = [] if st.done else [(DIGEST_TRIAGE, _digest(st, authored, deleted))]
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
-                name="adapter-report",
+                name=name,
                 run_against=run_against,
                 explanation=note,
                 produced_by=self.name,
                 seq=Seq(self._run_id, 0, 0, self._node_id, i),
             )
-            for i, note in enumerate(notes)
+            for i, (name, note) in enumerate(
+                [*heads, *(("adapter-report", note) for note in notes)]
+            )
         )
         return AdapterResult(
             diff_uri=diff_uri,
@@ -586,10 +600,11 @@ class ProxyAgentAdapter:
                 return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
-            st.stopped = True
+            st.stopped = st.done = True
             self._activity(act)
             return None
         self._activity(act)
+        st.actions.append(_summarize(act))
         fp = _fingerprint(act)
         count, tree_then = st.repeats.get(fp, (0, st.tree))
         # Any tree change since the last identical action (a write, sed -i, a
@@ -630,6 +645,9 @@ class ProxyAgentAdapter:
             observation = f"ERROR: {exc}"
         if action == "run":
             observation += _install_notes(st, str(act.get("cmd", "")), observation)
+            st.last_check = f"{_summarize(act)}: {_head(observation)}"
+        elif action == "check":
+            st.last_check = f"check: {_head(observation)}"
         st.tree = _tree_state(worktree)
         st.repeats[fp] = (count, st.tree)
         if count >= _REPEAT_WARN:
@@ -745,6 +763,39 @@ class ProxyAgentAdapter:
                 )
             return obs
         return f"ERROR: unknown action {action!r}"
+
+
+_FAILING_LINE = re.compile(r"error|fail|assert|traceback|exception", re.IGNORECASE)
+
+
+def _head(observation: str) -> str:
+    """The status line of an observation and its first failing lines (else its
+    first lines)."""
+    lines = [ln.strip() for ln in observation.splitlines() if ln.strip()]
+    if not lines:
+        return "(no output)"
+    failing = [ln for ln in lines[1:] if _FAILING_LINE.search(ln)]
+    return " | ".join([lines[0], *(failing or lines[1:])[:_DIGEST_LINES]])
+
+
+def _digest(st: _Loop, authored: Mapping[str, str], deleted: Sequence[str]) -> str:
+    """The summary of a session that ended without ``done`` (turn cap, repeat or
+    read-thrash stop): built from the loop's record, not asked of the model."""
+
+    def paths(items: Iterable[str]) -> str:
+        names = sorted(items)
+        more = f" (+{len(names) - _DIGEST_PATHS} more)" if len(names) > _DIGEST_PATHS else ""
+        return ", ".join(names[:_DIGEST_PATHS]) + more if names else "none"
+
+    parts = [
+        f"{STOPPED_DIGEST} the session ended before done",
+        f"files written: {paths(authored)}",
+        *([f"files deleted: {paths(deleted)}"] if deleted else []),
+        f"files read: {paths(st.reads)}",
+        f"last check: {st.last_check or 'none run'}",
+        "last actions: " + (" -> ".join(st.actions[-_DIGEST_ACTIONS:]) or "none"),
+    ]
+    return "; ".join(parts)[:DIGEST_CAP]
 
 
 def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:

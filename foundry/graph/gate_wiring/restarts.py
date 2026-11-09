@@ -412,6 +412,44 @@ def ticket_reset(
     return writes, deleted
 
 
+def narrow_reset(
+    state: FactoryState,
+    reset: tuple[dict[str, str], tuple[str, ...]],
+    kept: Sequence[Ticket],
+    failed: Sequence[Ticket],
+    *,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """``reset`` (the :func:`ticket_reset` of ``kept`` and ``failed`` together) cut
+    to what the ``kept`` rebuilds replace: a path in a failed rebuild's write scope,
+    or one its earlier diffs touched, keeps its current content — the earlier build
+    of that ticket stays integrated. A path in a kept ticket's scope is reset
+    whatever touched it: its rebuild was written on the reset content."""
+    from foundry.agents.implementation.tickets import in_write_scope, task_id_for_ticket
+
+    ids = {task_id_for_ticket(t.id) for t in failed}
+    theirs: set[str] = set()
+    for art in _of_kind(state, FEATURE_DIFF_KIND):
+        if art.task_id in ids:
+            ops = _diff_ops(
+                _resolve_typed(art, resolve, FeatureDiff, FEATURE_DIFF_KIND), resolve_blob
+            )
+            theirs |= {*ops.writes, *ops.deletes, *ops.patches}
+    mine = [f for t in kept for f in t.files]
+    held = [f for t in failed for f in t.files]
+
+    def stays(path: str) -> bool:
+        if mine and in_write_scope(path, mine):
+            return False
+        return path in theirs or (bool(held) and in_write_scope(path, held))
+
+    return (
+        {p: c for p, c in reset[0].items() if not stays(p)},
+        tuple(p for p in reset[1] if not stays(p)),
+    )
+
+
 def _cluster_repairs(state: FactoryState, resolve: ArtifactResolver) -> set[str]:
     """The fix and revert diffs of the current fix loop aimed at the cluster its
     newest check plans to restart: a revert undoes the pass the check before it

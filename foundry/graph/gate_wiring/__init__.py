@@ -95,6 +95,7 @@ from foundry.graph.gate_wiring.materialize import (
 from foundry.graph.gate_wiring.restarts import (
     FailureCluster,
     failure_clusters,
+    narrow_reset,
     pending_restarts,
     plan_next_pass,
     restart_cluster,
@@ -225,6 +226,7 @@ __all__ = [
     "lift_epoch",
     "materialize_best",
     "materialize_workdir",
+    "narrow_reset",
     "no_fix_progress",
     "pending_restarts",
     "pip_manifest_failure",

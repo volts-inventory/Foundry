@@ -1741,6 +1741,36 @@ def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
     assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
 
 
+def test_a_restart_is_told_how_its_first_build_session_stopped(tmp_path: Path) -> None:
+    from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
+
+    digest = f"{STOPPED_DIGEST} the session ended before done; files written: a.py"
+
+    class _Stopped(_RestartRecorder):
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            first = packet.task["id"] == "T-001" and "T-001" not in self.calls
+            result = super().run(packet, sandbox)
+            if not first:
+                return result
+            note = GateTriage(
+                name=DIGEST_TRIAGE,
+                run_against="task/T-001",
+                explanation=digest,
+                produced_by="proxy-agent",
+                seq=Seq("run", 0, 0, "proxy-agent", 0),
+            )
+            return result.model_copy(update={"triage": (note,)})
+
+    rec = _Stopped(
+        writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}},
+    )
+    _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
+    memo = rec.packets["T-001"].prior_failures
+    assert memo[0] == "[fresh restart]"
+    assert f"its first build's session ended early: {digest}" in memo
+
+
 def test_a_restarts_gate_check_runs_on_the_reset_tree(tmp_path: Path) -> None:
     from foundry.gates.self_check import current_check
 
@@ -2106,3 +2136,36 @@ def test_a_restart_that_never_lands_does_not_halt_the_loop_as_no_progress(
     assert rec.calls[:5] == ["T-001", "fix-1", "T-001", "T-001", "fix-2"]
     assert not any(a.task_id == "restart-T-001" for a in out["artifacts"])
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out.get("gate_triage") or ())
+
+
+def test_a_failed_restart_keeps_its_siblings_rebuild_and_its_own_earlier_build(
+    tmp_path: Path,
+) -> None:
+    from foundry.graph.gate_wiring import materialize_workdir
+
+    rec = _ScriptedRestart(
+        writes={"fix-1": {"a.py": "def a_1(:\n", "c.py": "def c_1(:\n"}},
+        script={
+            "T-001": [{"a.py": "def a(:\n"}, {"a.py": "def a():\n    return 1\n"}],
+            "T-003": [{"c.py": "def c(:\n"}, None, None],
+        },
+    )
+    tickets = [
+        _ticket("T-001", 0, files=("a.py",)),
+        _ticket("T-003", 1, files=("c.py",)),
+        _ticket("T-002", 2, files=("app.py",), deps=("T-001", "T-003")),
+    ]
+    out, _ran, store = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=tickets)
+    # The wave's sessions run concurrently: count, don't order.
+    assert (rec.calls.count("T-001"), rec.calls.count("T-003")) == (2, 3)
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert passes[1].restart_tickets == ("T-001", "T-003")
+    # Only the landed rebuild is reset and credited as the pass.
+    diffs = [a.task_id for a in out["artifacts"] if a.kind == "feature_diff"]
+    assert "reset-T-001" in diffs and "restart-T-001" in diffs
+    assert not any(d in diffs for d in ("restart-T-003", "reset-T-001+T-003"))
+    assert (passes[2].fix_task, passes[2].touched) == ("restart-T-001", ("a.py",))
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
+    assert (tree / "c.py").read_text() == "def c_1(:\n"  # T-003's build, as fix-1 left it

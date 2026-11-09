@@ -12,6 +12,7 @@ from foundry.agents.implementation.tickets.constants import _FEATURE_DIFF_KIND, 
 from foundry.agents.implementation.tickets.scope import in_write_scope
 from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE
 from foundry.execution.work_pool import BudgetExceededError, ExecutionTask, LocalWorkPool
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
@@ -64,6 +65,11 @@ def _restart_prep(
     log = _pass_log(state, passes, resolve, blobs) if blobs is not None and tried else []
     failing = fix_failures(state, resolve)[:_RESTART_FAILURE_LINES]
     paths = sorted({*reset[0], *reset[1]})
+    digests = {
+        t.run_against.removeprefix("task/"): t.explanation
+        for t in state.get("gate_triage") or ()
+        if t.name == DIGEST_TRIAGE
+    }
     memo: dict[str, tuple[str, ...]] = {}
     notes: list[GateTriage] = []
     for t in wave:
@@ -75,6 +81,11 @@ def _restart_prep(
             f"its files ({files}) were reset to the tree before it was first built{why}. "
             "Write them again from the ticket's spec and criteria.",
             *log,
+            *(
+                (f"its first build's session ended early: {digests[tid][:DIGEST_CAP]}",)
+                if tid in digests
+                else ()
+            ),
             "the failures the earlier attempts left (the rebuild must not repeat them):",
             *failing,
         )

@@ -84,11 +84,17 @@ def task_from_ticket(
 
 
 def built_task_ids(state: FactoryState) -> set[str]:
-    return {
-        a.task_id
-        for a in (state.get("artifacts") or ())
-        if a.kind == _FEATURE_DIFF_KIND and a.task_id
-    }
+    """Task ids with a diff of their own; a fix-loop rebuild (``restart-<id>``) also
+    counts as ``<id>``, so a skipped ticket rebuilt that way unblocks its dependents."""
+    from foundry.graph.gate_wiring import RESTART_PREFIX
+
+    out: set[str] = set()
+    for a in state.get("artifacts") or ():
+        if a.kind == _FEATURE_DIFF_KIND and a.task_id:
+            out.add(a.task_id)
+            if a.task_id.startswith(RESTART_PREFIX):
+                out.add(a.task_id.removeprefix(RESTART_PREFIX))
+    return out
 
 
 def _skipped_task_ids(state: FactoryState) -> set[str]:
@@ -100,8 +106,8 @@ def _skipped_task_ids(state: FactoryState) -> set[str]:
 
 
 def unbuilt_task_ids(state: FactoryState) -> set[str]:
-    """Skipped tickets with no build of their own: every attempt failed. A fix-loop
-    rebuild lands under ``restart-<id>``, so it does not count as one."""
+    """Skipped tickets with no build: every attempt failed and no fix-loop rebuild
+    (``restart-<id>``) has landed."""
     return _skipped_task_ids(state) - built_task_ids(state)
 
 

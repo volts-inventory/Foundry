@@ -609,6 +609,61 @@ def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
     assert set(_diffs(out)) == {"T-001", "T-002"}
 
 
+def _engineering_note(name: str, tid: str, local: int, text: str = "x") -> Any:
+    from foundry.schemas.gates import GateTriage
+
+    return GateTriage(
+        name=name,
+        run_against=f"task/{tid}",
+        explanation=text,
+        produced_by="engineering",
+        seq=Seq("run", 1, local, "engineering", 0),
+    )
+
+
+def test_a_rebuilt_skipped_ticket_unblocks_its_dependents() -> None:
+    store = ArtifactStore()
+    tickets = [
+        _ticket("T-003", 0, files=("a.py",)),
+        _ticket("T-007", 1, files=("b.py",), deps=("T-003",)),
+    ]
+    skipped = [_engineering_note("ticket-skipped", "T-003", 3)]
+    state = _state(store, tickets, gate_triage=skipped)
+    assert pending_wave(state, store.resolve) == ()
+    diff = FeatureDiff(
+        diff_uri=store.put_blob(b"{}"),
+        task_id="restart-T-003",
+        branch="task/restart-T-003",
+        base_tree_sha="",
+        seq=_seq(9, "engineering"),
+    )
+    rebuilt = emit_artifact(diff, "feature_diff", "engineering", diff.seq, store=store).model_copy(
+        update={"task_id": diff.task_id}
+    )
+    state = _state(store, tickets, gate_triage=skipped, artifacts=[rebuilt])
+    assert [t.id for t in pending_wave(state, store.resolve)] == ["T-007"]
+
+
+def test_an_unreadable_or_stale_carry_note_is_no_carry(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    rec = _Recorder()
+    tickets = [_ticket("T-001", 0, files=("a.py",))]
+    notes = [
+        _engineering_note("ticket-failed:1", "T-001", 1),
+        # A unified-diff blob is no snapshot to carry.
+        _engineering_note("ticket-carry", "T-001", 2, store.put_blob(b"--- a/a.py\n+++ b/a.py\n")),
+        # Not a ticket of this wave: never resolved.
+        _engineering_note("ticket-carry", "T-404", 2, "cas://missing"),
+    ]
+    out = (
+        _graph(_runtime(rec, store), store, tmp_path)
+        .compile()
+        .invoke(_state(store, tickets, gate_triage=notes), _config())
+    )
+    assert rec.calls == ["T-001"]
+    assert "T-001" in _diffs(out)
+
+
 def test_over_budget_ticket_is_skipped_and_the_loop_ends(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder()

@@ -112,7 +112,12 @@ def _with_carried(
     """The session's diff plus every carried file it left untouched: the adapter
     diffs against the sandbox it was handed, which already held them, while the
     integrated tree does not."""
-    body = json.loads(sandbox.get_blob(result.diff_uri))
+    try:
+        body = json.loads(sandbox.get_blob(result.diff_uri))
+    except ValueError:
+        # A unified-diff adapter (stub, raw_react) writes diff text or "": there is no
+        # snapshot to fold the carried files into.
+        return result
     if not (isinstance(body, dict) and body.get("kind") == "full-file-snapshot"):
         return result
     files: dict[str, str] = dict(body.get("files") or {})

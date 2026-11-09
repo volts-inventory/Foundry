@@ -493,6 +493,35 @@ def test_a_turn_capped_attempt_that_fails_its_contract_check_keeps_its_files(
         assert scoped.carry == ({"contracts": {"contracts.py": drifted}} if stop else {})
 
 
+@pytest.mark.parametrize("body", [b"", b"--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+x\n"])
+def test_a_carried_retry_on_a_unified_diff_adapter_keeps_its_diff(
+    tmp_path: Path, body: bytes
+) -> None:
+    class _UnifiedDiff:
+        supports_turn_snapshots = False
+
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            return AdapterResult(
+                diff_uri=sandbox.put_blob(body), snapshot_digest=sandbox.snapshot()
+            )
+
+    scoped = _ScopedAdapter(
+        _runtime(_UnifiedDiff(), ArtifactStore()), {}, carried={"T-001": {"a.py": "x\n"}}
+    )
+    packet = TaskPacket(
+        task={"id": "T-001"},
+        persona="p",
+        worktree_path="w",
+        turn_budget=1,
+        cost_budget_microusd=1,
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    with Sandbox(src) as sb:
+        result = scoped.run(packet, sb)
+        assert sb.get_blob(result.diff_uri) == body
+
+
 def test_a_ticket_that_leaves_its_stub_untouched_counts_as_unwritten(tmp_path: Path) -> None:
     rec = _Recorder(
         writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}}, silent=frozenset({"T-001"})

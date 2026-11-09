@@ -352,15 +352,16 @@ def make_engineering_node(
             )
             if n != REPLAN_AFTER:
                 return False
-            progress.log(f"{tid}: planned signatures rejected {n} times, left to a re-plan")
+            progress.log(f"{tid}: planned signatures rejected {n} times, excluded from restarts")
             notes.append(
                 GateTriage(
                     name=REPLAN_TRIAGE,
                     run_against=f"task/{tid}",
                     explanation=(
                         f"the stub-signature guard rejected {n} attempts of {tid}: the "
-                        "planned interface is likely wrong, so the ticket is not rebuilt "
-                        f"again and needs a re-plan. Guard: {guard}"
+                        "planned interface is likely wrong. The ticket is excluded from "
+                        "fix-loop restarts; re-planning it is not automated yet, so its "
+                        f"interface needs a human (or a planner re-run) to revise. Guard: {guard}"
                     )[:2000],
                     produced_by=NODE_ID,
                     seq=rt.seq(config, NODE_ID, f"{REPLAN_TRIAGE}:{tid}"),
@@ -375,15 +376,23 @@ def make_engineering_node(
         skeleton = skeleton_files(state, resolve, blobs)
         # A retry after a named violation starts from its failed attempt's files.
         carried: dict[str, dict[str, str]] = {}
+        in_wave = {task_id_for_ticket(t.id) for t in wave}
         for tid, kept in _ticket_notes(state, CARRY_TRIAGE).items():
+            # A next-wave ticket is unbuilt; an escalation or restart starts afresh.
+            if blobs is None or tid not in in_wave or tid in requested or tid in restarts:
+                continue
             note = max(kept, key=lambda n: n.seq)
             last = max(failures.get(tid, ()), key=lambda n: n.seq, default=None)
-            if blobs is None or tid in requested or tid in restarts:
+            if last is not None and last.seq > note.seq:  # same pass mints both
                 continue
-            if last is None or last.seq <= note.seq:  # minted in the same pass
-                from foundry.graph.gate_wiring import snapshot_files
+            from foundry.graph.gate_wiring import MaterializationError, snapshot_files
 
+            try:
                 carried[tid] = snapshot_files(note.explanation, blobs)
+            except (MaterializationError, KeyError, ValueError) as exc:
+                progress.log(
+                    f"{tid}: its failed attempt's files are unreadable, not carried: {exc}"
+                )
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.

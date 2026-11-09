@@ -86,6 +86,7 @@ from foundry.agents.implementation.tickets.escalation import (
     escalation_pick,
     escalation_target,
     pending_escalations,
+    session_digests,
     stopped_tickets,
 )
 from foundry.agents.implementation.tickets.packet import (
@@ -218,6 +219,7 @@ __all__ = [
     "read_tickets",
     "scenario_rules",
     "scenario_verify",
+    "session_digests",
     "stopped_tickets",
     "task_from_ticket",
     "task_id_for_ticket",
@@ -376,6 +378,7 @@ def make_engineering_node(
                 a.task_id: a
                 for a in sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
             }
+            digests = session_digests(state)
             for tid in requested:
                 reasons[tid] = asked.get(tid, "the wave check failed twice")
                 diff = newest.get(tid)
@@ -395,10 +398,12 @@ def make_engineering_node(
                     reason=reasons[tid],
                     touched=touched,
                     reported=[
-                        t.explanation
-                        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
-                        if t.run_against == f"task/{tid}"
-                        and t.name in ("adapter-report", DIGEST_TRIAGE)
+                        *(
+                            t.explanation
+                            for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+                            if t.run_against == f"task/{tid}" and t.name == "adapter-report"
+                        ),
+                        *([digests[tid]] if tid in digests else []),
                     ],
                     kept=True,
                     failures=fix_context,
@@ -691,6 +696,21 @@ def make_engineering_node(
                         rid = f"{RESTART_PREFIX}{tid}"
                         task = task.model_copy(update={"id": rid, "branch": f"task/{rid}"})
                     out = _finalize_diff(rt, task, constraints, bases[tid], got, config)
+                    # Adapter seqs repeat across a task's sessions, so its first digest
+                    # would outlive them: re-minted here, each session's digest (empty
+                    # after done) supersedes the one before.
+                    out["gate_triage"] = [
+                        *(t for t in out.get("gate_triage") or () if t.name != DIGEST_TRIAGE),
+                        GateTriage(
+                            name=DIGEST_TRIAGE,
+                            run_against=f"task/{tid}",
+                            explanation=next(
+                                (t.explanation for t in got.triage if t.name == DIGEST_TRIAGE), ""
+                            ),
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"{DIGEST_TRIAGE}:{tid}"),
+                        ),
+                    ]
                     if tid in restart_memo:
                         out.pop("tasks", None)
                 except RunCapExceeded as exc:
@@ -761,26 +781,29 @@ def make_engineering_node(
         else:
             skeleton_concerns = ()
         _order_after_integrated(state, merged)
-        if restarts and len(built) < len(wave) and blobs is None:
-            # Without the blob store the reset cannot be narrowed, and landing it
-            # whole would delete the code of a ticket whose rebuild failed.
+        narrowed: tuple[dict[str, str], tuple[str, ...]] | None = reset
+        if restarts and len(built) < len(wave):
+            # A failed rebuild keeps its earlier build: the reset lands only where a
+            # rebuild replaces it (the wave check judges the mixed tree).
+            from foundry.graph.gate_wiring import narrow_reset
+
+            failed = [t for t in wave if t not in built]
+            if blobs is None:
+                narrowed = None
+            elif reset[0] or reset[1]:
+                narrowed = narrow_reset(
+                    state, reset, built, failed, resolve=resolve, resolve_blob=blobs
+                )
+        if restarts and narrowed is None:
+            # Landing the reset whole would delete the code of a ticket whose rebuild
+            # failed: no rebuild lands this wave.
             merged["artifacts"] = [
                 a
                 for a in merged.get("artifacts") or ()
                 if not (a.task_id or "").startswith(RESTART_PREFIX)
             ]
-        elif restarts and built and (reset[0] or reset[1]):
-            if len(built) < len(wave) and blobs is not None:
-                # A failed rebuild keeps its earlier build: the reset lands only where
-                # a rebuild replaces it (the wave check judges the mixed tree).
-                from foundry.graph.gate_wiring import narrow_reset
-
-                failed = [t for t in wave if t not in built]
-                reset = narrow_reset(
-                    state, reset, built, failed, resolve=resolve, resolve_blob=blobs
-                )
-            if reset[0] or reset[1]:
-                _land_reset(rt, config, state, resolve, merged, reset, built)
+        elif restarts and built and narrowed is not None and (narrowed[0] or narrowed[1]):
+            _land_reset(rt, config, state, resolve, merged, narrowed, built)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
         writes.setdefault("agent_journal", []).append(

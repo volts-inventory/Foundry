@@ -96,6 +96,7 @@ from foundry.graph.gate_wiring.materialize import (
 )
 from foundry.graph.gate_wiring.restarts import (
     FailureCluster,
+    cluster_owners,
     failure_clusters,
     narrow_reset,
     pending_restarts,
@@ -103,6 +104,7 @@ from foundry.graph.gate_wiring.restarts import (
     restart_cluster,
     restart_set,
     ticket_reset,
+    unbuilt_restart,
 )
 from foundry.graph.gate_wiring.routing import (
     _BOUNDARY_GATES,
@@ -210,6 +212,7 @@ __all__ = [
     "_write_sources",
     "best_entry",
     "bump_fix_attempts",
+    "cluster_owners",
     "contract_paths",
     "draft_best",
     "failing_ids",
@@ -251,6 +254,7 @@ __all__ = [
     "ticket_reset",
     "typecheck_only",
     "unbuilt_manifests",
+    "unbuilt_restart",
     "wave_scenarios",
     "wave_stack",
     "wave_typecheck",

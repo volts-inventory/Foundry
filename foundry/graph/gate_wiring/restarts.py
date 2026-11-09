@@ -66,7 +66,7 @@ _BDD_LINE = re.compile(r"^BDD criterion (\S+): scenario (\S+)")
 @dataclass(frozen=True)
 class FailureCluster:
     """Failures one fix pass repairs together. ``key`` is ``build`` / a gate name,
-    ``ticket:<ids>`` (the built tickets owning the failing scenarios or test
+    ``ticket:<ids>`` (the tickets, :func:`cluster_owners`, owning the failing scenarios or test
     modules), or ``feature:<path>`` / ``file:<path>`` when no ticket owns them;
     ``items`` are the ledger's ``gate:ident`` failures; ``tickets`` the task ids
     the cluster maps to. ``in_tests``: the failure is in a test module itself (it
@@ -196,6 +196,7 @@ def plan_next_pass(
     restartable: Callable[[FailureCluster], tuple[str, ...]],
     dead_end: bool = False,
     unimproved_only: bool = False,
+    unbuilt: Callable[[FailureCluster], tuple[str, ...]] | None = None,
 ) -> tuple[str | None, tuple[str, ...]]:
     """``(cluster key, tickets to restart)`` for the pass after ``passes`` (one
     window, in pass order): the first cluster by priority not yet tried
@@ -203,9 +204,15 @@ def plan_next_pass(
     it has been tried ``restart_after`` times and its tickets can be. With every
     cluster spent, the least-tried one. ``dead_end`` (the loop would stop here)
     restarts the first cluster that still can be. ``unimproved_only`` restarts only
-    a cluster no pass of the window has improved."""
+    a cluster no pass of the window has improved. Before any of that, the first
+    cluster ``unbuilt`` names tickets of (skipped ones, never built) builds them:
+    a repair of their scenarios writes the missing ticket from nothing."""
     if not clusters:
         return None, ()
+    if unbuilt is not None:
+        for c in clusters:
+            if tickets := unbuilt(c):
+                return c.key, tickets
     target: FailureCluster | None = None
     for c in clusters:
         stuck = _stuck(passes, c.key)
@@ -243,26 +250,31 @@ def restart_set(
     tests_ok: bool = False,
 ) -> tuple[str, ...]:
     """The tickets of ``task_ids`` that can be restarted together, else ``()``: one
-    or two built planned tickets with declared files, neither restarted before nor
-    the contracts ticket or the skeleton (every other ticket builds against those),
-    whose files no other built ticket's scope shares (a rebuild rewrites its whole
-    scope). A ticket that writes only tests is left out unless ``tests_ok`` (the
-    failure is in the test module itself): rebuilding the tests of failing code
-    rewrites the checks, not the code under them."""
+    or two planned tickets with declared files, built or skipped (never built),
+    neither restarted before, left to a re-plan, nor the contracts ticket or the
+    skeleton (every other ticket builds against those), whose files no other built
+    ticket's scope shares (a rebuild rewrites its whole scope). A built ticket that
+    writes only tests is left out unless ``tests_ok`` (the failure is in the test
+    module itself): rebuilding the tests of failing code rewrites the checks, not
+    the code under them."""
     from foundry.agents.implementation.interface_map import _is_test
     from foundry.agents.implementation.tickets import (
         _scopes_overlap,
         built_task_ids,
         read_tickets,
+        replan_task_ids,
         task_id_for_ticket,
+        unbuilt_task_ids,
     )
 
     planned = {task_id_for_ticket(t.id): t for t in read_tickets(state, resolve)}
+    unbuilt = unbuilt_task_ids(state)
     ids = tuple(
         sorted(
             tid
             for tid in set(task_ids)
             if tests_ok
+            or tid in unbuilt
             or tid not in planned
             or not planned[tid].files
             or not all(map(_is_test, planned[tid].files))
@@ -270,14 +282,16 @@ def restart_set(
     )
     if not 1 <= len(ids) <= _RESTART_TICKETS:
         return ()
-    spent = restarted_task_ids(state)
+    spent = restarted_task_ids(state) | replan_task_ids(state)
     built = built_task_ids(state)
     picks = [planned[tid] for tid in ids if tid in planned]
     if (
         len(picks) != len(ids)
         or any(not t.files for t in picks)
         or any(
-            tid in spent or tid not in built or tid in (CONTRACTS_TICKET_ID, SKELETON_TASK_ID)
+            tid in spent
+            or (tid not in built and tid not in unbuilt)
+            or tid in (CONTRACTS_TICKET_ID, SKELETON_TASK_ID)
             for tid in ids
         )
     ):
@@ -294,6 +308,25 @@ def restart_set(
     if len(picks) == 2 and _scopes_overlap(own(picks[0]), own(picks[1])):
         return ()
     return ids
+
+
+def cluster_owners(state: FactoryState) -> set[str]:
+    """The tickets :func:`failure_clusters` pins failures on: the built ones and the
+    skipped ones (their scenarios fail unexecuted; a restart can still build them)."""
+    from foundry.agents.implementation.tickets import built_task_ids, unbuilt_task_ids
+
+    return built_task_ids(state) | unbuilt_task_ids(state)
+
+
+def unbuilt_restart(
+    state: FactoryState, resolve: ArtifactResolver, cluster: FailureCluster
+) -> tuple[str, ...]:
+    """The :func:`restart_set` of ``cluster``'s skipped (never built) tickets alone."""
+    from foundry.agents.implementation.tickets import unbuilt_task_ids
+
+    unbuilt = unbuilt_task_ids(state)
+    ids = tuple(t for t in cluster.tickets if t in unbuilt)
+    return restart_set(state, resolve, ids) if ids else ()
 
 
 def pending_restarts(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...]:
@@ -316,12 +349,12 @@ def restart_cluster(
     """The key of the failure cluster a restart of ``tickets`` that stands in for an
     escalation rebuilds: the first of ``gates``' clusters that maps to one of them,
     else a ``ticket:`` key of their own."""
-    from foundry.agents.implementation.tickets import built_task_ids, read_tickets
+    from foundry.agents.implementation.tickets import read_tickets
 
     names = _BOUNDARY_GATES[boundary]
     verdicts = _newest_per_name(g for g in gates if g.name in names)
     clusters = failure_clusters(
-        verdicts.values(), read_tickets(state, resolve), built_task_ids(state)
+        verdicts.values(), read_tickets(state, resolve), cluster_owners(state)
     )
     return next(
         (c.key for c in clusters if set(c.tickets) & set(tickets)), "ticket:" + "+".join(tickets)

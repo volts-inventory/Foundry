@@ -9,6 +9,8 @@ from foundry.agents.implementation.tickets.constants import (
     _FEATURE_DIFF_KIND,
     CAP_TRIAGE,
     NODE_ID,
+    REPLAN_TRIAGE,
+    SIGNATURE_REJECTED_TRIAGE,
     SKIP_TRIAGE,
     TICKET_KIND,
 )
@@ -95,6 +97,24 @@ def _skipped_task_ids(state: FactoryState) -> set[str]:
         for t in (state.get("gate_triage") or ())
         if t.name == SKIP_TRIAGE and t.produced_by == NODE_ID
     }
+
+
+def unbuilt_task_ids(state: FactoryState) -> set[str]:
+    """Skipped tickets with no build of their own: every attempt failed. A fix-loop
+    rebuild lands under ``restart-<id>``, so it does not count as one."""
+    return _skipped_task_ids(state) - built_task_ids(state)
+
+
+def signature_rejections(state: FactoryState) -> dict[str, int]:
+    """Per task id, how many of its attempts the stub-signature guard rejected."""
+    return {
+        tid: len(notes) for tid, notes in _ticket_notes(state, SIGNATURE_REJECTED_TRIAGE).items()
+    }
+
+
+def replan_task_ids(state: FactoryState) -> set[str]:
+    """Tickets left to a re-plan: never rebuilt again."""
+    return set(_ticket_notes(state, REPLAN_TRIAGE))
 
 
 def _ticket_notes(state: FactoryState, prefix: str) -> dict[str, list[GateTriage]]:

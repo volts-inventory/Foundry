@@ -420,12 +420,14 @@ def narrow_reset(
     *,
     resolve: ArtifactResolver,
     resolve_blob: BlobResolver,
-) -> tuple[dict[str, str], tuple[str, ...]]:
+) -> tuple[dict[str, str], tuple[str, ...]] | None:
     """``reset`` (the :func:`ticket_reset` of ``kept`` and ``failed`` together) cut
     to what the ``kept`` rebuilds replace: a path in a failed rebuild's write scope,
     or one its earlier diffs touched, keeps its current content — the earlier build
-    of that ticket stays integrated. A path in a kept ticket's scope is reset
-    whatever touched it: its rebuild was written on the reset content."""
+    of that ticket stays integrated. A path in a kept ticket's scope is reset: its
+    rebuild was written on the reset content. ``None`` when such a path was also
+    written by a failed ticket's earlier diffs: no cut keeps both, so the caller
+    lands no reset at all."""
     from foundry.agents.implementation.tickets import in_write_scope, task_id_for_ticket
 
     ids = {task_id_for_ticket(t.id) for t in failed}
@@ -444,6 +446,8 @@ def narrow_reset(
             return False
         return path in theirs or (bool(held) and in_write_scope(path, held))
 
+    if mine and any(p in theirs and in_write_scope(p, mine) for p in (*reset[0], *reset[1])):
+        return None
     return (
         {p: c for p, c in reset[0].items() if not stays(p)},
         tuple(p for p in reset[1] if not stays(p)),

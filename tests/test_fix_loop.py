@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents.implementation.junior_engineer import _fix_summary, make_fixer_node
-from foundry.agents.implementation.tickets import pending_wave
+from foundry.agents.implementation.tickets import pending_wave, session_digests
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
@@ -1765,10 +1765,11 @@ def test_a_restart_is_told_how_its_first_build_session_stopped(tmp_path: Path) -
         writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
         again={"T-001": {"a.py": "def a():\n    return 1\n"}},
     )
-    _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
+    out, _ran, _store = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
     memo = rec.packets["T-001"].prior_failures
     assert memo[0] == "[fresh restart]"
     assert f"its first build's session ended early: {digest}" in memo
+    assert "T-001" not in session_digests(out)  # the restart's session ended with done
 
 
 def test_a_restarts_gate_check_runs_on_the_reset_tree(tmp_path: Path) -> None:
@@ -2169,3 +2170,34 @@ def test_a_failed_restart_keeps_its_siblings_rebuild_and_its_own_earlier_build(
     materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
     assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
     assert (tree / "c.py").read_text() == "def c_1(:\n"  # T-003's build, as fix-1 left it
+
+
+def test_a_reset_a_kept_rebuild_shares_with_a_failed_tickets_build_is_not_narrowed() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.graph.gate_wiring import narrow_reset
+
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("src/app/",)), _ticket("T-003", 1, files=("f.py",))]
+    state = _ticket_state(
+        store,
+        tickets,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"src/app/a.py": "a\n"}),
+            _diff_art(store, "T-003", 2, {"f.py": "f\n", "src/app/f_helpers.py": "h\n"}),
+        ],
+    )
+    kept, failed = read_tickets(state, store.resolve)
+
+    def narrow(deleted: tuple[str, ...]) -> tuple[dict[str, str], tuple[str, ...]] | None:
+        return narrow_reset(
+            state,
+            ({}, deleted),
+            [kept],
+            [failed],
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+        )
+
+    assert narrow(("f.py", "src/app/a.py")) == ({}, ("src/app/a.py",))
+    # Resetting T-001's scope would delete T-003's earlier helper: no cut keeps both.
+    assert narrow(("f.py", "src/app/a.py", "src/app/f_helpers.py")) is None

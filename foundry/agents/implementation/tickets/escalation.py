@@ -21,6 +21,7 @@ from foundry.agents.implementation.tickets.waves import next_wave
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.tiered import (
     DIGEST_CAP,
+    DIGEST_TRIAGE,
     ESCALATE_DECLINED_TRIAGE,
     ESCALATE_FALLBACK_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
@@ -67,6 +68,16 @@ def pending_escalations(state: FactoryState, resolve: ArtifactResolver) -> tuple
     }
     planned = {task_id_for_ticket(t.id) for t in read_tickets(state, resolve)}
     return tuple(sorted((asked & planned) - _escalation_settled(state)))
+
+
+def session_digests(state: FactoryState) -> dict[str, str]:
+    """Task id -> the digest of its newest session, for tasks whose newest session
+    ended before done (one that finished leaves an empty digest)."""
+    return {
+        t.run_against.removeprefix("task/"): t.explanation
+        for t in state.get("gate_triage") or ()
+        if t.name == DIGEST_TRIAGE and t.produced_by == NODE_ID and t.explanation
+    }
 
 
 def stopped_tickets(state: FactoryState) -> dict[str, str]:

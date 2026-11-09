@@ -9,10 +9,11 @@ from foundry import progress
 from foundry.agents._runtime import AgentRuntime
 from foundry.agents.implementation.tickets.adapter import _ScopedAdapter
 from foundry.agents.implementation.tickets.constants import _FEATURE_DIFF_KIND, NODE_ID
+from foundry.agents.implementation.tickets.escalation import session_digests
 from foundry.agents.implementation.tickets.scope import in_write_scope
 from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
-from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE
+from foundry.execution.adapters.tiered import DIGEST_CAP
 from foundry.execution.work_pool import BudgetExceededError, ExecutionTask, LocalWorkPool
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
@@ -65,11 +66,7 @@ def _restart_prep(
     log = _pass_log(state, passes, resolve, blobs) if blobs is not None and tried else []
     failing = fix_failures(state, resolve)[:_RESTART_FAILURE_LINES]
     paths = sorted({*reset[0], *reset[1]})
-    digests = {
-        t.run_against.removeprefix("task/"): t.explanation
-        for t in state.get("gate_triage") or ()
-        if t.name == DIGEST_TRIAGE
-    }
+    digests = session_digests(state)
     memo: dict[str, tuple[str, ...]] = {}
     notes: list[GateTriage] = []
     for t in wave:

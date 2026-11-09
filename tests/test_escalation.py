@@ -18,6 +18,7 @@ from foundry.agents.implementation.tickets import (
     escalation_pick,
     make_engineering_node,
     pending_escalations,
+    session_digests,
     stopped_tickets,
     task_from_ticket,
 )
@@ -689,6 +690,25 @@ def test_a_stopped_sessions_digest_reaches_its_escalation_whole(tmp_path: Path) 
     # The stop note and the digest are separate records: neither hides the other.
     assert f"the earlier attempt reported: {digest}" in context
     assert any("reported: " + TURN_CAP[:30] in line for line in context)
+
+
+def test_a_finished_session_supersedes_its_tasks_stopped_digest(tmp_path: Path) -> None:
+    digest = f"{STOPPED_DIGEST} the session ended before done; files written: app.py"
+    local = _Session(
+        stop={"T-001": TURN_CAP},
+        digest={"T-001": digest},
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "T-002": {"app.py": "def two():\n    return 2\n"},
+        },
+    )
+    cloud = _Session(writes={"T-001": {"app.py": "def one():\n    return 1\n"}})
+    out, _ran, _store = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    assert f"the earlier attempt reported: {digest}" in cloud.packets["T-001"].prior_failures
+    # The escalated session ended with done: a later escalation or restart of T-001
+    # reads no digest, and the stopped session's record is not left on the channel.
+    assert "T-001" not in session_digests(out)
+    assert not any(t.explanation == digest for t in out["gate_triage"])
 
 
 def test_a_final_wave_stop_keeps_its_work_and_never_escalates(tmp_path: Path) -> None:

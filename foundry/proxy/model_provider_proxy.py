@@ -1152,13 +1152,16 @@ class ModelProviderProxy:
         purpose: Purpose,
         schema: dict[str, Any] | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
+        effort: Literal["medium", "xhigh"] | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
 
         ``tools`` (Anthropic shape: name/description/input_schema) offers native
         tool calls, returned on ``CompletionResult.tool_calls``; a backend without
-        a tool channel raises :class:`ToolsUnsupported`."""
+        a tool channel raises :class:`ToolsUnsupported`. ``effort`` overrides the
+        local thinking level (agent turns medium, one-shot calls xhigh) for a
+        call that edits rather than invents, e.g. a plan repair."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1180,8 +1183,10 @@ class ModelProviderProxy:
             # agent loops (one turn of many). xhigh on the plan JSON thought past a 40K
             # cap without answering, so one-shot calls get the room the context leaves.
             agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
-            request["local_effort"] = "medium" if agent_turn else "xhigh"
-            cap = _LOCAL_THINKING_MAX_TOKENS if agent_turn else _LOCAL_DEEP_THINKING_MAX_TOKENS
+            level = effort or ("medium" if agent_turn else "xhigh")
+            request["local_effort"] = level
+            deep = level == "xhigh"
+            cap = _LOCAL_DEEP_THINKING_MAX_TOKENS if deep else _LOCAL_THINKING_MAX_TOKENS
             request["max_tokens"] = max(int(request["max_tokens"]), cap)
         elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to

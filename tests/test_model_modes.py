@@ -769,6 +769,18 @@ def test_local_thinking_is_routed_per_call_kind(
     ]
 
 
+def test_a_call_can_ask_for_medium_effort_and_its_cap() -> None:
+    local = RecordingTransport()
+    proxy = _local_proxy(local)
+    msgs = [{"role": "user", "content": "repair"}]
+    proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", effort="medium")
+    proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", effort="xhigh")
+    assert [(r["local_effort"], r["max_tokens"]) for r in local.requests] == [
+        ("medium", 40960),
+        ("xhigh", 98304),
+    ]
+
+
 def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

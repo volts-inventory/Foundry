@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -67,10 +68,10 @@ def stub_rules(
             "the planned contracts: each planned function and method with its exact "
             "signature and a `raise NotImplementedError` body (a contract class is "
             "implemented by the concrete subclass of it the stub declares). Fill in "
-            "every body and add whatever private helpers you need; never rename or "
-            "remove a stubbed class, function or method, and never change its "
-            "parameters or return annotation (checked: a changed public signature "
-            "fails the attempt)."
+            "every body and add an `__init__`, private helpers or extra methods as you "
+            "need; never rename or remove a stubbed class, function or method, and "
+            "never change its parameters or return annotation (checked: a changed "
+            "public signature fails the attempt)."
         )
     impls: dict[str, str] = {}  # contract class -> "XImpl in path"
     for path, text in skeleton.items():
@@ -80,15 +81,7 @@ def stub_rules(
             base = sig.removeprefix("class ").strip()
             if sig.startswith("class ") and base.isidentifier():
                 impls[base] = f"{name} in {path}"
-    wanted = {
-        n
-        for c in ticket.consumes
-        for n in (
-            c,
-            c.rpartition(".")[0],
-            *(contract_members(contracts[c].signature) if c in contracts else ()),
-        )
-    }
+    wanted = _consumed_names(ticket, contracts)
     named = [
         f"{cls} is implemented by {where}" for cls, where in sorted(impls.items()) if cls in wanted
     ]
@@ -98,6 +91,54 @@ def stub_rules(
             "by these names and annotate with the contract types."
         )
     return rules
+
+
+def _consumed_names(ticket: Ticket, contracts: Mapping[str, InterfaceContract]) -> set[str]:
+    """Every name a ticket's consumed contracts declare (a method contract's class too)."""
+    return {
+        n
+        for c in ticket.consumes
+        for n in (
+            c,
+            c.rpartition(".")[0],
+            *(contract_members(contracts[c].signature) if c in contracts else ()),
+        )
+    }
+
+
+def shared_stub_names(
+    ticket: Ticket,
+    tickets: Sequence[Ticket],
+    stubs: Mapping[str, str],
+    contracts: Mapping[str, InterfaceContract],
+    tree: Mapping[str, str | None],
+) -> frozenset[str]:
+    """The top-level names of ``ticket``'s typed ``stubs`` some other ticket depends
+    on: a contract it consumes declares the name (or the base a stubbed class
+    implements, which its IMPLEMENTATIONS rule names), or its plan text or its files
+    in ``tree`` mention it."""
+    declared: dict[str, set[str]] = {}  # top-level name -> its bases (a class)
+    for text in stubs.values():
+        for name, sig in (stub_signatures(text) or {}).items():
+            if "." not in name:
+                parts = sig.removeprefix("class ").split(",") if sig.startswith("class ") else []
+                declared[name] = {b.strip() for b in parts if b.strip()}
+    out: set[str] = set()
+    for other in tickets:
+        if other.id == ticket.id:
+            continue
+        wanted = _consumed_names(other, contracts)
+        text = "\n".join(
+            [
+                other.title,
+                other.description,
+                *(t for f in other.files if f not in stubs and isinstance(t := tree.get(f), str)),
+            ]
+        )
+        for name, bases in declared.items():
+            if name in wanted or bases & wanted or re.search(rf"\b{re.escape(name)}\b", text):
+                out.add(name)
+    return frozenset(out)
 
 
 def _skeleton_diff(

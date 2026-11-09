@@ -34,6 +34,8 @@ SIGNATURE_REJECTED_TRIAGE = "signature-rejected"
 REPLAN_TRIAGE = "ticket-replan"
 REPLAN_AFTER = 2
 SKELETON_TRIAGE = "skeleton"
+# A failed attempt's written files its retry starts from (explanation: their snapshot blob).
+CARRY_TRIAGE = "ticket-carry"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2

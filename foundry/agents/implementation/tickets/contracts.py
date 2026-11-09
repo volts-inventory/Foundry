@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from foundry.agents.implementation.stubs import signature_changes
+from foundry.agents.implementation.stubs import signature_findings
 from foundry.agents.implementation.tickets.constants import (
     CONTRACT_DRIFT_TRIAGE,
     CONTRACT_DUP_TRIAGE,
@@ -120,14 +120,18 @@ def _check_stub_signatures(
     stubs: Mapping[str, str],
     *,
     strict: bool,
+    shared: frozenset[str] | None = None,
 ) -> AdapterResult:
     """The ticket's stub files must keep every stubbed name, parameter list and
     return annotation: the other tickets code against them. ``strict`` fails the
     attempt (the retry sees the findings); on the last attempt the files are kept
-    and noted, as for contract drift."""
+    and noted, as for contract drift. ``shared`` are the top-level names another
+    ticket depends on (None: all of them); a change to only unshared ones is noted,
+    never failed."""
     worktree = Path(sandbox.worktree)
     diff = _written_sources(result, sandbox, task_id)
     findings: list[str] = []
+    pinned = False
     for path, stub in sorted(stubs.items()):
         if path in diff:
             text = diff[path]
@@ -137,15 +141,18 @@ def _check_stub_signatures(
                 text = target.read_text(encoding="utf-8") if target.is_file() else None
             except (OSError, UnicodeDecodeError):
                 continue
-        findings += [f"{path}: {f}" for f in signature_changes(stub, text)]
+        for name, finding in signature_findings(stub, text):
+            findings.append(f"{path}: {finding}")
+            pinned = pinned or shared is None or name.partition(".")[0] in shared
     if not findings:
         return result
     why = (
-        "; ".join(findings) + ". These are the planned public signatures every other "
-        "ticket codes against: keep each exactly as the typed stub gives it and only "
-        "fill in the bodies"
+        "; ".join(findings) + ". These are the planned public signatures the other "
+        "tickets code against: keep each planned top-level name and signature exactly "
+        "as the typed stub declares it and fill in the bodies. Adding `__init__`, "
+        "private helpers, extra methods or extra functions is allowed"
     )
-    if strict:
+    if strict and pinned:
         raise SignatureChangeError(why)
     note = GateTriage(
         name=SIGNATURE_CHANGE_TRIAGE,

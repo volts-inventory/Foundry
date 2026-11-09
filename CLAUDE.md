@@ -253,3 +253,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - A read-only review agent run in the main checkout may `git checkout <sha>` to inspect a commit, leaving HEAD detached so the next merge lands off-branch: tell reviewers to use `git show`/`git diff` only, and check `git branch --show-current` before merging.
 - A LaunchDaemon's env (e.g. Ollama's `OLLAMA_CONTEXT_LENGTH`) changes only on `launchctl bootout` + `bootstrap`; `kickstart -k` restarts it with the old values — check `ollama ps` CONTEXT after.
 - `scripts/bench.py` defaults to `--cases dice,todo,csv --scope demo`: a real bench round needs `--cases dice,todo,csv,notes,shop --scope standard`.
+- `rt.seq(config, NODE_ID, key)` mints equal Seqs for different keys within one node pass (same superstep, `local=0`): ordering two notes written in the same pass needs `<=`, not `<`.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -11,12 +12,16 @@ from foundry.agents.implementation.junior_engineer import _mirror_diff_blob
 from foundry.agents.implementation.stubs import is_stub
 from foundry.agents.implementation.tickets.constants import NODE_ID
 from foundry.agents.implementation.tickets.contracts import (
+    ContractDriftError,
+    SignatureChangeError,
     _check_contract_names,
     _check_stub_signatures,
     _flag_contract_duplicates,
+    _written_sources,
 )
 from foundry.agents.implementation.tickets.scope import trim_to_write_scope
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapters.tiered import session_stop_reason
 from foundry.schemas.implementation import FeatureDiff
 from foundry.state.seq import Seq
 
@@ -38,6 +43,8 @@ class _ScopedAdapter:
         stubs: Mapping[str, tuple[Mapping[str, str], bool]] | None = None,
         skeleton: Mapping[str, str] | None = None,
         checks: Mapping[str, CheckSpec] | None = None,
+        shared: Mapping[str, frozenset[str]] | None = None,
+        carried: Mapping[str, Mapping[str, str]] | None = None,
     ) -> None:
         assert rt.adapter is not None
         self._rt = rt
@@ -51,6 +58,12 @@ class _ScopedAdapter:
         # Task id -> (its typed stub files: path -> stub text, fail the attempt?).
         self._stubs = dict(stubs or {})
         self._skeleton = dict(skeleton or {})
+        # Task id -> the stubbed top-level names another ticket depends on.
+        self._shared = dict(shared or {})
+        # Task id -> the failed attempt's files its sandbox was seeded with.
+        self._carried = dict(carried or {})
+        # Task id -> the files a failed attempt wrote, for its retry to start from.
+        self.carry: dict[str, dict[str, str]] = {}
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
         # Task id -> why its session counted as empty. The work pool records a
         # worker's exception only as text, so the type is kept here.
@@ -62,6 +75,8 @@ class _ScopedAdapter:
 
         with check_scope(self._checks.get(tid)):
             result = self._rt.adapter.run(packet, sandbox)  # type: ignore[union-attr]
+        if tid in self._carried:
+            result = _with_carried(result, sandbox, self._carried[tid])
         files = self._scopes.get(tid, ())
         result = trim_to_write_scope(result, sandbox, files, tid)
         try:
@@ -69,15 +84,45 @@ class _ScopedAdapter:
         except EmptyTicketError as exc:
             self.empty[tid] = str(exc)
             raise
-        if tid in self._names:
-            required, strict = self._names[tid]
-            result = _check_contract_names(result, sandbox, files, tid, required, strict=strict)
-        if tid in self._stubs:
-            stubs, strict = self._stubs[tid]
-            result = _check_stub_signatures(result, sandbox, tid, stubs, strict=strict)
+        try:
+            if tid in self._names:
+                required, strict = self._names[tid]
+                result = _check_contract_names(result, sandbox, files, tid, required, strict=strict)
+            if tid in self._stubs:
+                stubs, strict = self._stubs[tid]
+                result = _check_stub_signatures(
+                    result, sandbox, tid, stubs, strict=strict, shared=self._shared.get(tid)
+                )
+        except ContractDriftError as exc:
+            # One named violation in otherwise kept work, or a session cut off mid-way:
+            # the retry fixes it on these files instead of rewriting them from the stubs.
+            if isinstance(exc, SignatureChangeError) or session_stop_reason(result.triage):
+                written = _written_sources(result, sandbox, tid)
+                if kept := {p: t for p, t in written.items() if isinstance(t, str)}:
+                    self.carry[tid] = kept
+            raise
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
+
+
+def _with_carried(
+    result: AdapterResult, sandbox: Sandbox, carried: Mapping[str, str]
+) -> AdapterResult:
+    """The session's diff plus every carried file it left untouched: the adapter
+    diffs against the sandbox it was handed, which already held them, while the
+    integrated tree does not."""
+    body = json.loads(sandbox.get_blob(result.diff_uri))
+    if not (isinstance(body, dict) and body.get("kind") == "full-file-snapshot"):
+        return result
+    files: dict[str, str] = dict(body.get("files") or {})
+    gone = set(body.get("deleted") or ())
+    worktree = Path(sandbox.worktree)
+    for rel in carried:
+        if rel not in files and rel not in gone and (worktree / rel).is_file():
+            files[rel] = (worktree / rel).read_text(encoding="utf-8")
+    payload = json.dumps({**body, "files": files}, sort_keys=True, ensure_ascii=False)
+    return result.model_copy(update={"diff_uri": sandbox.put_blob(payload.encode("utf-8"))})
 
 
 class EmptyTicketError(RuntimeError):

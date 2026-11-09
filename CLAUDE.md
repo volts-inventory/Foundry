@@ -252,3 +252,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - Acceptance criteria are never tombstoned: a re-plan that keeps a ticket id but drops one of its scenarios leaves the old record newest under that id — readers must filter by the newest PRD's `criterion_ids` (`quality._common.live_criterion_ids`).
 - A read-only review agent run in the main checkout may `git checkout <sha>` to inspect a commit, leaving HEAD detached so the next merge lands off-branch: tell reviewers to use `git show`/`git diff` only, and check `git branch --show-current` before merging.
 - A LaunchDaemon's env (e.g. Ollama's `OLLAMA_CONTEXT_LENGTH`) changes only on `launchctl bootout` + `bootstrap`; `kickstart -k` restarts it with the old values — check `ollama ps` CONTEXT after.
+- `scripts/bench.py` defaults to `--cases dice,todo,csv --scope demo`: a real bench round needs `--cases dice,todo,csv,notes,shop --scope standard`.

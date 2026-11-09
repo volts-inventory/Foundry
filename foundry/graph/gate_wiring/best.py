@@ -20,12 +20,12 @@ from foundry.graph.gate_wiring.ledger import (
     _pass_fix,
     _pass_order,
     _snapshot,
-    _snapshot_files,
     best_entry,
     fix_score,
     fix_window,
     regressions,
     restore_diff,
+    snapshot_files,
     typecheck_only,
 )
 from foundry.graph.gate_wiring.materialize import (
@@ -321,7 +321,7 @@ def materialize_best(
     materialize_workdir(
         state, dest, resolve=resolve, resolve_blob=resolve_blob, scaffold_manifest=False
     )
-    files = _snapshot_files(best.snapshot_uri, resolve_blob)
+    files = snapshot_files(best.snapshot_uri, resolve_blob)
     for rel in set(_text_files(dest)) - set(files):
         _contained_target(dest, rel).unlink()
     for rel, content in files.items():

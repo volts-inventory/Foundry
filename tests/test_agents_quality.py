@@ -39,7 +39,7 @@ def make_reviewer_critic_node(rt: AgentRuntime) -> Any:
     wraps the same call with its test bookkeeping)."""
 
     def _node(state: Any, config: RunnableConfig) -> dict[str, Any]:
-        result, note = review(rt, state, config, node_id="reviewer_critic", role="Reviewer")
+        result, note, _ = review(rt, state, config, node_id="reviewer_critic", role="Reviewer")
         return {"gates": [result.gate_result], "agent_journal": [note]}
 
     return _node

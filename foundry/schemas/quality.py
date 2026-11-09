@@ -95,7 +95,10 @@ class E2EReport(FrozenModel):
 class ReviewedTree(FrozenModel):
     """The integrated tree the review verdict ``verdict_seq`` judged, as a
     full-file snapshot blob: a later review in the run judges only the change
-    since (``reviewer_critic.review``)."""
+    since (``reviewer_critic.review``) — but only when ``complete``: that review
+    saw its whole change, untruncated. A record written before the flag existed
+    reads as incomplete, so the next review is full."""
 
     verdict_seq: Seq
     snapshot_uri: str
+    complete: bool = False

@@ -362,8 +362,17 @@ def _stored_diff(cas: ArtifactStore, task_id: str, body: str, epoch: int) -> Any
     )
 
 
+def _big_file(name: str) -> str:
+    lines = reviewer_critic._DIFF_CHAR_CAP // 6
+    return f"--- /dev/null\n+++ b/{name}\n@@ -0,0 +1,{lines} @@\n" + "+x = 1\n" * lines
+
+
 def _two_reviews(
-    monkeypatch: pytest.MonkeyPatch, *, keep_snapshot: bool = True
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    keep_snapshot: bool = True,
+    built_body: str = _ADD_APP,
+    fix_body: str = _FIX_APP,
 ) -> tuple[list[str], list[str | None], GateResult]:
     cas = ArtifactStore()
     transport = MockTransport(
@@ -386,14 +395,14 @@ def _two_reviews(
         emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
         for c in CRITERIA
     ]
-    built = _stored_diff(cas, "T1", _ADD_APP, 1)
+    built = _stored_diff(cas, "T1", built_body, 1)
     first = node({"artifacts": [*criteria, built]}, _config())
     produced = [
         a
         for a in first["artifacts"]
         if keep_snapshot or a.kind != reviewer_critic.REVIEWED_TREE_KIND
     ]
-    fix = _stored_diff(cas, "fix-1", _FIX_APP, 2)
+    fix = _stored_diff(cas, "fix-1", fix_body, 2)
     state: FactoryState = {
         "artifacts": [*criteria, built, *produced, fix],
         "gates": first["gates"],
@@ -426,3 +435,67 @@ def test_a_re_review_without_the_last_reviewed_tree_is_full(
     (_, second), efforts, _ = _two_reviews(monkeypatch, keep_snapshot=False)
     assert efforts == [None, None]
     assert "re-review" not in second and "--- task fix-1" in second
+
+
+@pytest.mark.parametrize(
+    ("built_body", "fix_body"),
+    [
+        # The first review saw only the head of its change: the rest was never judged.
+        (_ADD_APP + _big_file("big.py"), _FIX_APP),
+        # The change since the last review would itself be cut.
+        (_ADD_APP, _FIX_APP + _big_file("big.py")),
+    ],
+)
+def test_a_re_review_is_full_unless_both_reviews_see_their_whole_change(
+    records: Any, monkeypatch: pytest.MonkeyPatch, built_body: str, fix_body: str
+) -> None:
+    (_, second), efforts, _ = _two_reviews(monkeypatch, built_body=built_body, fix_body=fix_body)
+    assert efforts == [None, None]
+    assert "re-review" not in second and "--- task T1" in second
+
+
+def test_a_reviewed_tree_recorded_before_completeness_reads_as_incomplete() -> None:
+    from foundry.schemas.quality import ReviewedTree
+
+    legacy = ReviewedTree.model_validate(
+        {"verdict_seq": Seq("r", 1, 0, "reviewer", 0), "snapshot_uri": "cas://sha256/x"}
+    )
+    assert legacy.complete is False
+
+
+def test_a_review_builds_the_tree_once_and_judges_checks_on_its_gated_sha(
+    records: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    from foundry.graph import gate_wiring
+    from foundry.graph.gate_wiring import materialize
+
+    cas = ArtifactStore()
+    criteria = [
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
+        for c in CRITERIA
+    ]
+    state: FactoryState = {"artifacts": [*criteria, _stored_diff(cas, "T1", _ADD_APP, 1)]}
+    gated = gate_wiring.materialize_workdir(
+        state, tmp_path, resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    failed = _gate("test", GateStatus.FAIL, _S001_FAILED, local=1)
+    state["gates"] = [failed.model_copy(update={"run_against": gated})]
+
+    builds: list[str] = []
+    real = materialize.materialize_workdir
+
+    def counted(*args: Any, **kwargs: Any) -> str:
+        builds.append("built")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(materialize, "materialize_workdir", counted)
+    monkeypatch.setattr(gate_wiring, "materialize_workdir", counted)
+    transport = MockTransport(verdicts=[verdict_json("request-changes", [_CITES_S001])])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    [verdict] = node(state, _config())["gates"]
+    assert builds == ["built"]
+    # S001 fails on the very tree under review, so the finding citing it blocks.
+    assert verdict.status is GateStatus.FAIL
+    assert "test, features/T1.feature::S001" in transport.requests[0]["messages"][0]["content"]

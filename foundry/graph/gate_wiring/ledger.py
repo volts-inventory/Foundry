@@ -285,7 +285,7 @@ def _pass_fix(
     return newest.task_id, tuple(sorted(touched))
 
 
-def _snapshot_blob(files: Mapping[str, str], deleted: Iterable[str] = ()) -> bytes:
+def snapshot_blob(files: Mapping[str, str], deleted: Iterable[str] = ()) -> bytes:
     body: dict[str, Any] = {"kind": "full-file-snapshot", "files": dict(files)}
     if deleted:
         body["deleted"] = sorted(deleted)
@@ -309,10 +309,10 @@ def _snapshot(
         files = integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
     except MaterializationError:
         return None
-    return rt.cas.put_blob(_snapshot_blob(files))
+    return rt.cas.put_blob(snapshot_blob(files))
 
 
-def _snapshot_files(uri: str, resolve_blob: BlobResolver) -> dict[str, str]:
+def snapshot_files(uri: str, resolve_blob: BlobResolver) -> dict[str, str]:
     body = resolve_blob(uri)
     text = body.decode("utf-8") if isinstance(body, bytes) else body
     files = _maybe_snapshot_files(uri, text)
@@ -338,7 +338,7 @@ def restore_diff(
     if rt.cas is None or best.snapshot_uri is None:
         return None
     current = integrated_files(state, resolve=resolve, resolve_blob=resolve_blob)
-    target = _snapshot_files(best.snapshot_uri, resolve_blob)
+    target = snapshot_files(best.snapshot_uri, resolve_blob)
     writes = {p: c for p, c in target.items() if current.get(p) != c}
     deleted = set(current) - set(target)
     if not writes and not deleted:
@@ -372,7 +372,7 @@ def snapshot_diff(
     """A FeatureDiff ``task_id`` writing ``writes`` whole and deleting ``deleted``,
     its epoch lifted past every diff on ``state`` so it applies last."""
     assert rt.cas is not None
-    blob = rt.cas.put_blob(_snapshot_blob(writes, deleted))
+    blob = rt.cas.put_blob(snapshot_blob(writes, deleted))
     seq = lift_epoch(state, rt.seq(config, node_id, f"diff:{task_id}"))
     diff = FeatureDiff(
         diff_uri=blob, task_id=task_id, branch=f"task/{task_id}", base_tree_sha=base_tree, seq=seq

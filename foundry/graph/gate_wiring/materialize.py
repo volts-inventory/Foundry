@@ -586,8 +586,14 @@ def materialize_workdir(
     # SBOM (no-op when the engineers already shipped one, or the tree is non-Python).
     # An agent's worktree skips it: an engineer handed the scaffold keeps its header
     # and all, and a scaffolded manifest is never installed.
+    if scaffold_manifest:
+        return _gated_tree_sha(dest, state)
+    return tree_sha(dest, toolchain_digest=_toolchain_digest(state.get("stack")))
+
+
+def _gated_tree_sha(dest: Path, state: FactoryState) -> str:
     stack = state.get("stack")
-    if scaffold_manifest and (stack is None or stack.language == "python"):
+    if stack is None or stack.language == "python":
         _scaffold_manifest(dest)
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
@@ -615,11 +621,21 @@ def integrated_files(
     (an agent told to "make the gates pass" must not be handed the oracle to edit):
     what an agent's worktree is seeded with, and what a fix pass's snapshot keeps.
     Raises :class:`MaterializationError` when the tree cannot be built."""
+    return integrated_tree(state, resolve=resolve, resolve_blob=resolve_blob)[1]
+
+
+def integrated_tree(
+    state: FactoryState, *, resolve: ArtifactResolver, resolve_blob: BlobResolver
+) -> tuple[str, dict[str, str]]:
+    """From one build: the ``tree_sha`` the gates judge for the integrated tree
+    (:func:`materialize_workdir`'s) and its :func:`integrated_files`."""
     with tempfile.TemporaryDirectory(prefix="foundry-tree-") as tmp:
+        root = Path(tmp)
         materialize_workdir(
-            state, Path(tmp), resolve=resolve, resolve_blob=resolve_blob, scaffold_manifest=False
+            state, root, resolve=resolve, resolve_blob=resolve_blob, scaffold_manifest=False
         )
-        return _text_files(Path(tmp))
+        files = _text_files(root)
+        return _gated_tree_sha(root, state), files
 
 
 def lift_epoch(state: FactoryState, seq: Seq) -> Seq:

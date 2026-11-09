@@ -839,10 +839,10 @@ def test_the_window_is_one_boundary_over_one_set_of_ticket_diffs() -> None:
 
 def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
     from foundry.graph.gate_wiring import (
-        _snapshot_blob,
         integrated_files,
         materialize_workdir,
         restore_diff,
+        snapshot_blob,
     )
 
     base = tmp_path / "base"
@@ -884,7 +884,7 @@ def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
         )
 
     snapshot = store.put_blob(
-        _snapshot_blob(
+        snapshot_blob(
             integrated_files(good, resolve=store.resolve, resolve_blob=store.resolve_blob)
         )
     )

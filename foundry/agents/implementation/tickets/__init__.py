@@ -148,6 +148,7 @@ from foundry.agents.implementation.tickets.waves import (
 )
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
+    DIGEST_TRIAGE,
     ESCALATE_DECLINED_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
@@ -396,7 +397,8 @@ def make_engineering_node(
                     reported=[
                         t.explanation
                         for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
-                        if t.run_against == f"task/{tid}" and t.name == "adapter-report"
+                        if t.run_against == f"task/{tid}"
+                        and t.name in ("adapter-report", DIGEST_TRIAGE)
                     ],
                     kept=True,
                     failures=fix_context,
@@ -759,16 +761,18 @@ def make_engineering_node(
         else:
             skeleton_concerns = ()
         _order_after_integrated(state, merged)
-        if restarts and len(built) < len(wave):
-            # The reset covers every restarted ticket's files: landing it without each
-            # rebuild would delete the code of a ticket whose rebuild failed.
-            merged["artifacts"] = [
-                a
-                for a in merged.get("artifacts") or ()
-                if not (a.task_id or "").startswith(RESTART_PREFIX)
-            ]
-        elif restarts and (reset[0] or reset[1]):
-            _land_reset(rt, config, state, resolve, merged, reset, wave)
+        if restarts and built and (reset[0] or reset[1]):
+            if len(built) < len(wave) and blobs is not None:
+                # A failed rebuild keeps its earlier build: the reset lands only where
+                # a rebuild replaces it (the wave check judges the mixed tree).
+                from foundry.graph.gate_wiring import narrow_reset
+
+                failed = [t for t in wave if t not in built]
+                reset = narrow_reset(
+                    state, reset, built, failed, resolve=resolve, resolve_blob=blobs
+                )
+            if reset[0] or reset[1]:
+                _land_reset(rt, config, state, resolve, merged, reset, built)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
         writes.setdefault("agent_journal", []).append(

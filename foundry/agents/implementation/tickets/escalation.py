@@ -20,10 +20,12 @@ from foundry.agents.implementation.tickets.tasks import (
 from foundry.agents.implementation.tickets.waves import next_wave
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.tiered import (
+    DIGEST_CAP,
     ESCALATE_DECLINED_TRIAGE,
     ESCALATE_FALLBACK_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
+    STOPPED_DIGEST,
     STOPPED_TRIAGE,
 )
 from foundry.schemas.base import Artifact
@@ -200,7 +202,11 @@ def _escalation_context(
         f"not finish it: {reason[:300]}",
         f"you are re-running it once on {target}; {tree}",
         f"the earlier attempt touched: {touched}",
-        *(f"the earlier attempt reported: {r[:300]}" for r in reported),
+        *(
+            "the earlier attempt reported: "
+            + r[: DIGEST_CAP if r.startswith(STOPPED_DIGEST) else 300]
+            for r in reported
+        ),
         *failures,
     )
 

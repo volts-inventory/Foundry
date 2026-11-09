@@ -25,10 +25,11 @@ from foundry.agents.implementation.tickets import CHECK_RULE, verify_rules
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import (
     CHECK_EXHAUSTED,
+    CHECK_OVERRIDDEN,
     CHECK_UNVERIFIED,
     ProxyAgentAdapter,
 )
-from foundry.execution.adapters.tiered import TieredAdapter, session_stop_reason
+from foundry.execution.adapters.tiered import DIGEST_TRIAGE, TieredAdapter, session_stop_reason
 from foundry.execution.sandbox import Sandbox
 from foundry.gates import sandbox as gate_sandbox
 from foundry.gates.pydeps import PythonEnvCache
@@ -447,6 +448,25 @@ def test_a_red_done_is_refused_at_most_twice(
     assert "call done again" in obs[2]
     assert result.turns_used == 4
     assert session_stop_reason(result.triage) is None  # checks were left
+    forced = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_OVERRIDDEN)]
+    assert len(forced) == 1 and "app.py:1: error: not done yet" in forced[0], result.triage
+
+
+def test_the_check_run_at_done_is_the_digests_last_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "a"},
+            {"action": "read_file", "path": "app.py"},
+        ],
+        turn_budget=3,
+    )
+    digest = next(t.explanation for t in result.triage if t.name == DIGEST_TRIAGE)
+    assert "last check: check at done: CHECK FAILED" in digest, digest
 
 
 def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(

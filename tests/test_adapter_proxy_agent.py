@@ -684,6 +684,67 @@ def test_accepted_write_is_unchanged_and_gets_mypy_advice(tmp_path: Path) -> Non
     assert not any(".mypy_cache" in p for p in tree)
 
 
+_SERVICES = "class AdminService:\n    def ban(self, uid: int) -> None: ...\n"
+# A local fixer wrote a test importing names its module never defined; nothing said so
+# until the gate, an hour later.
+_BAD_TEST = "from app.services import AdminServiceImpl\n\n\ndef test_x() -> None:\n    pass\n"
+
+
+def test_a_written_module_importing_a_missing_name_is_reported_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+
+    cached: list[bool] = []
+    real = proxy_agent._mypy_advisory
+
+    def _spy(sandbox: Sandbox, *args: Any) -> str:
+        out = real(sandbox, *args)
+        cached.append((Path(sandbox.worktree).parent / "mypy-cache").is_dir())
+        return out
+
+    monkeypatch.setattr(proxy_agent, "_mypy_advisory", _spy)
+    seed = {"app/__init__.py": "", "app/services.py": _SERVICES}
+    write = {"action": "write_file", "path": "tests/test_T08.py", "content": _BAD_TEST}
+    obs, tree = write_session(tmp_path, [write, {**write, "content": _BAD_TEST + "\n"}], seed)
+    for o in obs[:2]:
+        assert 'Module "app.services" has no attribute "AdminServiceImpl"' in o, o
+    # The cache persists beside the worktree for the session (a write importing
+    # pydantic + langgraph: 2.7s cold, 0.16s warm; 2.5s every write without it),
+    # never in the diff.
+    assert cached == [True, True]
+    assert not any("mypy" in p for p in tree)
+
+
+def test_no_type_check_on_write_when_the_self_check_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", "off")
+    obs, _ = write_session(
+        tmp_path,
+        [
+            {
+                "action": "write_file",
+                "path": "typed.py",
+                "content": "def f() -> str:\n    return 1\n",
+            }
+        ],
+    )
+    assert obs[0] == "OBSERVATION:\nwrote typed.py (29 chars)"
+
+
+def test_a_type_check_that_times_out_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+
+    monkeypatch.setattr(proxy_agent, "_MYPY_TIMEOUT_S", 0.01)
+    obs, _ = write_session(
+        tmp_path, [{"action": "write_file", "path": "ok.py", "content": "x = 1\n"}]
+    )
+    assert "NOTE: type check timed out" in obs[0]
+
+
 def runs(n: int) -> list[dict[str, Any]]:
     return [{"action": "run", "cmd": f"echo filler-{i}"} for i in range(n)]
 
@@ -951,6 +1012,27 @@ def test_native_tool_calls_in_one_turn_run_in_order_as_tool_results(tmp_path: Pa
     assert "first" in res[1]["content"]
     assert res[3]["content"].startswith("exit 0") and "second" in res[3]["content"]
     assert [t.explanation for t in result.triage] == ["built", "no docs"]
+
+
+def test_a_native_write_gets_the_type_check_too(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "app").mkdir(parents=True)
+    (src / "app/__init__.py").write_text("")
+    (src / "app/services.py").write_text(_SERVICES)
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [("write_file", {"path": "tests/test_T08.py", "content": _BAD_TEST})],
+                [("done", {"summary": "built"})],
+            ],
+            seen,
+        ),
+    )
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    assert "AdminServiceImpl" in results_of(seen[1])[0]["content"]
 
 
 def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None:

@@ -143,6 +143,67 @@ def _builtin_method_findings(
     return tuple(out)
 
 
+# A constructor taking something besides the receiver.
+_CTOR_ARGS = re.compile(r"\b(?:__init__|constructor)\s*\(\s*(?!(?:self\s*)?\))")
+
+# A top-level (unindented) function: a factory beside the class.
+_TOP_FUNCTION = re.compile(
+    r"^(?:async\s+)?def\s+\w+\s*\(|^(?:export\s+)?(?:async\s+)?function\s+\w+",
+    re.MULTILINE,
+)
+
+
+def _wiring_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """An entrypoint ticket's class contract that composes other tickets' class
+    contracts but declares no way to receive them: its stub is a bare class nothing
+    can hand the store/services to, and the stub-signature guard rejects the
+    factory the implementer reaches for. A constructor taking arguments, a factory
+    function (in the signature or a function contract of the same ticket), or a
+    signature naming the dependencies itself is enough."""
+    by_name = {i.name: i for i in interfaces}
+
+    def injected(name: str) -> bool:
+        i = by_name.get(name) or by_name.get(name.partition(".")[0])
+        return i is not None and i.kind == "class" and not _declaration_only(i)
+
+    out: list[str] = []
+    for t in tickets:
+        if not t.entrypoint or t.id in _GENERATED_TICKETS:
+            continue
+        deps = sorted(
+            {n.partition(".")[0] for n in t.consumes if n not in t.implements and injected(n)}
+        )
+        if not deps:
+            continue
+        factory = any(
+            (i := by_name.get(n)) is not None
+            and (
+                (i.kind == "function" and "." not in n) or n.endswith((".__init__", ".constructor"))
+            )
+            for n in t.implements
+        )
+        for name in t.implements:
+            i = by_name.get(name)
+            if i is None or i.kind != "class" or _declaration_only(i) or factory:
+                continue
+            sig = i.signature
+            if (
+                _CTOR_ARGS.search(sig)
+                or _TOP_FUNCTION.search(sig)
+                or any(re.search(rf"\b{re.escape(d)}\b", sig) for d in deps)
+            ):
+                continue
+            out.append(
+                f"Contract {name} (entrypoint ticket {t.id}) composes {', '.join(deps)} "
+                "but declares no way to receive them: give its signature an __init__ "
+                "taking them, or add a factory function to the contract that takes "
+                f"them and returns a {name}."
+            )
+    return tuple(out)
+
+
 _GOAL_ID = re.compile(r"(MH|SC)[-_ ]?0*(\d+)", re.IGNORECASE)
 
 
@@ -444,6 +505,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"consumes contract .* but does not depend on", "contract-dep-missing"),
         (r"after a builtin its own annotations use", "contract-builtin-method"),
         (r"already exists in the base tree", "contract-redeclared"),
+        (r"declares no way to receive them", "contract-unwired"),
         (r"^Contract \S.* does not compile", "contract-compile"),
         (r"more \S+ error\(s\)\.$", "contract-compile"),
         (r"^Scenario \S+ is not owned by a live ticket", "scenario-orphan"),

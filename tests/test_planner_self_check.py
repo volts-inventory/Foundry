@@ -30,11 +30,12 @@ from foundry.agents.planner import (
     _wire_entrypoint,
     make_planner_node,
 )
-from foundry.agents.planner.checks import finding_kind
+from foundry.agents.planner.checks import _wiring_findings, finding_kind
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport, ResponseScript
+from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import Specialty, Ticket
 from foundry.schemas.product import AcceptanceCriterion, CriteriaCritique
@@ -938,6 +939,93 @@ def test_the_entrypoint_is_wired_to_every_feature_unless_that_closes_a_cycle() -
     cyclic = [_t("A", "APP"), _t("APP", entry=True)]
     out, concerns = _wire_entrypoint(cyclic)
     assert out == cyclic and concerns == []  # left for the coverage check
+
+
+_WSGI_CALL = (
+    "    def __call__(self, environ: dict[str, str], start_response: Callable[..., None])"
+    " -> Iterable[bytes]: ..."
+)
+
+
+def _ifc(name: str, signature: str, kind: str = "class") -> InterfaceContract:
+    return InterfaceContract(
+        name=name, spec_uri="cas://x", kind=kind, signature=signature, seq=_SEQ
+    )
+
+
+_STORE = _ifc(
+    "DomainStore", "class DomainStore(Protocol):\n    def get(self, key: int) -> str: ..."
+)
+_BARE_APP = _ifc("WsgiApp", "class WsgiApp(Protocol):\n" + _WSGI_CALL)
+
+
+def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_receives_them() -> None:
+    # A local shop run: `class WsgiApp: def __call__(...)` with no __init__ or factory,
+    # so its stub was a bare class nothing could hand the store to.
+    tickets = [
+        _t("STORE", implements=("DomainStore",)),
+        _t("APP", "STORE", entry=True, implements=("WsgiApp",), consumes=("DomainStore",)),
+    ]
+    (finding,) = _wiring_findings(tickets, [_STORE, _BARE_APP])
+    assert finding.startswith("Contract WsgiApp (entrypoint ticket APP) composes DomainStore")
+    assert finding_kind(finding) == "contract-unwired"
+
+    with_init = _ifc(
+        "WsgiApp",
+        "class WsgiApp(Protocol):\n"
+        "    def __init__(self, store: DomainStore) -> None: ...\n" + _WSGI_CALL,
+    )
+    inline_factory = _ifc(
+        "WsgiApp", _BARE_APP.signature + "\n\n\ndef create_app(store: DomainStore) -> WsgiApp: ..."
+    )
+    for app in (with_init, inline_factory):
+        assert _wiring_findings(tickets, [_STORE, app]) == ()
+
+    factory = _ifc("create_app", "def create_app(store: DomainStore) -> WsgiApp: ...", "function")
+    with_factory = [
+        tickets[0],
+        tickets[1].model_copy(update={"implements": ("WsgiApp", "create_app")}),
+    ]
+    assert _wiring_findings(with_factory, [_STORE, _BARE_APP, factory]) == ()
+
+    # No dependencies (or only declared data types / errors): nothing to wire in.
+    record = _ifc("User", "class User:\n    id: int", "type")
+    alone = [_t("APP", entry=True, implements=("WsgiApp",), consumes=("User",))]
+    assert _wiring_findings(alone, [record, _BARE_APP]) == ()
+    # Only the entrypoint's composition root is checked.
+    plain = [tickets[0], tickets[1].model_copy(update={"entrypoint": False})]
+    assert _wiring_findings(plain, [_STORE, _BARE_APP]) == ()
+
+
+def _wired_plan(app_signature: str) -> dict[str, Any]:
+    plan = _copy(PLAN)
+    plan["interfaces"] = [
+        {"name": "TodoStore", "kind": "class", "signature": _STORE.signature},
+        {"name": "TodoApp", "kind": "class", "signature": app_signature},
+    ]
+    plan["tickets"][0]["implements"] = ["TodoStore"]
+    plan["tickets"][1]["implements"] = ["TodoApp"]
+    plan["tickets"][1]["consumes"] = ["TodoStore"]
+    return plan
+
+
+def test_an_unwired_composition_root_feeds_the_in_node_revision() -> None:
+    bare = "class TodoApp(Protocol):\n" + _WSGI_CALL
+    wired = (
+        "class TodoApp(Protocol):\n"
+        "    def __init__(self, store: TodoStore) -> None: ...\n" + _WSGI_CALL
+    )
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_wired_plan(bare), _wired_plan(wired), cas=cas)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2
+    assert "Contract TodoApp (entrypoint ticket T-002) composes TodoStore" in json.dumps(
+        tx.requests[1]
+    )
+    assert counts.snapshot()["planner.finding.contract-unwired"] == 1
+    assert _critique(cas, writes).contract_findings == ()
 
 
 def test_a_reader_is_ordered_after_the_one_ticket_writing_the_file_it_reads() -> None:

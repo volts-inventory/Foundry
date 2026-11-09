@@ -15,6 +15,7 @@ from foundry.agents.planner.checks import (
     _offline_scenario_findings,
     _redeclared_findings,
     _unused_contracts,
+    _wiring_findings,
 )
 from foundry.agents.planner.folds import (
     _add_contract_deps,
@@ -129,6 +130,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
+        *_wiring_findings(tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),

@@ -33,7 +33,13 @@ from foundry.graph.gate_wiring.materialize import (
     _text_files,
     materialize_workdir,
 )
-from foundry.graph.gate_wiring.restarts import failure_clusters, plan_next_pass, restart_set
+from foundry.graph.gate_wiring.restarts import (
+    cluster_owners,
+    failure_clusters,
+    plan_next_pass,
+    restart_set,
+    unbuilt_restart,
+)
 from foundry.graph.gate_wiring.routing import _BOUNDARY_GATES, _fix_attempts
 from foundry.schemas.gates import FixPass, GateTriage
 from foundry.telemetry import count
@@ -135,12 +141,12 @@ def keep_best(
                 "this wave's checks fail only on what the wave it builds on advanced with",
             )
     if newest.score is not None and any(newest.score[1:]):
-        from foundry.agents.implementation.tickets import built_task_ids, read_tickets
+        from foundry.agents.implementation.tickets import read_tickets
 
         names = _BOUNDARY_GATES[boundary]
         verdicts = _newest_per_name(g for g in out.get("gates") or () if g.name in names)
         clusters = failure_clusters(
-            verdicts.values(), read_tickets(state, resolve), built_task_ids(state)
+            verdicts.values(), read_tickets(state, resolve), cluster_owners(state)
         )
         # An earlier wave's leftovers already had that wave's share: this wave's
         # passes go to its own failures, the final gates to the rest.
@@ -152,20 +158,20 @@ def keep_best(
             broke = set(regressions(before.failing, new[0].failing))
             clusters = tuple(sorted(clusters, key=lambda c: not broke & set(c.items)))
         dead_end = stop is not None and stop[0] in _DEAD_ENDS
+        restarts = policy is None or policy.restarts
         # Fixing until the cap a cluster gets two repairs before its restart. The
         # legacy budget gives a loop two passes: the restart takes the second when
-        # the first did not improve the tree.
+        # the first did not improve the tree. A skipped ticket is built at once.
         target, restart = plan_next_pass(
             passes,
             clusters,
             restart_after=2 if until_cap else 1,
             dead_end=dead_end,
             restartable=lambda c: (
-                restart_set(state, resolve, c.tickets, tests_ok=c.in_tests)
-                if policy is None or policy.restarts
-                else ()
+                restart_set(state, resolve, c.tickets, tests_ok=c.in_tests) if restarts else ()
             ),
             unimproved_only=not until_cap,
+            unbuilt=lambda c: unbuilt_restart(state, resolve, c) if restarts else (),
         )
         if restart and dead_end:
             stop = None

@@ -2226,3 +2226,172 @@ def test_a_fixer_check_runs_the_scenarios_the_failed_gate_names(monkeypatch) -> 
     )
     spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
     assert spec.scope == frozenset({built, red})
+
+
+# ---- a skipped ticket: rebuilt by the fix loop, or left to a re-plan ------------
+
+_SKIP_BDD = "BDD criterion AC-2: scenario features/T-002.feature::AC-2 was not executed"
+
+
+def _note(name: str, tid: str, local: int, text: str = "x") -> GateTriage:
+    return GateTriage(
+        name=name,
+        run_against=f"task/{tid}",
+        explanation=text,
+        produced_by="engineering",
+        seq=Seq("run", 1, local, "engineering", 0),
+    )
+
+
+def _skipped_state(store: ArtifactStore, *notes: GateTriage) -> FactoryState:
+    """T-001 built; T-002 (tests only, carrying AC-2) failed both attempts: skipped."""
+    tickets = [
+        _ticket("T-001", 0, files=("a.py",)),
+        _ticket("T-002", 1, files=("tests/test_b.py",), scenario_ids=("AC-2",)),
+    ]
+    state = _ticket_state(
+        store, tickets, artifacts=[_diff_art(store, "T-001", 1, {"a.py": "x = 1\n"})]
+    )
+    return {
+        **state,
+        "gate_triage": [
+            _note("ticket-failed:1", "T-002", 1, "attempt 1 failed: no steps module"),
+            _note("ticket-failed:2", "T-002", 2, "attempt 2 failed: wrote nothing"),
+            _note("ticket-skipped", "T-002", 3),
+            *notes,
+        ],
+    }
+
+
+def test_a_skipped_ticket_is_restartable_once_and_not_once_left_to_a_replan() -> None:
+    from foundry.graph.gate_wiring import RESTARTED_TRIAGE, restart_set
+
+    store = ArtifactStore()
+    state = _skipped_state(store)
+    # Never built, and of tests only: still rebuilt (there is nothing to rewrite).
+    assert restart_set(state, store.resolve, ["T-002"]) == ("T-002",)
+    spent = _skipped_state(store, _note(RESTARTED_TRIAGE, "T-002", 4))
+    assert restart_set(spent, store.resolve, ["T-002"]) == ()
+    replan = _skipped_state(store, _note("ticket-replan", "T-002", 4))
+    assert restart_set(replan, store.resolve, ["T-002"]) == ()
+
+
+def test_a_skipped_tickets_failing_scenarios_rebuild_it_on_the_first_pass() -> None:
+    from foundry.graph.gate_wiring import keep_best
+
+    store = ArtifactStore()
+    state = _skipped_state(store)
+    out: dict[str, Any] = {
+        "gates": [
+            _gate("build", "t1", 5, _OK),
+            _gate("test", "t1", 6, _RED, _SKIP_BDD, _FAIL_A, _FAIL_B),
+        ]
+    }
+    keep_best(
+        state,
+        _config(),
+        out,
+        boundary=BUILD_TEST_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=lambda s: {},
+    )
+    [entry] = out["fix_passes"]
+    # The bigger cluster would go first; the missing ticket is built before any repair.
+    assert entry.outcome == "initial"
+    assert (entry.target, entry.restart_tickets) == ("ticket:T-002", ("T-002",))
+
+
+def _pending_skip_restart(store: ArtifactStore, *notes: GateTriage) -> FactoryState:
+    state = _skipped_state(store, *notes)
+    window = fix_window(state, BUILD_TEST_SMOKE_BOUNDARY, frozenset())
+    entry = FixPass(
+        window=window,
+        boundary=BUILD_TEST_SMOKE_BOUNDARY,
+        pass_no=0,
+        tree="t1",
+        score=(-1, 1, 1),
+        failing=("test:features/T-002.feature::AC-2",),
+        outcome="initial",
+        target="ticket:T-002",
+        restart_tickets=("T-002",),
+        seq=Seq("run", 2, 0, "fix_pass", 0),
+    )
+    return {
+        **state,
+        "fix_passes": [entry],
+        "gates": [_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _SKIP_BDD)],
+        "budget": BudgetLedger(fix_attempts_since_all_green=1),
+    }
+
+
+def _engineering(tmp_path: Path, rec: Any, store: ArtifactStore) -> Any:
+    from foundry.agents.implementation.tickets import make_engineering_node
+
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "README.md").write_text("base\n")
+    return make_engineering_node(
+        _runtime(rec, store),
+        source_dir=str(src),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+    )
+
+
+def test_a_planned_rebuild_of_a_skipped_ticket_is_told_its_failed_attempts(
+    tmp_path: Path,
+) -> None:
+    from foundry.graph.gate_wiring import RESTARTED_TRIAGE
+
+    store = ArtifactStore()
+    rec = _Recorder()
+    out = _engineering(tmp_path, rec, store)(_pending_skip_restart(store), _config())
+    assert rec.calls == ["T-002"]
+    memo = rec.packets["T-002"].prior_failures
+    assert memo[0] == "[fresh restart]"
+    assert memo[1].startswith("ticket T-002 was never built: its 2 attempt(s) failed")
+    assert memo[2:4] == (
+        "attempt 1 failed: no steps module",
+        "attempt 2 failed: wrote nothing",
+    )
+    assert "restart-T-002" in [a.task_id for a in out["artifacts"] if a.kind == "feature_diff"]
+    [spent] = [t for t in out["gate_triage"] if t.name == RESTARTED_TRIAGE]
+    assert spent.explanation.startswith("built after it was skipped (2 failed attempt(s))")
+
+
+class _GuardRejects(_Recorder):
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        from foundry.agents.implementation.tickets.contracts import SignatureChangeError
+
+        self.calls.append(str(packet.task["id"]))
+        raise SignatureChangeError("b.py: Shop.add's parameters changed")
+
+
+def test_a_build_the_signature_guard_rejects_is_counted(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    state = _ticket_state(store, [_ticket("T-001", 0, files=("a.py",))])
+    out = _engineering(tmp_path, _GuardRejects(), store)(state, _config())
+    notes = {t.name: t.explanation for t in out["gate_triage"]}
+    assert notes["signature-rejected:1"] == "b.py: Shop.add's parameters changed"
+    assert "ticket-replan" not in notes
+
+
+def test_a_rebuild_the_signature_guard_rejects_again_goes_to_a_replan(tmp_path: Path) -> None:
+    from foundry.graph.gate_wiring import restart_set
+
+    store = ArtifactStore()
+    state = _pending_skip_restart(
+        store, _note("signature-rejected:1", "T-002", 4, "b.py: Shop.add's parameters changed")
+    )
+    rec = _GuardRejects()
+    out = _engineering(tmp_path, rec, store)(state, _config())
+    assert rec.calls == ["T-002"]  # no lenient retry: the plan, not the session, is wrong
+    notes = {t.name: t.explanation for t in out["gate_triage"]}
+    assert "signature-rejected:2" in notes
+    assert "the planned interface is likely wrong" in notes["ticket-replan"]
+    assert "Shop.add's parameters changed" in notes["ticket-replan"]
+    merged: FactoryState = {**state, "gate_triage": [*state["gate_triage"], *out["gate_triage"]]}
+    assert restart_set(merged, store.resolve, ["T-002"]) == ()

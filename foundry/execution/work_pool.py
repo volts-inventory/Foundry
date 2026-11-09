@@ -209,6 +209,9 @@ class TaskState:
     status: TaskStatus
     result: AdapterResult | None = None
     error: str | None = None
+    # The adapter's exception, chained onto the error ``result()`` raises: a caller
+    # that tells failure kinds apart (the stub-signature guard's) reads its type.
+    cause: Exception | None = None
 
 
 @dataclass
@@ -474,6 +477,7 @@ class LocalWorkPool:
             with self._lock:
                 self._records[task_id].status = TaskStatus.FAILED
                 self._records[task_id].error = repr(exc)
+                self._records[task_id].cause = exc
             self._emit(task, "failed")
             return
         finally:
@@ -517,7 +521,7 @@ class LocalWorkPool:
                 return rec.result
             if rec.status is TaskStatus.REJECTED:
                 raise BudgetExceededError(rec.error or "rejected")
-            raise RuntimeError(f"task {task_id} {rec.status}: {rec.error}")
+            raise RuntimeError(f"task {task_id} {rec.status}: {rec.error}") from rec.cause
 
     def status(self, task_id: str) -> TaskStatus:
         with self._lock:

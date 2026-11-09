@@ -69,10 +69,14 @@ from foundry.agents.implementation.tickets.constants import (
     MAX_TICKET_ATTEMPTS,
     NODE_ID,
     OVERLAY_TRIAGE,
+    REPLAN_AFTER,
+    REPLAN_TRIAGE,
+    SIGNATURE_REJECTED_TRIAGE,
     SKIP_TRIAGE,
     TICKET_KIND,
 )
 from foundry.agents.implementation.tickets.contracts import (
+    SignatureChangeError,
     _flag_contract_duplicates,
     contract_duplicates,
     contract_members,
@@ -134,9 +138,12 @@ from foundry.agents.implementation.tickets.tasks import (
     cap_stopped,
     has_tickets,
     read_tickets,
+    replan_task_ids,
+    signature_rejections,
     task_from_ticket,
     task_id_for_ticket,
     tier_for,
+    unbuilt_task_ids,
 )
 from foundry.agents.implementation.tickets.waves import (
     _order_after_integrated,
@@ -217,6 +224,7 @@ __all__ = [
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
+    "replan_task_ids",
     "scenario_rules",
     "scenario_verify",
     "session_digests",
@@ -226,6 +234,7 @@ __all__ = [
     "tickets_settled",
     "tier_for",
     "trim_to_write_scope",
+    "unbuilt_task_ids",
     "unwritten_ticket_files",
     "verify_commands",
     "verify_rules",
@@ -319,6 +328,44 @@ def make_engineering_node(
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
         failures = _ticket_notes(state, FAIL_TRIAGE)
+        rejections = signature_rejections(state)
+
+        def _note_rejection(tid: str, exc: Exception) -> bool:
+            """Count an attempt the stub-signature guard rejected; True when this one
+            leaves ``tid`` to a re-plan (the planned interface is likely wrong)."""
+            # The work pool raises its own error, the adapter's chained on.
+            guard = exc if isinstance(exc, SignatureChangeError) else exc.__cause__
+            if not isinstance(guard, SignatureChangeError):
+                return False
+            n = rejections[tid] = rejections.get(tid, 0) + 1
+            notes = merged.setdefault("gate_triage", [])
+            notes.append(
+                GateTriage(
+                    name=f"{SIGNATURE_REJECTED_TRIAGE}:{n}",
+                    run_against=f"task/{tid}",
+                    explanation=str(guard)[:2000],
+                    produced_by=NODE_ID,
+                    seq=rt.seq(config, NODE_ID, f"{SIGNATURE_REJECTED_TRIAGE}:{tid}:{n}"),
+                )
+            )
+            if n != REPLAN_AFTER:
+                return False
+            progress.log(f"{tid}: planned signatures rejected {n} times, left to a re-plan")
+            notes.append(
+                GateTriage(
+                    name=REPLAN_TRIAGE,
+                    run_against=f"task/{tid}",
+                    explanation=(
+                        f"the stub-signature guard rejected {n} attempts of {tid}: the "
+                        "planned interface is likely wrong, so the ticket is not rebuilt "
+                        f"again and needs a re-plan. Guard: {guard}"
+                    )[:2000],
+                    produced_by=NODE_ID,
+                    seq=rt.seq(config, NODE_ID, f"{REPLAN_TRIAGE}:{tid}"),
+                )
+            )
+            return True
+
         from foundry.graph.gate_wiring import contract_paths
 
         contract_files = contract_paths(state, resolve)
@@ -617,9 +664,20 @@ def make_engineering_node(
                     results[tid] = pool.result(pool_id)
                 except Exception as exc:
                     results[tid] = exc
+            first_failed: dict[str, Exception] = {}
             if restart_memo:
+                for tid in restart_memo:
+                    if isinstance(got := results.get(tid), Exception):
+                        first_failed[tid] = got
+                replan = {tid for tid, exc in first_failed.items() if _note_rejection(tid, exc)}
                 _retry_restarts(
-                    pool, scoped, results, packets, restart_memo, adapter_name, cost_budget_microusd
+                    pool,
+                    scoped,
+                    results,
+                    packets,
+                    {tid: m for tid, m in restart_memo.items() if tid not in replan},
+                    adapter_name,
+                    cost_budget_microusd,
                 )
             stopped: dict[str, str] = {}
             if target and not requested and not restarts:
@@ -727,10 +785,13 @@ def make_engineering_node(
                 except Exception as exc:
                     if tid in restart_memo:  # its earlier build stays integrated
                         progress.log(f"restart of {tid} failed: {exc}")
+                        if exc is not first_failed.get(tid):
+                            _note_rejection(tid, exc)
                         continue
                     merged.setdefault("gate_triage", []).extend(
                         _failure_notes(rt, config, tid, len(failures.get(tid, ())) + 1, exc)
                     )
+                    _note_rejection(tid, exc)
                     continue
                 built.append(ticket)
                 for channel, records in out.items():

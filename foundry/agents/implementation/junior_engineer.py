@@ -198,13 +198,13 @@ def fix_target(
     (``FixPass.target``), among ``failed``'s clusters, and how many failures the
     other clusters hold. ``(None, 0)`` before a plan, or when the plan's cluster is
     no longer failing."""
-    from foundry.agents.implementation.tickets import built_task_ids, read_tickets
-    from foundry.graph.gate_wiring import failure_clusters, window_passes
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.graph.gate_wiring import cluster_owners, failure_clusters, window_passes
 
     passes = window_passes(state, resolve)
     if not passes or passes[-1].target is None:
         return None, 0
-    clusters = failure_clusters(failed, read_tickets(state, resolve), built_task_ids(state))
+    clusters = failure_clusters(failed, read_tickets(state, resolve), cluster_owners(state))
     aimed = next((c for c in clusters if c.key == passes[-1].target), None)
     if aimed is None or len(clusters) < 2:
         return None, 0

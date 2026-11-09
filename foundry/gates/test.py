@@ -16,8 +16,8 @@ fidelity machinery is Phase 2; its reuse-key binding is wired NOW —
 a rotation boundary when rotation arrives.
 
 Exit-code semantics (pytest): 0 green, 1 test failures, 2/3/4 harness/usage
-errors (→ ERROR: infra, not a verdict; but 2 with a test module that failed to
-collect → FAIL, the tree's own import error), 5 no tests collected (→ adequacy FAIL
+errors (→ ERROR: infra, not a verdict; but 2 with only tree modules that failed
+to collect for the tree's own reasons → FAIL), 5 no tests collected (→ adequacy FAIL
 when a floor is set). A stack-provided command (``stack_harness``: npm test, go
 test, the Cucumber ``bdd`` command) is not pytest: 0 passes, 126/127 (the shell
 could not find or run a binary — missing toolchain) is ERROR, anything else FAIL.
@@ -381,6 +381,35 @@ def bdd_findings(
 
 
 _COLLECT_ERROR = re.compile(r"^(?:_+ )?ERROR (?:collecting )?(\S+?\.py)\b", re.MULTILINE)
+_COLLECT_BLOCK = re.compile(r"^_+ ERROR collecting (\S+?\.py) _+$", re.MULTILINE)
+_BLOCK_END = re.compile(r"^(?:_{3,} |={3,})", re.MULTILINE)
+# Structured key: {errored module: "tree" | "harness"} for a run pytest interrupted.
+COLLECT_ERRORS_KEY = "collect_errors"
+# The trusted modules the bootstrap imports before any workdir code (plus pytest's
+# internals and plugin manager): an import error naming one is the harness's, not the tree's.
+_HARNESS_MODULES = frozenset({"pytest", "_pytest", "pytest_bdd", "pluggy"})
+_IMPORT_NAMED = re.compile(
+    r"No module named '([A-Za-z_][\w.]*)'|cannot import name '[^']*' from '([A-Za-z_][\w.]*)'"
+)
+
+
+def collect_error_owners(output: str, workdir: Path) -> dict[str, str]:
+    """Each module pytest failed to collect -> ``"tree"`` when it is a file of the
+    tree whose import died for the tree's own reasons (a missing tree module or name,
+    a syntax error, an undeclared dependency), else ``"harness"`` (a module outside
+    the tree, or an import error naming the pinned harness)."""
+    blocks: dict[str, str] = {}
+    for m in _COLLECT_BLOCK.finditer(output):
+        end = _BLOCK_END.search(output, m.end())
+        blocks[m.group(1)] = output[m.end() : end.start() if end else len(output)]
+    root = Path(workdir).resolve()
+    out: dict[str, str] = {}
+    for mod in dict.fromkeys(_COLLECT_ERROR.findall(output)):
+        path = (root / mod).resolve()
+        named = {(a or b).split(".", 1)[0] for a, b in _IMPORT_NAMED.findall(blocks.get(mod, ""))}
+        in_tree = path.is_relative_to(root) and path.is_file()
+        out[mod] = "tree" if in_tree and not named & _HARNESS_MODULES else "harness"
+    return out
 
 
 @counted("test.uncollected_binding")
@@ -1179,6 +1208,11 @@ def pinned_test_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def _tree_collect_errors(obs: ZoneAObservation) -> bool:
+    owners = obs.structured.get(COLLECT_ERRORS_KEY)
+    return isinstance(owners, dict) and bool(owners) and set(owners.values()) == {"tree"}
+
+
 class TestGate:
     """PASS iff the pinned harness is green and the adequacy floor is met."""
 
@@ -1400,6 +1434,10 @@ class TestGate:
             "cmd": list(cmd),
             "summary": parse_pytest_summary(out),
         }
+        if rc == _INTERRUPTED and not self.stack_harness:
+            owners = collect_error_owners(f"{out}\n{err}", workdir)
+            if owners:
+                structured[COLLECT_ERRORS_KEY] = owners
         findings: tuple[str, ...] = ()
         # A red run carries its WHY: the failing tests + assertions, parsed off the
         # pinned harness's own stdout (zone A) so the fix loop feeds the SPECIFIC
@@ -1530,7 +1568,7 @@ class TestGate:
                 return GateStatus.ERROR  # missing toolchain: infra, never latched
             if rc != 0:
                 return GateStatus.FAIL
-        elif rc == _INTERRUPTED and _COLLECT_ERROR.search(obs.stdout + "\n" + obs.stderr):
+        elif rc == _INTERRUPTED and _tree_collect_errors(obs):
             # A test module of the tree that fails to import is a verdict on the tree:
             # as an ERROR the fix loop could neither score it nor restore the best tree.
             return GateStatus.FAIL

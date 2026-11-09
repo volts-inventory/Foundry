@@ -988,6 +988,19 @@ def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_recei
     ]
     assert _wiring_findings(with_factory, [_STORE, _BARE_APP, factory]) == ()
 
+    # A function that neither returns the class nor takes a dependency is no factory.
+    main = _ifc("main", "def main() -> None: ...", "function")
+    with_main = [tickets[0], tickets[1].model_copy(update={"implements": ("WsgiApp", "main")})]
+    assert len(_wiring_findings(with_main, [_STORE, _BARE_APP, main])) == 1
+    inline_main = _ifc("WsgiApp", _BARE_APP.signature + "\n\n\ndef main() -> None: ...")
+    assert len(_wiring_findings(tickets, [_STORE, inline_main])) == 1
+    # Returning the class (or a base of it) is enough, even with no arguments.
+    based = _ifc("WsgiApp", "class WsgiApp(BaseApp):\n" + _WSGI_CALL)
+    for returns in ("WsgiApp", "BaseApp"):
+        make = _ifc("make", f"def make() -> {returns}: ...", "function")
+        with_make = [tickets[0], tickets[1].model_copy(update={"implements": ("WsgiApp", "make")})]
+        assert _wiring_findings(with_make, [_STORE, based, make]) == ()
+
     # No dependencies (or only declared data types / errors): nothing to wire in.
     record = _ifc("User", "class User:\n    id: int", "type")
     alone = [_t("APP", entry=True, implements=("WsgiApp",), consumes=("User",))]

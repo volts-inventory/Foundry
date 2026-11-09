@@ -22,7 +22,8 @@ from foundry.graph.supervisor import MODE_ASSISTANT
 from foundry.schemas.gates import GateStatus
 
 # A compiling module whose test COLLECTION fails (imports a missing module):
-# Build PASS, Test FAIL (a test module that fails to import) -> bounded fix, never advances -> no PR.
+# Build PASS, Test FAIL (a test module that fails to import) -> bounded fix, never
+# advances -> no PR.
 _ERROR_DIFF = (
     "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 42\n"
     "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,3 @@\n"

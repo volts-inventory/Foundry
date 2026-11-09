@@ -26,6 +26,7 @@ from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import (
     CHECK_EXHAUSTED,
     CHECK_OVERRIDDEN,
+    CHECK_RED_LAST_TURN,
     CHECK_UNVERIFIED,
     ProxyAgentAdapter,
 )
@@ -450,6 +451,27 @@ def test_a_red_done_is_refused_at_most_twice(
     assert session_stop_reason(result.triage) is None  # checks were left
     forced = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_OVERRIDDEN)]
     assert len(forced) == 1 and "app.py:1: error: not done yet" in forced[0], result.triage
+
+
+def test_a_red_done_on_the_last_turn_is_not_called_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No turn was left to refuse it: "accepted after 0 refused done(s)" misstated it."""
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "a"},
+        ],
+        turn_budget=3,
+    )
+    notes = [t.explanation for t in result.triage]
+    assert not any(n.startswith(CHECK_OVERRIDDEN) for n in notes), notes
+    (red,) = [n for n in notes if n.startswith(CHECK_RED_LAST_TURN)]
+    assert "app.py:1: error: not done yet" in red
+    assert session_stop_reason(result.triage) is None
 
 
 def test_the_check_run_at_done_is_the_digests_last_check(

@@ -111,7 +111,7 @@ def fix_stop(
         # can take an hour, and six of those that never improve is a run's whole cap.
         if pass_s <= policy.default_pass_s:
             return n
-        return max(_MIN_SLOW_LIMIT, min(n, math.ceil(n * policy.default_pass_s / pass_s)))
+        return max(min(n, _MIN_SLOW_LIMIT), math.ceil(n * policy.default_pass_s / pass_s))
 
     if streak(lambda p: not p.touched) >= policy.no_edit_limit:
         return ("no-edit", f"the last {policy.no_edit_limit} fix passes edited no file")

@@ -87,6 +87,7 @@ ARTIFACT_ORIGIN: dict[str, tuple[str, str]] = {
     "oracle_binding": ("Reviewer", "review"),
     "test_report": ("Reviewer", "review"),
     "e2e_report": ("Reviewer", "review"),
+    "reviewed_tree": ("Reviewer", "review"),
     # Assurance artifacts from old builds' replayed telemetry.
     "threat_model": ("Reviewer", "review"),
     "audit_finding": ("Reviewer", "review"),
@@ -111,6 +112,7 @@ ARTIFACT_LABEL: dict[str, str] = {
     "oracle_binding": "Oracle",
     "test_report": "Test Report",
     "e2e_report": "E2E Report",
+    "reviewed_tree": "Reviewed Tree",
     "threat_model": "Threat Model",
     "audit_finding": "Audit Finding",
     "supply_chain_report": "Supply-chain Report",

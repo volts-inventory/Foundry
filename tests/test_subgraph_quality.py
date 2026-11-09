@@ -323,3 +323,106 @@ def test_negative_oracle_per_high_risk_criterion(records: Any) -> None:
     assert all(isinstance(o, OracleBinding) for o in oracles)
     assert sorted(o.criterion_id for o in oracles) == ["AC-001", "AC-003"]
     assert all(o.oracle_kind is OracleKind.NEGATIVE for o in oracles)
+
+
+# ---- re-review after a fix pass ----------------------------------------------
+
+_ADD_APP = (
+    "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,2 @@\n+def tip(t):\n+    return t * 0.15\n"
+    "--- /dev/null\n+++ b/lib.py\n@@ -0,0 +1 @@\n+UNTOUCHED = 'reviewed before'\n"
+)
+_FIX_APP = (
+    "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def tip(t):\n"
+    "-    return t * 0.15\n+    return round(t * 0.15, 2)\n"
+)
+_UNROUNDED = {
+    "finding": "tip is not rounded to cents",
+    "failing_check": "",
+    "command": "python -c 'print(tip(0.1))'",
+    "expected": "0.02",
+    "actual": "0.015",
+}
+
+
+def _stored_diff(cas: ArtifactStore, task_id: str, body: str, epoch: int) -> Any:
+    from foundry.schemas.base import Artifact
+
+    seq = Seq("r", epoch, 0, "junior_engineer", 0)
+    uri = f"cas://feature_diff/{task_id}-{epoch}"
+    diff = FeatureDiff(
+        diff_uri=cas.put_blob(body),
+        task_id=task_id,
+        branch=f"task/{task_id}",
+        base_tree_sha="base-sha",
+        seq=seq,
+    )
+    cas.put_body_at(uri, diff)
+    return Artifact(
+        kind="feature_diff", uri=uri, produced_by="junior_engineer", task_id=task_id, seq=seq
+    )
+
+
+def _two_reviews(
+    monkeypatch: pytest.MonkeyPatch, *, keep_snapshot: bool = True
+) -> tuple[list[str], list[str | None], GateResult]:
+    cas = ArtifactStore()
+    transport = MockTransport(
+        verdicts=[
+            verdict_json("request-changes", [_UNROUNDED]),
+            verdict_json("request-changes", [_UNROUNDED]),
+        ]
+    )
+    rt = _runtime(transport, cas)
+    efforts: list[str | None] = []
+    judge = rt.proxy.judge
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        efforts.append(kwargs.get("effort"))
+        return judge(*args, **kwargs)
+
+    monkeypatch.setattr(rt.proxy, "judge", spy)
+    node = make_reviewer_node(rt, resolve=cas.resolve, resolve_blob=cas.resolve_blob)
+    criteria = [
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
+        for c in CRITERIA
+    ]
+    built = _stored_diff(cas, "T1", _ADD_APP, 1)
+    first = node({"artifacts": [*criteria, built]}, _config())
+    produced = [
+        a
+        for a in first["artifacts"]
+        if keep_snapshot or a.kind != reviewer_critic.REVIEWED_TREE_KIND
+    ]
+    fix = _stored_diff(cas, "fix-1", _FIX_APP, 2)
+    state: FactoryState = {
+        "artifacts": [*criteria, built, *produced, fix],
+        "gates": first["gates"],
+    }
+    [verdict] = node(state, _config(step=2))["gates"]
+    prompts = [r["messages"][0]["content"] for r in transport.requests]
+    return prompts, efforts, verdict
+
+
+def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findings(
+    records: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (full, delta), efforts, verdict = _two_reviews(monkeypatch)
+    assert efforts == [None, "medium"]
+    assert "--- task T1" in full and "UNTOUCHED" in full and "re-review" not in full
+
+    assert "re-review" in delta and "--- task T1" not in delta
+    assert "-    return t * 0.15\n+    return round(t * 0.15, 2)" in delta
+    assert "UNTOUCHED" not in delta  # unchanged since the last review
+    assert "- tip is not rounded to cents [evidence:" in delta
+    assert "repeat every unresolved one" in delta
+    # The verdict still answers for the whole tree: the unresolved finding stands.
+    assert verdict.status is GateStatus.FAIL
+    assert verdict.findings[0].startswith("tip is not rounded to cents")
+
+
+def test_a_re_review_without_the_last_reviewed_tree_is_full(
+    records: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (_, second), efforts, _ = _two_reviews(monkeypatch, keep_snapshot=False)
+    assert efforts == [None, None]
+    assert "re-review" not in second and "--- task fix-1" in second

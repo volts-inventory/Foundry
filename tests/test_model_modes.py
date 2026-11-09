@@ -781,6 +781,20 @@ def test_a_call_can_ask_for_medium_effort_and_its_cap() -> None:
     ]
 
 
+def test_a_judgment_passes_its_effort_through() -> None:
+    from foundry.state.seq import Seq
+
+    local = RecordingTransport(text=json.dumps({"status": "approve", "findings": []}))
+    proxy = _local_proxy(local)
+    seq = Seq("r", 1, 1, "reviewer", 0)
+    msgs = [{"role": "user", "content": "re-review"}]
+    proxy.judge("reviewer", "cas://d", "tree", "n", "SOP", msgs, seq=seq, tier="T2")
+    proxy.judge(
+        "reviewer", "cas://d", "tree", "n2", "SOP", msgs, seq=seq, tier="T2", effort="medium"
+    )
+    assert [r["local_effort"] for r in local.requests] == ["xhigh", "medium"]
+
+
 def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

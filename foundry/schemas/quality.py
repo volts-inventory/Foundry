@@ -90,3 +90,12 @@ class E2EReport(FrozenModel):
     flake_retry_budget: int = 2  # N=2 (governance.md §1a)
     quarantined: tuple[str, ...] = ()
     seq: Seq
+
+
+class ReviewedTree(FrozenModel):
+    """The integrated tree the review verdict ``verdict_seq`` judged, as a
+    full-file snapshot blob: a later review in the run judges only the change
+    since (``reviewer_critic.review``)."""
+
+    verdict_seq: Seq
+    snapshot_uri: str

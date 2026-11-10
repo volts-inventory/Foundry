@@ -50,6 +50,7 @@ from foundry.proxy.token_meter import TokenMeter
 from foundry.schemas.implementation import TaskEvent
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from foundry.state.seq import max_epoch
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -483,7 +484,7 @@ def run(
             # verdict would rank below the stale one it supersedes.
             prior = invoke._prior_values(app, config)
             if prior:
-                rt.epochs.raise_floor(thread_id, invoke._max_epoch(prior, thread_id))
+                rt.epochs.raise_floor(thread_id, max_epoch(prior, thread_id))
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
             # nodes read it off the `spec` channel to ground the IntentBrief/PRD.

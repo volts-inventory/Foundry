@@ -129,6 +129,7 @@ from foundry.agents.implementation.tickets.scope import (
 )
 from foundry.agents.implementation.tickets.skeleton import (
     _skeleton_diff,
+    revised_stubs,
     shared_stub_names,
     skeleton_files,
     stub_rules,
@@ -139,6 +140,8 @@ from foundry.agents.implementation.tickets.tasks import (
     built_task_ids,
     cap_stopped,
     has_tickets,
+    interface_revisions,
+    pending_interface_replans,
     read_tickets,
     replan_task_ids,
     signature_rejections,
@@ -219,10 +222,12 @@ __all__ = [
     "escalation_pick",
     "has_tickets",
     "in_write_scope",
+    "interface_revisions",
     "make_engineering_node",
     "next_wave",
     "note_fix_writes",
     "pending_escalations",
+    "pending_interface_replans",
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
@@ -360,8 +365,8 @@ def make_engineering_node(
                     explanation=(
                         f"the stub-signature guard rejected {n} attempts of {tid}: the "
                         "planned interface is likely wrong. The ticket is excluded from "
-                        "fix-loop restarts; re-planning it is not automated yet, so its "
-                        f"interface needs a human (or a planner re-run) to revise. Guard: {guard}"
+                        "fix-loop restarts and left to the planner to revise its interface "
+                        f"(once per run). Guard: {guard}"
                     )[:2000],
                     produced_by=NODE_ID,
                     seq=rt.seq(config, NODE_ID, f"{REPLAN_TRIAGE}:{tid}"),
@@ -374,6 +379,11 @@ def make_engineering_node(
         contract_files = contract_paths(state, resolve)
         built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
         skeleton = skeleton_files(state, resolve, blobs)
+        revised = interface_revisions(state)
+        if skeleton and (again := [t for t in wave if task_id_for_ticket(t.id) in revised]):
+            # Its sandbox starts from the revised stubs and the guard holds it to them.
+            for rel, text in revised_stubs(again, contracts, built_contracts).items():
+                skeleton[rel] = overlay[rel] = text
         # A retry after a named violation starts from its failed attempt's files.
         carried: dict[str, dict[str, str]] = {}
         in_wave = {task_id_for_ticket(t.id) for t in wave}

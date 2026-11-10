@@ -18,6 +18,7 @@ Topology (the SOP phase order — agents.md, governance §1 gate boundaries)::
          --(fix)-----> spec_fix -> planner             (bounded re-verification)
          --(halt)----> END
       -> implementation      # Layer 3 subgraph (Task[] -> FeatureDiff[])
+         --(ticket left to a re-plan)--> planner   (revises its interface, once)
       -> quality             # Layer 4 subgraph (TestPlan/Report/E2E + review)
       -> build_test_gate     # [BUILD + TEST gates] on the integrated tree
          --(advance)--> END
@@ -66,7 +67,11 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from foundry.agents.implementation.tickets import cap_stopped, pending_wave
+from foundry.agents.implementation.tickets import (
+    cap_stopped,
+    pending_interface_replans,
+    pending_wave,
+)
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
 from foundry.graph.gate_wiring import (
     ADVANCE,
@@ -495,6 +500,11 @@ def build_supervisor_graph(
     def _route_implementation(state: FactoryState) -> str:
         if cap_stopped(state):
             return _TOKEN_CAP
+        # The stub-signature guard left a ticket to a re-plan: the planner revises its
+        # interface (once per ticket), the Spec gate re-checks the plan, and this
+        # layer builds the ticket again.
+        if pending_interface_replans(state):
+            return _PLANNER
         # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
         if pending_wave(state, resolve):
             return "halt"
@@ -594,6 +604,7 @@ def build_supervisor_graph(
             _QUALITY: _QUALITY,
             _BUILD_TEST_GATE: _BUILD_TEST_GATE,
             _TOKEN_CAP: _TOKEN_CAP,
+            _PLANNER: _PLANNER,
             "halt": END,
         },
     )

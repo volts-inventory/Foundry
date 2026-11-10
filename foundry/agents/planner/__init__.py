@@ -47,6 +47,10 @@ revision at the default effort, so a revision is at most two calls; the plan
 check keeps whichever draft has the fewest findings, a tie going to the later.
 An epic with no previous one to repair is planned at the default effort.
 
+Interface re-plan: a ticket the stub-signature guard left to a re-plan (mid-build,
+the Spec gate already passed) gets one small call revising only the contracts it
+implements (:mod:`foundry.agents.planner.interface`), not a re-plan.
+
 Trust posture is unchanged: the node emits no ``GateResult`` (L5), reaches the
 model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 ``JudgmentProvenance.SELF`` — the signed Spec gate still decides.
@@ -60,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from foundry import progress
 from foundry.agents._common import cas_uri, emit_artifact, journal_entry, persist_prose
+from foundry.agents.implementation.tickets.tasks import pending_interface_replans
 from foundry.agents.plan_contracts import CompileResult
 from foundry.agents.planner.assembly import _assemble, _Fit, _Frame
 from foundry.agents.planner.build import (
@@ -123,6 +128,7 @@ from foundry.agents.planner.folds import (
     _wire_entrypoint,
     stack_files,
 )
+from foundry.agents.planner.interface import revise_interfaces
 from foundry.agents.planner.prior import (
     _Draft,
     _draft_prior,
@@ -792,6 +798,8 @@ def make_planner_node(
 
     def _node(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         findings = latest_spec_failure(state)
+        if not findings and (asked := pending_interface_replans(state)):
+            return revise_interfaces(rt, state, config, asked, _call)
         if findings:
             _count_findings(findings)
         prior = _prior_plan(state, rt) if findings else None

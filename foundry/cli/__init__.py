@@ -67,7 +67,7 @@ from foundry.cli.doubles import (
     _synthetic_resolve,
     _synthetic_resolve_blob,
 )
-from foundry.cli.invoke import RunCrashed, _invoke_with_autoresume, _max_epoch
+from foundry.cli.invoke import RunCrashed, _invoke_with_autoresume
 from foundry.cli.output import _write_draft_on_halt, _write_output_tree
 from foundry.cli.result import RunResult
 from foundry.cli.runner import (
@@ -87,6 +87,7 @@ from foundry.cli.wiring import (
     _tier_models,
     make_coding_adapter,
 )
+from foundry.state.seq import max_epoch as _max_epoch
 
 __all__ = [
     "ADAPTERS",

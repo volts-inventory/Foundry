@@ -21,7 +21,8 @@ records are distinct identities in the WORM/predicate stores.
 
 from __future__ import annotations
 
-from typing import NamedTuple
+from collections.abc import Mapping
+from typing import Any, NamedTuple
 
 
 class Seq(NamedTuple):
@@ -55,3 +56,14 @@ class EpochCounter:
         resuming a checkpointed run seeds this from the run's records, so what it
         emits outranks them (this in-memory counter starts empty)."""
         self._floors[run_id] = max(self._floors.get(run_id, 0), epoch)
+
+
+def max_epoch(values: Mapping[str, Any], run_id: str) -> int:
+    """The highest ``emission_epoch`` among this run's records on ``values``."""
+    top = 0
+    for value in values.values():
+        for item in value if isinstance(value, list) else (value,):
+            seq = getattr(item, "seq", None)
+            if isinstance(seq, Seq) and seq.run_id == run_id:
+                top = max(top, seq.emission_epoch)
+    return top

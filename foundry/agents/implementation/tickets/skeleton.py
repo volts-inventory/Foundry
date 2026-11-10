@@ -54,6 +54,21 @@ def skeleton_files(
         return {}
 
 
+def revised_stubs(
+    tickets: Sequence[Ticket],
+    contracts: Mapping[str, InterfaceContract],
+    contract_texts: Mapping[str, str],
+) -> dict[str, str]:
+    """The typed stubs of ``tickets`` regenerated from the newest ``contracts``: a
+    ticket whose interface the planner revised is held to the revised signatures,
+    not the skeleton's."""
+    if not contract_texts:
+        return {}
+    sk = python_skeleton(list(contracts.values()), tickets, contract_texts)
+    owned = {f for t in tickets for f in t.files}
+    return {p: text for p, text in sk.files.items() if p in owned}
+
+
 def stub_rules(
     ticket: Ticket, skeleton: Mapping[str, str], contracts: Mapping[str, InterfaceContract]
 ) -> list[str]:

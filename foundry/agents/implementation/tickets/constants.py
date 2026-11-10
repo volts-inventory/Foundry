@@ -33,6 +33,12 @@ SIGNATURE_REJECTED_TRIAGE = "signature-rejected"
 # is likely wrong, so it is left to a re-plan instead of rebuilt again.
 REPLAN_TRIAGE = "ticket-replan"
 REPLAN_AFTER = 2
+# The planner's answer to a REPLAN note, at most one per ticket per run: it revised
+# the ticket's contracts (which supersedes the ticket's earlier notes here, by
+# emission epoch, so it is built afresh) or declined to.
+PLANNER_NODE_ID = "planner"
+INTERFACE_REVISED_TRIAGE = "interface-revised"
+INTERFACE_DECLINED_TRIAGE = "interface-declined"
 SKELETON_TRIAGE = "skeleton"
 # A failed attempt's written files its retry starts from (explanation: their snapshot blob).
 CARRY_TRIAGE = "ticket-carry"

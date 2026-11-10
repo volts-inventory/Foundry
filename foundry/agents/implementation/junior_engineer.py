@@ -36,7 +36,13 @@ from foundry.fs import apply_overlay
 from foundry.schemas.architecture import PinnedConstraint
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import FixPass, GateResult, GateStatus
-from foundry.schemas.implementation import FeatureDiff, Task, TaskStatus
+from foundry.schemas.implementation import (
+    Effort,
+    FeatureDiff,
+    Task,
+    TaskStatus,
+    fix_effort,
+)
 from foundry.state.reducers import DETERMINISTIC_GATES, live_constraints
 
 if TYPE_CHECKING:
@@ -652,6 +658,7 @@ def _build_packet(
     verify: Mapping[str, str] | None = None,
     fix_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
+    effort: Effort | None = None,
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -682,6 +689,7 @@ def _build_packet(
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
         prior_failures=prior_failures,
+        effort=effort,
         worktree_path=str(sandbox.worktree),
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,
@@ -735,6 +743,7 @@ def _run_one_task(
     check: CheckSpec | None = None,
     fix_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
+    effort: Effort | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
@@ -767,6 +776,7 @@ def _run_one_task(
             verify=verify,
             fix_files=fix_files,
             diagnosis=diagnosis,
+            effort=effort,
         )
         from foundry.gates.self_check import check_scope
 
@@ -1194,6 +1204,7 @@ def make_fixer_node(
                 check=_fix_check(base, state, resolve) if base is not None else None,
                 fix_files=fix_files,
                 diagnosis=diagnosis.packet_field(fix_files) if diagnosis is not None else None,
+                effort=fix_effort(attempt),
             )
         # Integration applies it on top of the diffs it repairs (none yet when every
         # ticket failed).

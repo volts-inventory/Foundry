@@ -32,6 +32,7 @@ from foundry.agents.implementation.tickets import (
     has_tickets,
     make_engineering_node,
     pending_interface_replans,
+    pending_splits,
     pending_wave,
     tickets_settled,
 )
@@ -197,10 +198,11 @@ def build_implementation_subgraph(
 
     def _after_wave(state: FactoryState) -> str:
         # A spent token cap exits so the supervisor commits this wave, then stops; a
-        # ticket left to a re-plan exits for the supervisor's planner to revise it.
+        # ticket left to a re-plan (or to a split) exits for the supervisor's planner.
         if (
             cap_stopped(state)
             or pending_interface_replans(state)
+            or pending_splits(state)
             or not pending_wave(state, resolve)
         ):
             return END
@@ -218,7 +220,7 @@ def build_implementation_subgraph(
     )
 
     def _start(state: FactoryState) -> str:
-        if not has_tickets(state) or pending_interface_replans(state):
+        if not has_tickets(state) or pending_interface_replans(state) or pending_splits(state):
             return END
         if can_fix and state.get("phase") == "build_test_fix" and tickets_settled(state, resolve):
             # The final gate planned a ticket restart instead of a fixer pass.

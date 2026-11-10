@@ -13,6 +13,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from foundry.proxy.model_provider_proxy import EFFORT_COUNT_PREFIX
+
 CASES = {
     "dice": "a Python command-line tool that rolls dice given notation like 2d6+3",
     "todo": "a small Python REST API for a todo list with create, list, complete and delete",
@@ -130,6 +132,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
         else []
     )
     code = meta.get("exit_code")
+    counts = meta.get("hint_counts") or {}
     return {
         "wall_s": meta.get("wall_s"),
         "exit_code": code,
@@ -145,7 +148,12 @@ def summarize_case(root: Path) -> dict[str, Any]:
         "out_files": len(files),
         "verdict": VERDICTS.get(code) if code is not None else None,
         "released": bool(files) and code == 0,
-        "hint_counts": meta.get("hint_counts") or {},
+        "calls_by_effort": {
+            k.removeprefix(EFFORT_COUNT_PREFIX): v
+            for k, v in counts.items()
+            if k.startswith(EFFORT_COUNT_PREFIX)
+        },
+        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(EFFORT_COUNT_PREFIX)},
     }
 
 
@@ -168,6 +176,8 @@ def render(summary: dict[str, dict[str, Any]]) -> str:
         counts = s.get("hint_counts") or {}
         fired = ", ".join(f"{k}={v}" for k, v in counts.items()) or "none"
         rows.append(f"{case} hints: {fired}")
+        if efforts := s.get("calls_by_effort"):
+            rows.append(f"{case} effort: " + ", ".join(f"{k}={v}" for k, v in efforts.items()))
     return "\n".join(rows)
 
 

@@ -15,6 +15,7 @@ Returns the UNCOMPILED graph; the supervisor compiles and owns the checkpointer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.runnables import RunnableConfig
@@ -51,12 +52,15 @@ def _route_after_planner(state: FactoryState) -> list[str]:
 
 
 def build_planner_subgraph(
-    rt: AgentRuntime, index: SymbolIndex | None = None
+    rt: AgentRuntime,
+    index: SymbolIndex | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
 ) -> StateGraph[FactoryState]:
-    """Build the UNCOMPILED planner subgraph over ``FactoryState``."""
+    """Build the UNCOMPILED planner subgraph over ``FactoryState``. ``ticket_tiers``
+    (difficulty -> tier) sizes the plan's tickets for where each tier runs."""
     g: StateGraph[FactoryState] = StateGraph(FactoryState)
 
-    planner = make_planner_node(rt, index)
+    planner = make_planner_node(rt, index, ticket_tiers=ticket_tiers)
     domain_specialist = make_domain_specialist_node(rt)
     ux_design = make_ux_design_node(rt)
 

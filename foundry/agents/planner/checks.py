@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import builtins
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 from foundry.agents.plan_contracts import CompileResult, check_contracts
 from foundry.agents.planner.readers import _str, _strs
 from foundry.agents.planner.schema import _GENERATED_TICKETS, CODE_CONTRACT_KINDS
+from foundry.agents.planner.sizing import Ceilings, over_ceiling
 from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import BDD_REPORT_ENV, Specialty, StackDecision, Ticket
@@ -408,6 +409,30 @@ def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple
     )
 
 
+def _size_findings(
+    tickets: Sequence[Ticket], ceilings: Ceilings, protected: Collection[str] = ()
+) -> tuple[str, ...]:
+    """A ticket over the size ceiling of the tier its difficulty runs on: one
+    session builds it, and a weaker (local) model loses the thread of a big one.
+    The entrypoint is exempt: the wiring and templates must live there, and no
+    split or fold can shrink it."""
+    out: list[str] = []
+    for t in tickets:
+        if t.id in _GENERATED_TICKETS or t.entrypoint:
+            continue
+        ceiling = ceilings[t.difficulty]
+        size = over_ceiling(t, ceiling, protected)
+        if size is not None:
+            out.append(
+                f"Ticket {t.id} is over its size ceiling: {size[0]} work files, {size[1]} "
+                f"files in all and {size[2]} scenarios, where a {t.difficulty.value} ticket "
+                f"(built on a {ceiling.where} model) takes at most {ceiling.files} work "
+                f"files, {ceiling.total} in all and {ceiling.scenarios} scenarios: split it "
+                "into tickets each within the ceiling."
+            )
+    return tuple(out)
+
+
 # Web frameworks whose app entry serves until killed.
 _WEB_FRAMEWORK = re.compile(
     r"\b(express|fastify|koa|hapi|nest(js)?|next(\.js)?|hono|flask|fastapi|django|"
@@ -542,6 +567,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"^Scenario \S+ asserts that installing dependencies", "scenario-offline-install"),
         (r"has no covering scenario", "goal-uncovered"),
         (r"^Feature ticket \S+ has no scenarios", "ticket-no-scenarios"),
+        (r"^Ticket \S+ is over its size ceiling", "ticket-oversized"),
         (r"^No entrypoint ticket", "entrypoint-missing"),
         (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
         (r"^stack\.run is empty", "run-missing"),

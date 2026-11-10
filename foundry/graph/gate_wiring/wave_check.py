@@ -174,6 +174,7 @@ class WaveBuildCheck:
             policy=self._policy,
             unbuilt_waves=unbuilt,
             carried=frozenset(base.failing) if base else frozenset(),
+            escalates=True,
         )
         settle_fix_attempts(
             state,
@@ -208,13 +209,24 @@ class WaveBuildCheck:
         picked: tuple[str, ...] = ()
         newest = (out.get("fix_passes") or [None])[-1]
         restarting = decision == FIX and newest is not None and bool(newest.restart_tickets)
-        if self._advances(post, decision, window, unbuilt):
+        from foundry.agents.implementation.tickets.constants import SPLIT_REQUEST_TRIAGE
+
+        # keep_best asked the planner to split a ticket: route() hands it over, so
+        # no escalation or budget reset rides along. Only a loop that goes on (FIX)
+        # hands it over; a spent or stopped one halts or advances as it would.
+        splitting = any(t.name == SPLIT_REQUEST_TRIAGE for t in out.get("gate_triage") or ())
+        if splitting and decision != FIX:
+            from foundry.agents.implementation.tickets.split import withdraw_splits
+
+            withdraw_splits(out)
+            splitting = False
+        if not splitting and self._advances(post, decision, window, unbuilt):
             # No escalation either: its rebuild and re-check would open a new window
             # with a new share, the overrun the share exists to prevent. A boundary
             # left behind hands the next one a whole budget, as a green one does.
             ledger = out.get("budget") or state.get("budget") or BudgetLedger()
             out["budget"] = ledger.model_copy(update={"fix_attempts_since_all_green": 0})
-        elif streak >= 1 and not restarting:
+        elif not splitting and streak >= 1 and not restarting:
             from foundry.agents.implementation.tickets import escalation_pick, stopped_tickets
             from foundry.execution.adapters.tiered import (
                 ESCALATE_FALLBACK_TRIAGE,
@@ -290,6 +302,7 @@ class WaveBuildCheck:
         # dead-end rules (fix_stop) instead of halting the wave on its own.
         elif (
             decision == FIX
+            and not splitting
             and not self.fix_policy.until_cap
             and not restarting
             and not self.capped_off_target({**state, "gates": post["gates"]})
@@ -340,8 +353,11 @@ class WaveBuildCheck:
         (:func:`no_fix_progress`, or the :data:`NO_FIX_PROGRESS_TRIAGE` ``run``
         recorded on this tree for a fix that changed nothing) halts as a spent bound
         does — unless fixing until the cap, where the dead-end rules decide."""
-        from foundry.agents.implementation.tickets import pending_escalations
+        from foundry.agents.implementation.tickets import pending_escalations, pending_splits
 
+        # A ticket asked to be split: the run leaves the wave loop for the planner.
+        if pending_splits(state):
+            return HALT
         scenarios = self._scenarios(state)
         boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
         decision = self._route(state, config, boundary)

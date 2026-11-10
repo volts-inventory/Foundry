@@ -35,6 +35,7 @@ from foundry.proxy.local_transport import (
     check_local_server,
 )
 from foundry.proxy.model_provider_proxy import (
+    _LOCAL_THINKING_MAX_TOKENS,
     TIER_MODELS,
     _with_parse_correction,
     local_sampling_for,
@@ -42,6 +43,7 @@ from foundry.proxy.model_provider_proxy import (
 )
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import TimeCapExceeded, TokenMeter
+from foundry.schemas.implementation import EFFORT_LEVELS, Difficulty, fix_effort, ticket_effort
 
 SIGNER = ZoneBSigner(b"k" * 16, "kid")
 CALL = ("node", "SOP", [{"role": "user", "content": "x"}])
@@ -665,6 +667,7 @@ def test_any_parse_miss_retry_carries_the_replys_tail_and_steps_effort_down() ->
             [{"role": "user", "content": "r"}],
             purpose="judgment",
             schema=SCHEMA,
+            effort="xhigh",
         )
     _, second, third = local.requests
     assert [(r["local_thinking"], r.get("local_effort")) for r in local.requests] == [
@@ -777,19 +780,19 @@ def test_local_thinking_is_routed_per_call_kind(
     for req, thinks in zip(local.requests, expected, strict=True):
         # Thinking spends the answer's budget, so it lifts the cap (judgment too).
         assert req["max_tokens"] == (
-            (40960 if req is local.requests[1] else 98304)
+            (98304 if req is local.requests[0] else 40960)
             if thinks
             else 8192
             if req is local.requests[2]
             else 16000
         )
     assert proxy.manifest[1]["thinking"] is expected[1]
-    # Plan/verdict calls think at xhigh; agent turns (one of many) at medium.
+    # The plan thinks at xhigh; agent turns (one of many) and advisory verdicts at medium.
     efforts = [r.get("local_effort") for r in local.requests]
     assert efforts == [
         ("xhigh" if expected[0] else None),
         ("medium" if expected[1] else None),
-        ("xhigh" if expected[2] else None),
+        ("medium" if expected[2] else None),
     ]
 
 
@@ -814,9 +817,98 @@ def test_a_judgment_passes_its_effort_through() -> None:
     msgs = [{"role": "user", "content": "re-review"}]
     proxy.judge("reviewer", "cas://d", "tree", "n", "SOP", msgs, seq=seq, tier="T2")
     proxy.judge(
-        "reviewer", "cas://d", "tree", "n2", "SOP", msgs, seq=seq, tier="T2", effort="medium"
+        "reviewer", "cas://d", "tree", "n2", "SOP", msgs, seq=seq, tier="T2", effort="xhigh"
     )
+    assert [(r["local_effort"], r["max_tokens"]) for r in local.requests] == [
+        ("medium", 40960),
+        ("xhigh", 98304),
+    ]
+
+
+def test_every_thinking_level_has_an_output_budget() -> None:
+    assert set(_LOCAL_THINKING_MAX_TOKENS) == set(EFFORT_LEVELS)
+    local = RecordingTransport()
+    proxy = _local_proxy(local)
+    msgs = [{"role": "user", "content": "rename"}]
+    proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", effort="low")
+    assert (local.requests[0]["local_effort"], local.requests[0]["max_tokens"]) == ("low", 40960)
+
+
+def test_a_low_effort_reply_cut_off_at_the_cap_is_retried_without_thinking() -> None:
+    request = {
+        "messages": [{"role": "user", "content": "rename"}],
+        "local_thinking": True,
+        "local_effort": "low",
+    }
+    cut = ProviderResponse(
+        served_model="m", request_id="r", text="", usage={}, stop_reason="length"
+    )
+    assert _with_parse_correction(request, cut, 1)["local_thinking"] is False
+
+
+def test_local_calls_are_counted_by_thinking_level() -> None:
+    from foundry import telemetry
+
+    local = RecordingTransport()
+    proxy = _local_proxy(local)
+    msgs = [{"role": "user", "content": "x"}]
+    with telemetry.counting() as counts:
+        proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", effort="low")
+        proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation")
+        proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation")
+        proxy.complete("reviewer", "T2", "SOP", msgs, purpose="judgment")
+    assert counts.snapshot() == {"effort.low": 1, "effort.medium": 2, "effort.xhigh": 1}
+
+
+def test_each_local_attempt_is_counted_at_the_level_it_was_sent() -> None:
+    from foundry import telemetry
+
+    class CutOnce(RecordingTransport):
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.requests.append(request)
+            first = len(self.requests) == 1
+            return ProviderResponse(
+                served_model=request["model"],
+                request_id="r",
+                text='{"a": ' if first else '{"a": 1}',
+                usage=dict(USAGE),
+                stop_reason="length" if first else "stop",
+            )
+
+    local = CutOnce()
+    proxy = _local_proxy(local)
+    proxy._retry.sleeper = lambda _s: None
+    msgs = [{"role": "user", "content": "x"}]
+    with telemetry.counting() as counts:
+        proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", schema={"type": "object"})
     assert [r["local_effort"] for r in local.requests] == ["xhigh", "medium"]
+    assert counts.snapshot() == {"effort.xhigh": 1, "effort.medium": 1}
+
+
+def test_a_packets_effort_reaches_the_proxy_closures_but_not_the_prompt() -> None:
+    from foundry.execution.adapter_contract import (
+        assemble_prompt,
+        current_packet_effort,
+        packet_tier_scope,
+    )
+
+    packet = TaskPacket(
+        task={"id": "T-1", "tier": "T2"},
+        effort="low",
+        worktree_path=".",
+        turn_budget=1,
+        cost_budget_microusd=0,
+    )
+    with packet_tier_scope(packet):
+        assert current_packet_effort() == "low"
+    assert current_packet_effort() is None
+    assert "effort" not in assemble_prompt(packet)
+
+
+def test_ticket_and_fixer_thinking_levels() -> None:
+    assert [ticket_effort(d) for d in Difficulty] == ["low", "medium", "xhigh"]
+    assert [ticket_effort(d, retry=True) for d in Difficulty] == ["medium", "xhigh", "xhigh"]
+    assert [fix_effort(n) for n in (0, 1, 2, 5)] == ["medium", "medium", "xhigh", "xhigh"]
 
 
 def test_cloud_tiers_never_carry_the_thinking_flag_and_a_bad_setting_fails_early(

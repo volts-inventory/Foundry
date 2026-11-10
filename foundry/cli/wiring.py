@@ -15,7 +15,7 @@ from foundry.cli.defaults import (
     ADAPTERS,
     BACKENDS,
 )
-from foundry.execution.adapter_contract import current_packet_tier
+from foundry.execution.adapter_contract import current_packet_effort, current_packet_tier
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
@@ -92,6 +92,7 @@ def make_coding_adapter(
                     _RAW_REACT_SOP,
                     [{"role": "user", "content": prompt}],
                     purpose="ideation",
+                    effort=current_packet_effort(),
                 ).text
                 or ""
             )
@@ -120,6 +121,7 @@ def make_coding_adapter(
                 _PROXY_AGENT_SOP,
                 list(messages),
                 purpose="ideation",
+                effort=current_packet_effort(),
                 schema=schema,
             )
             return result.text or "", result.parsed
@@ -131,6 +133,7 @@ def make_coding_adapter(
                 _PROXY_AGENT_TOOLS_SOP,
                 list(messages),
                 purpose="ideation",
+                effort=current_packet_effort(),
                 tools=tools,
             )
             return result.text or "", result.tool_calls

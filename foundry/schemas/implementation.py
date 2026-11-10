@@ -47,6 +47,31 @@ DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
     Difficulty.COMPLEX: "T1",
 }
 
+# A local thinking model's reasoning level, lowest first. Qwen3.8 on Ollama
+# advertises exactly these (plus off): `ollama show` lists "false, low, medium, xhigh".
+Effort = Literal["low", "medium", "xhigh"]
+EFFORT_LEVELS: tuple[Effort, ...] = ("low", "medium", "xhigh")
+
+# Difficulty -> the local thinking level its coding session runs at.
+TICKET_EFFORT: dict[Difficulty, Effort] = {
+    Difficulty.TRIVIAL: "low",
+    Difficulty.STANDARD: "medium",
+    Difficulty.COMPLEX: "xhigh",
+}
+
+
+def ticket_effort(difficulty: Difficulty | str, *, retry: bool = False) -> Effort:
+    """The thinking level for a ticket of ``difficulty``; a ``retry`` (rebuild,
+    restart, escalation) one level higher, capped at the top level."""
+    base = EFFORT_LEVELS.index(TICKET_EFFORT[Difficulty(difficulty)])
+    return EFFORT_LEVELS[min(base + retry, len(EFFORT_LEVELS) - 1)]
+
+
+def fix_effort(attempt: int) -> Effort:
+    """A fix-loop fixer's thinking level: medium on its first pass, the top level after."""
+    return "medium" if attempt <= 1 else "xhigh"
+
+
 FEATURE_DIR = "features"
 
 # Tickets the planner emits itself, ahead of the model's tickets: the wave-0 one

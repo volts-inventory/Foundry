@@ -58,12 +58,13 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from foundry import progress
 from foundry.agents._common import cas_uri, emit_artifact, journal_entry, persist_prose
+from foundry.agents.implementation.tickets.split import pending_splits
 from foundry.agents.implementation.tickets.tasks import pending_interface_replans
 from foundry.agents.plan_contracts import CompileResult
 from foundry.agents.planner.assembly import _assemble, _Fit, _Frame
@@ -133,6 +134,7 @@ from foundry.agents.planner.prior import (
     _Draft,
     _draft_prior,
     _epic_revision_text,
+    _kept_ids,
     _match_prior_epics,
     _named_epics,
     _not_of,
@@ -165,7 +167,7 @@ from foundry.agents.planner.prompt import (
     _user_content,
     latest_spec_failure,
 )
-from foundry.agents.planner.readers import _int, _objs, _section, _str, _strs
+from foundry.agents.planner.readers import _int, _newest_by_id, _objs, _section, _str, _strs
 from foundry.agents.planner.schema import (
     DELIVERABLES,
     DELTA_SCHEMA,
@@ -185,12 +187,14 @@ from foundry.agents.planner.schema import (
     TIER,
     _plan_schema,
 )
+from foundry.agents.planner.sizing import size_text, ticket_ceilings
+from foundry.agents.planner.split import ask_split, split_items, split_problem
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
 from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.gates import JudgmentProvenance
 from foundry.schemas.governance import ScopeTier
-from foundry.schemas.implementation import Epic, Toolchain
+from foundry.schemas.implementation import Epic, Ticket, Toolchain
 from foundry.schemas.product import PRD, CriteriaCritique, Criticality, IntentBrief, SprintPlan
 from foundry.telemetry import count
 
@@ -314,6 +318,7 @@ def make_planner_node(
     rt: AgentRuntime,
     index: SymbolIndex | None = None,
     toolchains: Sequence[Toolchain] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
 ) -> NodeFn:
     """Build the Planner node (T1). Call 1 writes the plan and its epics; a small
     plan carries its tickets inline (one call), a larger one gets one ticket call
@@ -328,7 +333,12 @@ def make_planner_node(
 
     ``index`` is the context retriever probed for existing code spans (``None``
     is greenfield — empty retrieval). ``toolchains`` are the languages offered
-    for the stack (``None`` probes this host once)."""
+    for the stack (``None`` probes this host once). ``ticket_tiers`` is the run's
+    difficulty -> tier table: with the proxy's local tiers it sets each ticket's
+    size ceiling (local or cloud), stated in every planning prompt and checked."""
+
+    ceilings = ticket_ceilings(rt.proxy.local_tiers, ticket_tiers)
+    sizing = size_text(ceilings)
 
     def _call(
         sop: str, schema: dict[str, Any], content: str, effort: Effort = None
@@ -483,7 +493,7 @@ def make_planner_node(
                 DELTA_SOP,
                 DELTA_SCHEMA,
                 _delta_text(
-                    str(state.get("request", "")),
+                    str(state.get("request", "")) + sizing,
                     findings,
                     items,
                     shown,
@@ -573,7 +583,7 @@ def make_planner_node(
                     f"{len(epics)} epics, each planned in its own call."
                 )
             inputs = (
-                _intake_text(state),
+                _intake_text(state) + sizing,
                 _plan_brief(payload, brief),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
@@ -653,6 +663,8 @@ def make_planner_node(
             criteria_seq=seqs["criteria"],
             base=base,
             stack_findings=_stack_command_findings(decided),
+            ceilings=ceilings,
+            keep=_kept_ids(state, rt),
         )
         return _Draft(
             payload=payload,
@@ -800,6 +812,8 @@ def make_planner_node(
         findings = latest_spec_failure(state)
         if not findings and (asked := pending_interface_replans(state)):
             return revise_interfaces(rt, state, config, asked, _call)
+        if not findings and (asked := pending_splits(state)):
+            return _split_tickets(state, config, asked)
         if findings:
             _count_findings(findings)
         prior = _prior_plan(state, rt) if findings else None
@@ -821,7 +835,7 @@ def make_planner_node(
         languages = {t.language for t in tools}
         pinned = state.get("stack")
         schema = _plan_schema(languages | ({pinned.language} if pinned else set()))
-        content = _user_content(state, rt, spans, tools)
+        content = _user_content(state, rt, spans, tools) + sizing
         store = rt.cas
 
         def seq(key: str) -> Seq:
@@ -844,7 +858,7 @@ def make_planner_node(
                 _call(
                     SOP,
                     schema,
-                    _user_content(state, rt, spans, tools, _prior_plan_text(earlier)),
+                    _user_content(state, rt, spans, tools, _prior_plan_text(earlier)) + sizing,
                     _REPAIR_EFFORT,
                 ),
                 seqs,
@@ -1071,7 +1085,11 @@ def make_planner_node(
             return rt.seq(config, NODE_ID, key)
 
         chosen = [e for e in prior.epics if e.id in targets]
-        inputs = (_intake_text(state), prior.brief, _interfaces_text(prior.interfaces))
+        inputs = (
+            _intake_text(state) + sizing,
+            prior.brief,
+            _interfaces_text(prior.interfaces),
+        )
         contents = [
             _epic_content(
                 inputs[0],
@@ -1183,6 +1201,8 @@ def make_planner_node(
             tickets_seq=tickets_seq,
             criteria_seq=criteria_seq,
             base=base,
+            ceilings=ceilings,
+            keep=_kept_ids(state, rt),
         )
 
     def _patch_replan(
@@ -1238,6 +1258,145 @@ def make_planner_node(
             note=" Patched with one delta call instead of a full re-plan.",
             concerns=[],
         )
+
+    def _split_tickets(
+        state: FactoryState, config: RunnableConfig, asked: Sequence[str]
+    ) -> dict[str, Any]:
+        """One split call per ticket of ``asked`` (:mod:`foundry.agents.planner.split`),
+        each split put through the plan's assembly and checks over the plan so far;
+        the accepted splits re-emitted as one re-plan, and the note that answers each
+        ticket (split or declined)."""
+        from foundry.agents.implementation.junior_engineer import _prior_failures
+        from foundry.agents.implementation.tickets.constants import (
+            FAIL_TRIAGE,
+            SPLIT_CHILD_TRIAGE,
+            SPLIT_DECLINED_TRIAGE,
+            SPLIT_REQUEST_TRIAGE,
+            SPLIT_TRIAGE,
+        )
+        from foundry.agents.implementation.tickets.split import parent_carries
+        from foundry.agents.implementation.tickets.tasks import _ticket_notes
+        from foundry.schemas.gates import GateTriage
+
+        def seq(key: str) -> Seq:
+            return rt.seq(config, NODE_ID, key)
+
+        fails = _ticket_notes(state, FAIL_TRIAGE)
+        requests = {
+            t.run_against.removeprefix("task/"): t
+            for t in state.get("gate_triage") or ()
+            if t.name == SPLIT_REQUEST_TRIAGE
+        }
+        why = {
+            tid: [
+                t.explanation[:800]
+                for t in (
+                    *([requests[tid]] if tid in requests else ()),
+                    *sorted(fails.get(tid, ()), key=lambda t: t.seq),
+                )
+            ]
+            for tid in asked
+        }
+        carry = parent_carries(state, asked)
+        gates = _prior_failures(state)[:30]
+        prior = _prior_plan(state, rt) or _prior_plan(state, rt, inline=True)
+        tickets_seq = seq("artifact:tickets")
+        answers: dict[str, str] = {}
+        split: dict[str, list[str]] = {}
+        fit: _Fit | None = None
+        if prior is None:
+            answers = dict.fromkeys(asked, "the plan could not be recovered")
+        else:
+            old = prior.critique
+            known = {*old.contract_findings, *old.coverage_findings} if old else set()
+            items = _ticket_items(prior.tickets, prior.criteria.values(), prior.epic_of)
+            taken = set(_newest_by_id(state, rt, TICKET_KIND, Ticket)) | set(_kept_ids(state, rt))
+            frame = _prior_frame(state, prior, tickets_seq, seq("artifact:acceptance_criteria"))
+            keep = set(frame.keep)
+            for tid in asked:
+                parent = next((i for i in items if i["id"] == tid), None)
+                reply = None
+                if parent is not None:
+                    reply = ask_split(
+                        _call,
+                        str(state.get("request", "")) + sizing,
+                        parent,
+                        [*why.get(tid, ()), *gates],
+                    )
+                merged, ids, problem = split_items(items, tid, reply, taken)
+                candidate: _Fit | None = None
+                if merged is not None and parent is not None:
+                    candidate = _assemble(merged, replace(frame, keep=frozenset(keep | set(ids))))
+                    problem = split_problem(
+                        candidate, tid, ids, [sc["id"] for sc in parent["scenarios"]], known
+                    )
+                if merged is None or candidate is None or problem:
+                    count("planner.split.rejected")
+                    progress.log(f"planner split of {tid} declined: {problem}")
+                    answers[tid] = problem
+                    continue
+                count("planner.split.accepted")
+                items, fit = merged, candidate
+                keep |= set(ids)
+                taken |= set(ids)
+                split[tid] = ids
+                answers[tid] = _str((reply or {}).get("rationale")).strip() or "no reason given"
+        notes: list[GateTriage] = []
+        for tid in asked:
+            done = tid in split
+            notes.append(
+                GateTriage(
+                    name=SPLIT_TRIAGE if done else SPLIT_DECLINED_TRIAGE,
+                    run_against=f"task/{tid}",
+                    explanation=(
+                        f"split {tid} into {', '.join(split[tid])}: {answers[tid]}"
+                        if done
+                        else f"{tid} left as planned ({answers[tid]}); the fix loop's "
+                        "restart stays its fallback"
+                    )[:2000],
+                    produced_by=NODE_ID,
+                    seq=seq(f"split:{tid}"),
+                )
+            )
+            if done:
+                notes.extend(
+                    GateTriage(
+                        name=SPLIT_CHILD_TRIAGE,
+                        run_against=f"task/{child}",
+                        explanation=carry.get(tid, ""),
+                        produced_by=NODE_ID,
+                        seq=seq(f"{SPLIT_CHILD_TRIAGE}:{child}"),
+                    )
+                    for child in split[tid]
+                )
+        summary = " ".join(n.explanation for n in notes if n.name != SPLIT_CHILD_TRIAGE)
+        if fit is None or prior is None:
+            return {
+                "gate_triage": notes,
+                "agent_journal": [
+                    journal_entry(
+                        node_id=NODE_ID,
+                        role=ROLE,
+                        seq=seq("journal:split"),
+                        summary="Ticket split after a failed retry. " + summary,
+                    )
+                ],
+            }
+        old = prior.critique
+        out = _emit_replan(
+            config,
+            state,
+            prior,
+            fit,
+            tickets_seq,
+            missing=old.missing if old else (),
+            omissions=old.security_abuse_omissions if old else (),
+            what="Split ticket(s) " + ", ".join(split),
+            note=" " + summary,
+            concerns=[],
+        )
+        out["gate_triage"] = [*out["gate_triage"], *notes]
+        return out
 
     def _emit_replan(
         config: RunnableConfig,

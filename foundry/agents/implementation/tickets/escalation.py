@@ -30,7 +30,7 @@ from foundry.execution.adapters.tiered import (
     STOPPED_TRIAGE,
 )
 from foundry.schemas.base import Artifact
-from foundry.schemas.implementation import Ticket
+from foundry.schemas.implementation import Ticket, ticket_effort
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
@@ -252,10 +252,15 @@ def _escalated_packet(
     packet: TaskPacket, target: str, context: tuple[str, ...], turn_budget: int
 ) -> TaskPacket:
     """``packet`` re-aimed at the cloud ``target``, on the cloud turn budget (a local
-    packet carries :data:`_LOCAL_TURN_BUDGET`)."""
+    packet carries :data:`_LOCAL_TURN_BUDGET`), one thinking level above its base."""
     return packet.model_copy(
         update={
-            "task": {**packet.task, "tier": target, "escalated": True},
+            "task": {
+                **packet.task,
+                "tier": target,
+                "escalated": True,
+            },
+            "effort": ticket_effort(packet.task["difficulty"], retry=True),
             "prior_failures": context,
             "turn_budget": turn_budget,
         }

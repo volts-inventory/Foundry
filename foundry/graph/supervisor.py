@@ -70,6 +70,7 @@ from langgraph.graph import END, START, StateGraph
 from foundry.agents.implementation.tickets import (
     cap_stopped,
     pending_interface_replans,
+    pending_splits,
     pending_wave,
 )
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
@@ -88,6 +89,7 @@ from foundry.graph.gate_wiring import (
     run_spec_gate,
     settle_fix_attempts,
 )
+from foundry.graph.gate_wiring.best import keep_splits_if_fixing
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
@@ -337,7 +339,7 @@ def build_supervisor_graph(
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
     # so it can be added as a single node of the supervisor (its internal
     # channel writes fold through FactoryState's reducers on the parent run).
-    planner = build_planner_subgraph(rt, index).compile()
+    planner = build_planner_subgraph(rt, index, ticket_tiers).compile()
     implementation = build_implementation_subgraph(
         rt,
         source_dir=source_dir,
@@ -476,6 +478,19 @@ def build_supervisor_graph(
         )
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=bt_boundary)
+        keep_splits_if_fixing(
+            state,
+            out,
+            lambda post: route_after_gates(
+                post,
+                config,
+                boundary=bt_boundary,
+                records=runner.records,
+                max_fix_attempts=max_fix_attempts,
+                total_cap=fix_cap(post, resolve, max_fix_attempts),
+                fix_policy=policy,
+            ),
+        )
         return out
 
     # -- bounded re-verification (fix) nodes ----------------------------------
@@ -507,7 +522,8 @@ def build_supervisor_graph(
         # The stub-signature guard left a ticket to a re-plan: the planner revises its
         # interface (once per ticket), the Spec gate re-checks the plan, and this
         # layer builds the ticket again.
-        if pending_interface_replans(state):
+        # A ticket that failed after its retry was asked to be split (once per ticket).
+        if pending_interface_replans(state) or pending_splits(state):
             return _PLANNER
         # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
         if pending_wave(state, resolve):

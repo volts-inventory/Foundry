@@ -593,6 +593,26 @@ def test_a_retried_ticket_is_told_why_its_last_attempt_failed(tmp_path: Path) ->
     assert assemble_prompt(first) != assemble_prompt(second)
 
 
+@pytest.mark.parametrize(
+    ("difficulty", "efforts"),
+    [
+        (Difficulty.TRIVIAL, ["low", "medium"]),
+        (Difficulty.STANDARD, ["medium", "xhigh"]),
+        (Difficulty.COMPLEX, ["xhigh", "xhigh"]),
+    ],
+)
+def test_a_tickets_thinking_level_follows_its_difficulty_and_a_retry_steps_it_up(
+    tmp_path: Path, difficulty: Difficulty, efforts: list[str]
+) -> None:
+    store = ArtifactStore()
+    rec = _Recorder(silent=frozenset({"T-001"}))
+    tickets = [_ticket("T-001", 0, files=("contracts.py",), difficulty=difficulty)]
+    _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
+        _state(store, tickets), _config()
+    )
+    assert [p.effort for p in rec.history] == efforts
+
+
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
     store = ArtifactStore()
     rec = _Recorder()
@@ -1262,6 +1282,35 @@ def test_cli_wires_tier_models_and_proxy_closures_use_the_packet_tier(
     assert tiers == ["T3", "T1", "T2"]
     assert "diff" in systems[0] and "diff" not in systems[2]
     assert "JSON action" in systems[2]
+
+
+def test_proxy_closures_pass_the_packets_thinking_level(tmp_path: Path) -> None:
+    efforts: list[Any] = []
+
+    class _Proxy:
+        def complete(self, *_a: Any, effort: Any = None, **_k: Any) -> Any:
+            efforts.append(effort)
+            return type(
+                "R",
+                (),
+                {
+                    "text": "```diff\n```\n```triage\nok\n```",
+                    "parsed": {"action": "finish", "summary": "ok"},
+                },
+            )()
+
+    proxy: Any = _Proxy()
+    low = _packet("T3").model_copy(update={"task": {"id": "T-1", "tier": "T3"}, "effort": "low"})
+    src = tmp_path / "src"
+    src.mkdir()
+    sandbox = Sandbox(str(src))
+    try:
+        cli.make_coding_adapter("raw-react", proxy=proxy).run(low, sandbox)
+        cli.make_coding_adapter("proxy-agent", proxy=proxy).run(low, sandbox)
+        cli.make_coding_adapter("proxy-agent", proxy=proxy).run(_packet("T2"), sandbox)
+    finally:
+        sandbox.destroy()
+    assert efforts == ["low", "low", None]
 
 
 # ---- flags --------------------------------------------------------------------

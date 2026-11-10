@@ -39,6 +39,16 @@ REPLAN_AFTER = 2
 PLANNER_NODE_ID = "planner"
 INTERFACE_REVISED_TRIAGE = "interface-revised"
 INTERFACE_DECLINED_TRIAGE = "interface-declined"
+# A ticket that failed after its retry (and its escalation, in hybrid) and is large
+# enough to split (ADaPT: decompose only where the executor failed): the planner is
+# asked once per ticket to split it, and answers SPLIT (the children replace it) or
+# SPLIT_DECLINED (the fix loop's restart stays its fallback). Each child gets a
+# SPLIT_CHILD note (a child is never split again) naming the snapshot blob of the
+# parent's failed attempt it starts from, or empty to start from the integrated tree.
+SPLIT_REQUEST_TRIAGE = "ticket-split-request"
+SPLIT_TRIAGE = "ticket-split"
+SPLIT_DECLINED_TRIAGE = "split-declined"
+SPLIT_CHILD_TRIAGE = "split-child"
 SKELETON_TRIAGE = "skeleton"
 # A failed attempt's written files its retry starts from (explanation: their snapshot blob).
 CARRY_TRIAGE = "ticket-carry"

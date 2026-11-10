@@ -201,10 +201,14 @@ card's values; other servers take them from the request).
 `FOUNDRY_LOCAL_SAMPLING=temperature=0.6,top_p=0.95` overrides the profile for every
 local model; `FOUNDRY_LOCAL_SAMPLING=off` restores greedy decoding.
 
-Local Qwen3.x models think on every call by default: one-shot calls (the plan, a
-verdict) at `reasoning_effort: xhigh` with up to 98304 output tokens, and agent
-turns (one of many in a coding session) at `medium` with up to 40960. A reply cut
-off at the cap is retried one level lower (xhigh → medium → off). Each turn's
+Local Qwen3.x models think on every call by default: the plan at
+`reasoning_effort: xhigh` with up to 98304 output tokens, a verdict at `medium`, and
+a ticket's coding session at its difficulty's level (trivial `low`, standard
+`medium`, complex `xhigh`), up to 40960 output tokens below xhigh. A ticket's
+rebuild, restart or escalation thinks one level higher (capped at xhigh); a fix-loop
+fixer thinks at `medium` on its first pass and `xhigh` after. A reply cut off at the
+cap is retried one level lower (xhigh → medium → off; low → off). The bench reports
+local calls per level (`calls_by_effort`). Each turn's
 reasoning is sent back with that turn on the next call (Qwen's "preserve
 thinking") and never parsed as the answer. `FOUNDRY_LOCAL_THINKING=off` turns it
 off, `agent` keeps it only for the coding sessions, `on` forces it for any local

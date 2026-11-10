@@ -50,7 +50,9 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import shutil
+import stat
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -79,7 +81,7 @@ if TYPE_CHECKING:
     # (that's the streaming path); one without it keeps the 3-argument shape.
     SandboxExec = Callable[..., SandboxResult]
 
-__all__ = ["ClaudeCodeAdapter", "changed_files", "walk_worktree"]
+__all__ = ["ClaudeCodeAdapter", "TreeTooLargeError", "changed_files", "walk_worktree"]
 
 _EPILOGUE = (
     "You are working in a disposable sandbox worktree (your current working "
@@ -116,24 +118,83 @@ _EXCLUDED_DIRS = frozenset(
 _TARGET_DIR_MANIFESTS = ("Cargo.toml", "pom.xml")
 
 
-def walk_worktree(root: Path) -> dict[str, bytes]:
+class TreeTooLargeError(ValueError):
+    """A capped :func:`walk_worktree` met a file or a tree over its cap."""
+
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# O_NONBLOCK: opening a FIFO planted in place of a file returns at once (fstat skips it).
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
+
+
+def walk_worktree(
+    root: Path, *, max_file: int | None = None, max_total: int | None = None
+) -> dict[str, bytes]:
     """The worktree's file map (relative POSIX path -> raw bytes), excluding
-    VCS/scratch dirs. Symlinks are skipped (never followed — a link out of the
-    tree must not pull external content into the authored slice)."""
+    VCS/scratch dirs. Links are never followed and only regular files are read:
+    every component is opened relative to its parent's descriptor with
+    ``O_NOFOLLOW``, so a session still running in the tree (``foundry-check``)
+    can't swap a directory or file for a link out of it, or block the walk with a
+    FIFO. Past ``max_file`` (one file) or ``max_total`` bytes it raises
+    :class:`TreeTooLargeError`."""
     files: dict[str, bytes] = {}
-    top = _EXCLUDED_TOP_DIRS
-    if any((root / m).is_file() for m in _TARGET_DIR_MANIFESTS):
-        top = top | {"target"}
-    for path in sorted(root.rglob("*")):
-        if path.is_symlink() or not path.is_file():
-            continue
-        rel = path.relative_to(root)
-        if rel.parts and rel.parts[0] in top:
-            continue
-        if any(part in _EXCLUDED_DIRS for part in rel.parts[:-1]):
-            continue
-        files[rel.as_posix()] = path.read_bytes()
-    return files
+    total = 0
+
+    def read(dfd: int, name: str, rel: str) -> None:
+        nonlocal total
+        try:
+            fd = os.open(name, _FILE_FLAGS, dir_fd=dfd)
+        except OSError:
+            return
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return
+            chunks: list[bytes] = []
+            size = 0
+            while chunk := os.read(fd, 1 << 16):
+                size += len(chunk)
+                if max_file is not None and size > max_file:
+                    raise TreeTooLargeError(f"{rel} is over {max_file} bytes")
+                if max_total is not None and total + size > max_total:
+                    raise TreeTooLargeError(f"the tree is over {max_total} bytes")
+                chunks.append(chunk)
+            total += size
+            files[rel] = b"".join(chunks)
+        finally:
+            os.close(fd)
+
+    def visit(dfd: int, prefix: str, skip: frozenset[str]) -> None:
+        for name in sorted(os.listdir(dfd)):
+            if name in skip:
+                continue
+            rel = f"{prefix}{name}"
+            try:
+                mode = os.stat(name, dir_fd=dfd, follow_symlinks=False).st_mode
+            except OSError:
+                continue
+            if stat.S_ISREG(mode):
+                read(dfd, name, rel)
+            elif stat.S_ISDIR(mode) and name not in _EXCLUDED_DIRS:
+                try:
+                    sub = os.open(name, _DIR_FLAGS, dir_fd=dfd)
+                except OSError:
+                    continue
+                try:
+                    visit(sub, f"{rel}/", frozenset())
+                finally:
+                    os.close(sub)
+
+    top_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        top = _EXCLUDED_TOP_DIRS
+        for m in _TARGET_DIR_MANIFESTS:
+            with contextlib.suppress(OSError):
+                if stat.S_ISREG(os.stat(m, dir_fd=top_fd, follow_symlinks=False).st_mode):
+                    top = top | {"target"}
+        visit(top_fd, "", top)
+    finally:
+        os.close(top_fd)
+    return dict(sorted(files.items()))
 
 
 def changed_files(

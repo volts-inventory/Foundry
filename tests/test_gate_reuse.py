@@ -8,13 +8,16 @@ reused; the emit guard still keys on an attested PASS for the newest tree.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import foundry
 from foundry import telemetry
-from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner
+from foundry.gates import DevGateWriteVerifier, TwoZoneGateRunner, ZoneBSigner, reuse
 from foundry.gates.pydeps import PythonBuildEnv
 from foundry.gates.reuse import VerdictCache
 from foundry.gates.runner import ZoneAObservation, observe
@@ -117,7 +120,16 @@ def test_a_unit_reuses_all_or_nothing(tmp_path, records):
 
 @pytest.mark.parametrize(
     "change",
-    ["file_byte", "new_file", "exec_bit", "gate_flag", "deps", "env", "run_against"],
+    [
+        "file_byte",
+        "new_file",
+        "exec_bit",
+        "gate_flag",
+        "deps",
+        "env",
+        "distribution",
+        "run_against",
+    ],
 )
 def test_any_input_change_reruns(tmp_path, records, monkeypatch, change):
     runner = _runner(records, VerdictCache())
@@ -140,10 +152,49 @@ def test_any_input_change_reruns(tmp_path, records, monkeypatch, change):
         gate = FileGate(pyenv=other)
     elif change == "env":
         monkeypatch.setenv("FOUNDRY_GATE_REUSE_TEST", "1")
+    elif change == "distribution":
+        # A `uv sync` that bumps the harness's pytest.
+        installed = list(importlib.metadata.distributions())
+        bumped = SimpleNamespace(metadata={"Name": "pytest"}, version="999.0")
+        monkeypatch.setattr(importlib.metadata, "distributions", lambda: [*installed, bumped])
     else:
         against = OTHER_TREE
     runner.run_unit([(gate, _seq(2))], against, w2)
     assert gate.runs == 1
+
+
+def test_code_digest_covers_all_of_foundry(tmp_path):
+    root = tmp_path / "pkg"
+    (root / "gates").mkdir(parents=True)
+    (root / "gates" / "build.py").write_text("")
+    (root / "python_env.py").write_text("A = 1\n")
+    before = reuse._source_digest(root)
+    (root / "python_env.py").write_text("A = 2\n")
+    assert reuse._source_digest(root) != before
+    assert reuse._code_digest() == reuse._source_digest(Path(foundry.__file__).parent)
+
+
+def test_only_pass_units_without_a_venv_persist(tmp_path, records):
+    store = tmp_path / "verdicts"
+    venv = PythonBuildEnv(tmp_path / "env", ("-r", "requirements.txt"), digest="deps-1")
+    cache = VerdictCache(store)
+    runner = _runner(records, cache)
+    runner.run_unit([(FileGate(), _seq(1))], TREE, _tree(tmp_path / "fail1", "no"))
+    runner.run_unit([(FileGate(pyenv=venv), _seq(2))], TREE, _tree(tmp_path / "venv1"))
+    assert not list(store.glob("*.json"))
+
+    # In memory both still reuse within the process.
+    for i, (w, body, pyenv) in enumerate((("fail2", "no", None), ("venv2", "ok", venv))):
+        gate = FileGate(pyenv=pyenv)
+        runner.run_unit([(gate, _seq(3 + i))], TREE, _tree(tmp_path / w, body))
+        assert gate.runs == 0
+
+    # A resumed process re-runs both: the FAIL (a flake gets its retry) and the venv.
+    resumed = _runner(records, VerdictCache(store))
+    for i, (w, body, pyenv) in enumerate((("fail3", "no", None), ("venv3", "ok", venv))):
+        gate = FileGate(pyenv=pyenv)
+        resumed.run_unit([(gate, _seq(5 + i))], TREE, _tree(tmp_path / w, body))
+        assert gate.runs == 1
 
 
 def test_unkeyable_inputs_never_reuse(tmp_path, records):
@@ -202,21 +253,21 @@ def test_resume_reuses_from_disk_and_outranks_the_prior_record(tmp_path, records
 def test_a_stored_record_that_does_not_verify_is_rerun(tmp_path, records):
     store = tmp_path / "verdicts"
     _runner(records, VerdictCache(store)).run_unit(
-        [(FileGate(), _seq(1))], TREE, _tree(tmp_path / "w1", "no")
+        [(FileGate(), _seq(1))], TREE, _tree(tmp_path / "w1")
     )
     (path,) = store.glob("*.json")
     body = json.loads(path.read_text())
-    body[0]["status"] = "pass"  # flip the stored FAIL
+    body[0]["status"] = "fail"  # flip the stored PASS: its attestation no longer derives
     path.write_text(json.dumps(body))
     gate = FileGate()
     (again,) = _runner(records, VerdictCache(store)).run_unit(
-        [(gate, _seq(2))], TREE, _tree(tmp_path / "w2", "no")
+        [(gate, _seq(2))], TREE, _tree(tmp_path / "w2")
     )
-    assert gate.runs == 1 and again.status is GateStatus.FAIL
+    assert gate.runs == 1 and again.status is GateStatus.PASS
     # Nor does a record signed under another key reuse.
     gate = FileGate()
     _runner(records, VerdictCache(store), key=b"another-key-0123456789abcdef").run_unit(
-        [(gate, _seq(3))], TREE, _tree(tmp_path / "w3", "no")
+        [(gate, _seq(3))], TREE, _tree(tmp_path / "w3")
     )
     assert gate.runs == 1
 

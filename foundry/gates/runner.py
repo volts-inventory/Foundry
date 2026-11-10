@@ -67,7 +67,7 @@ from pydantic import Field
 from foundry import progress, telemetry
 from foundry.canonical import canonical_bytes, content_digest
 from foundry.gates.attestation import ZoneBSigner
-from foundry.gates.reuse import VerdictCache, unit_key
+from foundry.gates.reuse import VerdictCache, durable_unit, unit_key
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords
@@ -466,7 +466,10 @@ class TwoZoneGateRunner:
             for result in out:
                 self._latch(result)
                 telemetry.count(f"gate.reuse.{result.name}")
-            verdicts = ", ".join(f"{r.name}={r.status}" for r in out)
+            # Audit provenance: the original verdict each reused record re-references.
+            verdicts = ", ".join(
+                f"{r.name}={r.status} from {r.seq.run_id}@{r.seq.emission_epoch}" for r in cached
+            )
             progress.log(f"reuse gate verdicts {verdicts} (identical inputs, key {key[:12]})")
             return out
         results = [self.run(g, run_against, seq, workdir) for g, seq in gates]
@@ -475,7 +478,7 @@ class TwoZoneGateRunner:
             and key
             and all(r.status in (GateStatus.PASS, GateStatus.FAIL) for r in results)
         ):
-            self._verdicts.put(key, results)
+            self._verdicts.put(key, results, durable=durable_unit([g for g, _ in gates]))
         return results
 
     def _reusable(

@@ -19,9 +19,10 @@ of, and is ``None`` (never reuse) whenever any part cannot be pinned down:
   timeouts, harness pins, profile, the venv's manifest digest), except the
   per-process observation seal key; an attribute of a type not understood here (a
   discriminator, a venv with no manifest digest) disables reuse;
-- the source bytes of ``foundry/gates`` (the harness and decision code);
-- the interpreter, the host toolchains and their versions, the env the sandbox
-  passes to gate commands, and every ``FOUNDRY_*`` variable;
+- the source bytes of ``foundry`` (the harness, decision and wiring code);
+- the interpreter and its installed distributions, the host toolchains and their
+  versions, the env the sandbox passes to gate commands, and every ``FOUNDRY_*``
+  variable;
 - the runner's ``run_against`` / scanner / lineage revisions.
 
 Attestation: a reused verdict IS the original zone-B-signed record, re-referenced
@@ -37,6 +38,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import hashlib
+import importlib.metadata
 import json
 import os
 import stat
@@ -45,14 +47,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundry.canonical import content_digest
-from foundry.schemas.gates import GateResult
+from foundry.schemas.gates import GateResult, GateStatus
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from foundry.gates.runner import GateImpl
 
-__all__ = ["VerdictCache", "unit_key"]
+__all__ = ["VerdictCache", "durable_unit", "unit_key"]
 
 _KEY_VERSION = 1
 
@@ -108,8 +110,13 @@ def _gate_config(gate: GateImpl) -> dict[str, object]:
 
 
 @functools.cache
-def _gates_code_digest() -> str:
-    root = Path(__file__).parent
+def _code_digest() -> str:
+    # All of foundry, not only foundry/gates: the gates import python_env, fs,
+    # toolchains, canonical and the gate wiring.
+    return _source_digest(Path(__file__).parents[1])
+
+
+def _source_digest(root: Path) -> str:
     files = sorted(root.rglob("*.py"), key=lambda p: p.as_posix())
     return content_digest(
         {
@@ -129,11 +136,25 @@ def _env_identity() -> str:
     return content_digest(
         {
             "python": [sys.executable, sys.version],
+            # The harness runs this interpreter's pytest / pytest-bdd: a `uv sync`
+            # that bumps one changes the key.
+            "distributions": sorted(
+                {(d.metadata["Name"] or "", d.version) for d in importlib.metadata.distributions()}
+            ),
             "toolchains": [t.model_dump(mode="json") for t in available_toolchains()],
             "sandbox_env": _confined_env(None),
             "foundry_env": {k: v for k, v in os.environ.items() if k.startswith("FOUNDRY_")},
         }
     )
+
+
+def durable_unit(gates: Sequence[GateImpl]) -> bool:
+    """May this unit's PASS outlive the process (the on-disk store)? Not when a gate
+    holds a build venv: it is a per-process temp dir rebuilt on resume, and pip
+    resolves its transitive dependencies afresh, so the resumed venv may differ."""
+    from foundry.gates.pydeps import PythonBuildEnv
+
+    return not any(isinstance(v, PythonBuildEnv) for g in gates for v in vars(g).values())
 
 
 def unit_key(
@@ -156,7 +177,7 @@ def unit_key(
                 "lineage_map_revision": lineage_map_revision,
                 "gates": [_gate_config(g) for g in gates],
                 "tree": _tree_digest(Path(workdir)),
-                "code": _gates_code_digest(),
+                "code": _code_digest(),
                 "env": _env_identity(),
             }
         )
@@ -167,9 +188,21 @@ def unit_key(
 class VerdictCache:
     """A run's reusable gate units: unit key -> the original attested records.
 
-    In memory, and under ``root`` when given (the run's state dir, so a resumed
-    process reuses what the interrupted one judged). The store is untrusted: the
-    runner re-verifies every record before reusing it."""
+    In memory (PASS and FAIL units), and under ``root`` when given: the run's state
+    dir, so a resumed process reuses what the interrupted one judged. Only all-PASS
+    units of :func:`durable_unit` gates go to disk: a resume re-runs every FAIL (a
+    suspected flake gets its retry) and every venv-backed unit.
+
+    Disk trust equals checkpoint trust. The filename key is NOT bound to the signed
+    records: the runner re-derives each record's attestation and checks its gate,
+    tree and revisions, but cannot prove a record was stored under the key it is
+    found at. Anyone who can write the state dir can already tamper with the
+    checkpoint the run resumes from, so this adds no new authority.
+
+    Residuals the key does not cover: a gate whose verdict depends on the network
+    (an unpinned ``npm install`` resolving afresh) or the clock, and config files
+    under ``HOME`` (``~/.npmrc``, ``~/.config/pip``), which the env digest keys by
+    path only, not content."""
 
     def __init__(self, root: Path | None = None) -> None:
         self._root = root
@@ -188,9 +221,11 @@ class VerdictCache:
         except (OSError, ValueError, TypeError):
             return None  # a corrupt entry is a miss, never a verdict
 
-    def put(self, key: str, records: list[GateResult]) -> None:
+    def put(self, key: str, records: list[GateResult], *, durable: bool) -> None:
         self._mem[key] = list(records)
-        if self._root is None:
+        if self._root is None or not durable:
+            return
+        if any(r.status is not GateStatus.PASS for r in records):
             return
         self._root.mkdir(parents=True, exist_ok=True)
         tmp = self._root / f".{key}.{os.getpid()}.tmp"

@@ -41,6 +41,7 @@ from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
 from foundry.agents.implementation.junior_engineer import (
     _adapter_name,
+    _failed_gates,
     _finalize_diff,
     _fix_summary,
     _prior_failures,
@@ -133,6 +134,13 @@ from foundry.agents.implementation.tickets.skeleton import (
     shared_stub_names,
     skeleton_files,
     stub_rules,
+)
+from foundry.agents.implementation.tickets.split import (
+    failing_owners,
+    may_split,
+    pending_splits,
+    split_carries,
+    split_request,
 )
 from foundry.agents.implementation.tickets.tasks import (
     _skipped_task_ids,
@@ -229,6 +237,7 @@ __all__ = [
     "note_fix_writes",
     "pending_escalations",
     "pending_interface_replans",
+    "pending_splits",
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
@@ -412,6 +421,34 @@ def make_engineering_node(
                 progress.log(
                     f"{tid}: its failed attempt's files are unreadable, not carried: {exc}"
                 )
+        # A child of a split starts from its parent's last attempt, cut to its files.
+        split_from: set[str] = set()
+        by_tid = {task_id_for_ticket(t.id): t for t in wave}
+        for tid, uri in split_carries(state).items():
+            if (
+                blobs is None
+                or tid not in by_tid
+                or tid in carried
+                or tid in done
+                or failures.get(tid)
+                or requested
+                or restarts
+            ):
+                continue
+            from foundry.graph.gate_wiring import MaterializationError, snapshot_files
+
+            try:
+                cut = {
+                    p: c
+                    for p, c in snapshot_files(uri, blobs).items()
+                    if in_write_scope(p, by_tid[tid].files)
+                }
+            except (MaterializationError, KeyError, ValueError) as exc:
+                progress.log(f"{tid}: its split parent's files are unreadable, not carried: {exc}")
+                continue
+            if cut:
+                carried[tid] = cut
+                split_from.add(tid)
         for tid, files in restubbed.items():
             if tid not in done and not requested and not restarts:
                 carried.setdefault(tid, {}).update(files)
@@ -628,13 +665,22 @@ def make_engineering_node(
                         "already hold your previous attempt's work as it left it: keep that "
                         f"work and fix only this one violation, then finish. {own[-1]}",
                     )
+                inherited = (
+                    (
+                        f"[split] {', '.join(sorted(carried[tid]))} already hold the failed "
+                        "attempt of the larger ticket this one was split from: keep what serves "
+                        "your scenarios, fix what is wrong, and build only your part.",
+                    )
+                    if tid in split_from
+                    else ()
+                )
                 packet = _ticket_packet(
                     tasks[tid],
                     ticket,
                     constraints,
                     spans=spans,
                     feature_files=features,
-                    prior_failures=(*own, *prior),
+                    prior_failures=(*own, *inherited, *prior),
                     turn_budget=(
                         max(turn_budget, _LOCAL_TURN_BUDGET)
                         if _is_local(rt, tasks[tid].tier)
@@ -805,6 +851,8 @@ def make_engineering_node(
             # Finalize in Seq order, single-threaded: rt.seq and rt.cas body writes
             # never race. A failed ticket never takes its siblings' diffs with it.
             built: list[Ticket] = []
+            owners: set[str] | None = None  # who the newest failing gates blame
+            split_asked: set[str] = set()
             for ticket in wave:
                 tid = task_id_for_ticket(ticket.id)
                 if tid not in results:
@@ -858,10 +906,27 @@ def make_engineering_node(
                     merged.setdefault("gate_triage", []).extend(
                         _failure_notes(rt, config, tid, attempt, exc)
                     )
-                    _note_rejection(tid, exc)
+                    left_to_replan = _note_rejection(tid, exc)
+                    split = False
+                    if attempt >= MAX_TICKET_ATTEMPTS and not left_to_replan and tid not in done:
+                        if owners is None:
+                            owners = failing_owners(state, resolve, _failed_gates(state))
+                        split = may_split(state, resolve, tid, owners, asked=split_asked)
+                    if split:
+                        split_asked.add(tid)
+                        progress.log(f"{tid}: failed after its retry, asking for a split")
+                        merged["gate_triage"].append(
+                            split_request(
+                                rt,
+                                config,
+                                NODE_ID,
+                                tid,
+                                f"{tid} failed {attempt} attempts; last error: {exc}",
+                            )
+                        )
                     if (
                         (wrote := scoped.carry.get(tid))
-                        and attempt < MAX_TICKET_ATTEMPTS
+                        and (attempt < MAX_TICKET_ATTEMPTS or split)
                         and rt.cas is not None
                     ):
                         from foundry.graph.gate_wiring import snapshot_blob

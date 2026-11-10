@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._common import journal_entry
@@ -649,6 +650,7 @@ def _build_packet(
     retrieved_spans: tuple[str, ...] = (),
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
+    fix_files: tuple[str, ...] = (),
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -669,6 +671,8 @@ def _build_packet(
         body["rules"] = list(rules)
     if verify:
         body["verify"] = dict(verify)
+    if fix_files:
+        body["fix_files"] = list(fix_files)
     return TaskPacket(
         task=body,
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
@@ -726,6 +730,7 @@ def _run_one_task(
     verify: Mapping[str, str] | None = None,
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
     check: CheckSpec | None = None,
+    fix_files: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
@@ -756,6 +761,7 @@ def _run_one_task(
             retrieved_spans=retrieved_spans,
             rules=rules,
             verify=verify,
+            fix_files=fix_files,
         )
         from foundry.gates.self_check import check_scope
 
@@ -875,6 +881,114 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
     return tuple(files)
 
 
+# A fixer pass's write fence (the packet's ``fix_files``; proxy_agent refuses
+# a write elsewhere that carries no ``reason``).
+_FENCE_RULE = (
+    "Edit only the files in `fix_files`: the failure cluster this pass fixes and the "
+    "tickets that own it. A write or delete anywhere else is refused unless it "
+    "carries a `reason` saying why this failure needs that file changed; the reason "
+    "is recorded for review."
+)
+
+
+def _feature_binders(feature: str, tree: Mapping[str, str | None]) -> list[str]:
+    """The tree's ``.py`` files naming ``feature`` by file name: its step modules
+    (as :func:`foundry.gates.test.binding_modules` finds them on disk)."""
+    name = PurePosixPath(feature).name
+    return sorted(p for p, t in tree.items() if p.endswith(".py") and t is not None and name in t)
+
+
+def _fix_files(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    tree: Mapping[str, str | None],
+) -> tuple[str, ...]:
+    """The write fence of a fixer pass aimed at a planned failure cluster: the files
+    its failures name (the failing test modules, the step modules binding its
+    scenarios, the sources its build errors point at) and every file of the tickets
+    that own it. Empty = no fence: no cluster is planned, or an owning ticket
+    declared no files (its scope is the whole tree). A shop fixer sent for a failing
+    test rewrote admin.py instead and broke the routes another ticket owned."""
+    from foundry.agents.implementation.tickets import read_tickets, task_id_for_ticket
+    from foundry.graph.gate_wiring import failure_files
+
+    failed = _failed_gates(state)
+    cluster, _ = fix_target(state, resolve, failed)
+    if cluster is None:
+        return ()
+    out: list[str] = []
+    for item in cluster.items:
+        path = item.partition(":")[2].split("::", 1)[0]
+        if path.endswith(".feature"):
+            out.extend(_feature_binders(path, tree))
+        elif path.endswith(".py"):
+            out.append(path)
+    out.extend(failure_files(scope_gates(failed, cluster)))
+    for t in read_tickets(state, resolve):
+        if task_id_for_ticket(t.id) in cluster.tickets:
+            if not t.files:
+                return ()
+            out.extend(t.files)
+    return tuple(dict.fromkeys(out))
+
+
+_UNIMPORTED = re.compile(r"was not executed — (.+?) binds? it, but pytest failed to import")
+_COLLECTING = re.compile(r"^_{3,} ERROR collecting (\S+?\.py) _{3,}$")
+_IMPORT_ERROR = re.compile(r"^E?\s*((?:ImportError|ModuleNotFoundError): .+?)(?: \(/[^)]*\))?$")
+
+
+def _binding_rule(
+    scoped: Sequence[GateResult], failed: Sequence[GateResult], contracts: Sequence[str]
+) -> str:
+    """The fixer's scenario-binding rule. Its generic "point the step module's binding
+    at it" for any scenario that "was not executed" overrode the gate's own reason
+    (:func:`foundry.gates.test.uncollected_binding_reasons`) when the binding module
+    was in place but failed to import: the fixer rebound a bound file. When the
+    failures this pass is shown name such a module, the rule says which import
+    failed (read off the gate's collect-error block) and to import only names the
+    tree's contracts define."""
+    from foundry.graph.gate_wiring import failing_ids
+    from foundry.graph.gate_wiring.routing import is_collection_error
+
+    mods: list[str] = []
+    for g in scoped:
+        if g.name != "test":
+            continue
+        for line in g.findings:
+            if m := _UNIMPORTED.search(line):
+                mods.extend(x.strip() for x in m.group(1).split(","))
+        mods.extend(i for i in failing_ids(g.findings) if is_collection_error(i))
+    mods = list(dict.fromkeys(mods))
+    if not mods:
+        return _FIXER_RULES[2]
+    errors: dict[str, str] = {}
+    current: str | None = None
+    for g in failed:
+        if g.name != "test":
+            continue
+        for line in (ln.rstrip() for f in g.findings for ln in f.splitlines()):
+            if m := _COLLECTING.match(line.strip()):
+                current = m.group(1)
+            elif current is not None and (m := _IMPORT_ERROR.match(line.strip())):
+                errors.setdefault(current, m.group(1))
+    named = "; ".join(f"{m}: {errors[m]}" if m in errors else m for m in mods)
+    where = (
+        " — the shared names live in the contract files ("
+        + ", ".join(contracts)
+        + "): read them and use the name they define"
+        if contracts
+        else ""
+    )
+    return (
+        "Acceptance scenarios live only in the gate-owned features/<ticket>.feature files: "
+        "never write, copy or regenerate a .feature file (any you write is discarded). "
+        f"These step modules bind their scenarios but failed to import ({named}), so "
+        "none of their scenarios ran: keep each `scenarios(...)` binding as it is and "
+        "fix the import. Import only names that exist in this tree" + where + ", or "
+        "the module the import names; never invent a name the code does not define."
+    )
+
+
 def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) -> CheckSpec:
     """A fixer session's gate check: the scenarios a wave check judges plus every
     scenario the failed Test gate names, its own the planned failure cluster's items
@@ -904,6 +1018,10 @@ def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) 
             else None
         ),
         own_build=cluster is None or any(i.startswith("build:") for i in items),
+        # The fixer's check runs only build + scenarios: a red smoke (smoke.py never
+        # written) stayed invisible to it, and it called done on a tree that failed.
+        smoke=any(g.name == "smoke" and g.status is GateStatus.FAIL for g in failed),
+        own_smoke=cluster is None or any(i.startswith("smoke:") for i in items),
         rules=dict(zip(_FIXER_RULES, _FIXER_CHECK_RULES, strict=False)),
     )
 
@@ -1002,6 +1120,12 @@ def make_fixer_node(
 
         focus = _fix_focus(state, resolve)
         contracts = contract_paths(state, resolve)
+        fix_files = _fix_files(state, resolve, overlay)
+        rules = (
+            *_FIXER_RULES[:2],
+            _binding_rule(_cluster_gates(state, resolve)[0], _failed_gates(state), contracts),
+            *((_FENCE_RULE,) if fix_files else ()),
+        )
         persona = _FIXER_PERSONA
         if focus and pending_wave(state, resolve):
             persona += (
@@ -1058,12 +1182,13 @@ def make_fixer_node(
                 prior_failures=failures,
                 persona=persona,
                 overlay=overlay,
-                rules=_FIXER_RULES,
+                rules=rules,
                 verify=verify_commands(state.get("stack")),
                 review=lambda result, sandbox: note_fix_writes(
                     result, sandbox, task_id, focus=focus, contracts=contracts
                 ),
                 check=_fix_check(base, state, resolve) if base is not None else None,
+                fix_files=fix_files,
             )
         # Integration applies it on top of the diffs it repairs (none yet when every
         # ticket failed).

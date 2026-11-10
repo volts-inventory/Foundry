@@ -2395,3 +2395,73 @@ def test_a_rebuild_the_signature_guard_rejects_again_goes_to_a_replan(tmp_path: 
     assert "Shop.add's parameters changed" in notes["ticket-replan"]
     merged: FactoryState = {**state, "gate_triage": [*state["gate_triage"], *out["gate_triage"]]}
     assert restart_set(merged, store.resolve, ["T-002"]) == ()
+
+
+def test_a_fixer_check_runs_smoke_when_smoke_failed(monkeypatch) -> None:
+    """The shop run: smoke failed (no smoke.py) but the fixer's check ran only the
+    build and the scenarios, so the fixer never saw it."""
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset())
+    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    smoke = "smoke command exited 2: python: can't open file './smoke.py'"
+    red = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _RED, smoke))
+    spec = je._fix_check(object(), red, lambda uri: None)  # type: ignore[arg-type]
+    assert spec.smoke and spec.own_smoke
+    green = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _OK))
+    assert not je._fix_check(object(), green, lambda uri: None).smoke  # type: ignore[arg-type]
+
+
+_IMPORT_FAIL = (
+    "BDD criterion AC-1: scenario features/T-001.feature::AC-1 was not executed — "
+    "tests/test_a.py binds it, but pytest failed to import that module (`ERROR "
+    "collecting tests/test_a.py` in the output), so none of its scenarios ran: fix the "
+    "import error the traceback shows"
+)
+_IMPORT_BLOCK = (
+    "______________________ ERROR collecting tests/test_a.py _______________________",
+    "ImportError while importing test module '/tmp/x/tests/test_a.py'.",
+    "E   ImportError: cannot import name 'OrderRoutesImpl' from 'app.routes' (/tmp/x/routes.py)",
+    "ERROR tests/test_a.py",
+)
+
+
+def test_the_fixer_binding_rule_names_the_failed_import_not_a_rebind() -> None:
+    """The fixer's generic rule ("point the step module's binding at it") overrode
+    the gate's import-error reason: the binding was in place, the import was wrong."""
+    from foundry.agents.implementation.junior_engineer import _FIXER_RULES, _binding_rule
+
+    failed = [_gate("test", "t", 2, _RED, _IMPORT_FAIL, *_IMPORT_BLOCK)]
+    # The cluster's scoped view may have cut the collect block: it is read off all.
+    scoped = [_gate("test", "t", 2, _RED, _IMPORT_FAIL)]
+    rule = _binding_rule(scoped, failed, ("app/contracts.py",))
+    assert "point the step module's binding" not in rule
+    assert (
+        "tests/test_a.py: ImportError: cannot import name 'OrderRoutesImpl' from 'app.routes')"
+        in rule
+    )
+    assert "keep each `scenarios(...)` binding" in rule
+    assert "contract files (app/contracts.py)" in rule
+    assert "/tmp/x" not in rule
+    unbound = [_gate("test", "t", 2, _RED, _BDD)]
+    assert _binding_rule(unbound, unbound, ()) == _FIXER_RULES[2]
+
+
+def test_a_fixer_pass_is_fenced_to_its_cluster_and_its_owning_tickets() -> None:
+    from foundry.agents.implementation.junior_engineer import _fix_files
+
+    store = ArtifactStore()
+    tree = {"a.py": "x\n", "tests/test_b.py": "y\n", "admin.py": "z\n"}
+    state = _scoped_state(store, "ticket:T-002")
+    assert _fix_files(state, store.resolve, tree) == ("tests/test_b.py",)
+    # No planned cluster: no fence.
+    assert _fix_files(_scoped_state(store, None), store.resolve, tree) == ()
+    # A scenario's cluster admits the step modules that bind its feature file.
+    state = _scoped_state(store, "ticket:T-001")
+    bdd = "BDD criterion AC-1: scenario features/T-001.feature::AC-1 failed"
+    state["gates"] = [*state["gates"][:1], _gate("test", "t1", 2, _RED, _A1, bdd, _B1)]
+    tree["tests/steps/test_t1.py"] = 'scenarios("../features/T-001.feature")\n'
+    fence = _fix_files(state, store.resolve, tree)
+    assert {"tests/test_a.py", "tests/steps/test_t1.py", "a.py"} <= set(fence)
+    assert "admin.py" not in fence and "tests/test_b.py" not in fence

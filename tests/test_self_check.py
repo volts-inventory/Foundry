@@ -913,3 +913,31 @@ def test_concurrent_builds_reuse_a_failed_install_and_never_delete_a_held_venv(
     third.install(wd, timeout_s=5)
     assert installs == ["pip", "pip"]
     cache.close()
+
+
+def test_a_fixer_sent_for_smoke_checks_the_smoke_command() -> None:
+    """The shop run: smoke failed on a missing smoke.py, and the fixer's check (build
+    + scenarios only) never showed it."""
+    from foundry.gates.profiles import PROFILES
+
+    state, resolve, blob = _state({"app.py": "X = 1\n"})
+    settings = SelfCheckSettings(profile=PROFILES["python-app"])
+    with check_base(
+        state,
+        resolve=resolve,
+        resolve_blob=blob,
+        rt=_Rt(),  # type: ignore[arg-type]
+        settings=settings,
+    ) as base:
+        quiet = CheckSpec(base=base, scope=frozenset(), own_refs=frozenset())
+        assert "smoke" not in SessionCheck(quiet).opening().checked
+        spec = CheckSpec(
+            base=base, scope=frozenset(), own_refs=frozenset(), smoke=True, own_smoke=True
+        )
+        session = SessionCheck(spec)
+        opening = session.opening()
+        fixed = session.check({"smoke.py": "import app\n"}, ())
+    assert "smoke" in opening.checked and opening.red
+    assert opening.yours[0] == "[smoke gate FAILED]"
+    assert any("smoke.py" in line for line in opening.yours), opening.yours
+    assert fixed.green, fixed

@@ -55,14 +55,19 @@ from foundry.execution.adapter_contract import (
     current_packet_tier,
     packet_tier_scope,
 )
-from foundry.execution.adapters.claude_code import changed_files, walk_worktree
+from foundry.execution.adapters.claude_code import (
+    TreeTooLargeError,
+    changed_files,
+    walk_worktree,
+)
+from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE, STOPPED_DIGEST
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
     from foundry.gates.self_check import SessionCheck
 
@@ -139,6 +144,15 @@ _CHECK_EPILOGUE = (
     + _EPILOGUE[_EPILOGUE.index('  {"action": "done"') : _EPILOGUE.index("Write real")]
     + _CHECK_CLOSE
 )
+
+
+def _with_reason(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` with the optional ``reason`` a fenced fixer's write outside its
+    target carries (``fix_files``)."""
+    return {**schema, "properties": {**schema["properties"], "reason": {"type": "string"}}}
+
+
+_FENCED_SCHEMAS = {id(s): _with_reason(s) for s in (ACTION_SCHEMA, _CHECK_SCHEMA)}
 
 _MAX_CALLS_PER_TURN = 8
 
@@ -217,6 +231,29 @@ _CHECK_TOOLS: tuple[dict[str, Any], ...] = (
     ),
     TOOLS[-1],
 )
+_REASON = {
+    "type": "string",
+    "description": "Only for a file outside `fix_files`: why this failure needs it changed.",
+}
+
+
+def _reason_tools(tools: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
+    """``tools`` with write_file/delete_file taking the optional fence ``reason``."""
+    return tuple(
+        {
+            **t,
+            "input_schema": {
+                **t["input_schema"],
+                "properties": {**t["input_schema"]["properties"], "reason": _REASON},
+            },
+        }
+        if t["name"] in ("write_file", "delete_file")
+        else t
+        for t in tools
+    )
+
+
+_FENCED_TOOLS = {id(t): _reason_tools(t) for t in (TOOLS, _CHECK_TOOLS)}
 # Refusals of a red done per session: a failure the session cannot fix by editing
 # is reported, not looped on.
 _CHECK_REFUSALS = 2
@@ -229,6 +266,13 @@ _OPENED: ContextVar[tuple[int, tuple[SessionCheck | None, str | None]] | None] =
 CHECK_EXHAUSTED = "check budget exhausted with the gate still red"
 # The note of a session whose final tree no check judged.
 CHECK_UNVERIFIED = "unverified"
+# The note of a session whose done was accepted only because its refusals ran out.
+CHECK_OVERRIDDEN = "done accepted with the gate still red"
+# The note of a session whose done came on its last turn, red, with no turn left to refuse it.
+CHECK_RED_LAST_TURN = "done on the last turn with the gate red"
+_DIGEST_PATHS = 12
+_DIGEST_ACTIONS = 5
+_DIGEST_LINES = 4
 
 # The bdd command writes its report to $FOUNDRY_BDD_REPORT; the gate sets it, the
 # agent's sandbox does not, so a runner there wrote to "" and the agent never saw
@@ -331,6 +375,15 @@ class _Loop:
     checker: SessionCheck | None = None
     origin: dict[str, bytes] = field(default_factory=dict)  # the starting worktree
     check_refusals: int = 0
+    done: bool = False
+    actions: list[str] = field(default_factory=list)  # _summarize of each action, in order
+    last_check: str = ""  # the newest check/run outcome, for the stopped-early digest
+    # The per-write mypy's extra flags; None = no type check on write.
+    write_check: tuple[str, ...] | None = None
+    # A fixer pass's write fence (packet.task["fix_files"]); None = unfenced.
+    fence: tuple[str, ...] | None = None
+    # One note per file a fenced fixer changed outside its target, with its reason.
+    outside: list[str] = field(default_factory=list)
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -418,6 +471,7 @@ class ProxyAgentAdapter:
             packet = _with_rules(packet, checker.spec.rules)
         messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
+        fence = packet.task.get("fix_files")
         st = _Loop(
             worktree,
             _tree_state(worktree),
@@ -426,6 +480,8 @@ class ProxyAgentAdapter:
             start=before if packet.prior_failures else None,
             checker=checker,
             origin=before,
+            write_check=_write_check_flags(),
+            fence=tuple(str(f) for f in fence) if isinstance(fence, list) and fence else None,
         )
         turns = 0
         while turns < st.budget and not st.stopped:
@@ -460,6 +516,14 @@ class ProxyAgentAdapter:
                     f"{CHECK_EXHAUSTED} — partial work recorded; its last "
                     "check: " + " | ".join(last.yours[:6])[:1500]
                 )
+            elif last is not None and last.red and st.done:
+                # Not a stop: the wave check judges the tree; the record says why it ended.
+                how = (
+                    f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s)"
+                    if st.check_refusals
+                    else CHECK_RED_LAST_TURN
+                )
+                st.triage.append(f"{how}; its last check: " + " | ".join(last.yours[:6])[:1500])
             elif last is None:
                 # Not a stop: the wave check judges the tree as for any session.
                 why = (
@@ -480,20 +544,29 @@ class ProxyAgentAdapter:
         )
 
         summary = st.summary.strip()[:500]
-        notes = [*([summary] if summary else []), *st.triage] or ["run completed with no summary"]
+        notes = [*([summary] if summary else []), *st.triage, *st.outside] or [
+            "run completed with no summary"
+        ]
         notes += [
             f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
         ]
+        # Ended without done, the session has no summary of its own: the digest
+        # stands in, under its own name — every adapter-report of a task folds into
+        # one record on the state channel (GateTriage.union_key), so the last note
+        # would hide it.
+        heads = [] if st.done else [(DIGEST_TRIAGE, _digest(st, authored, deleted))]
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
-                name="adapter-report",
+                name=name,
                 run_against=run_against,
                 explanation=note,
                 produced_by=self.name,
                 seq=Seq(self._run_id, 0, 0, self._node_id, i),
             )
-            for i, note in enumerate(notes)
+            for i, (name, note) in enumerate(
+                [*heads, *(("adapter-report", note) for note in notes)]
+            )
         )
         return AdapterResult(
             diff_uri=diff_uri,
@@ -505,6 +578,8 @@ class ProxyAgentAdapter:
 
     def _json_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
         schema = ACTION_SCHEMA if st.checker is None else _CHECK_SCHEMA
+        if st.fence is not None:
+            schema = _FENCED_SCHEMAS[id(schema)]
         text, parsed = self._complete(messages, schema)
         act = parsed if isinstance(parsed, dict) else _lenient_action(text)
         messages.append({"role": "assistant", "content": text})
@@ -527,7 +602,10 @@ class ProxyAgentAdapter:
         st: _Loop,
         sandbox: Sandbox,
     ) -> None:
-        text, calls = tool_fn(messages, TOOLS if st.checker is None else _CHECK_TOOLS)
+        tools = TOOLS if st.checker is None else _CHECK_TOOLS
+        if st.fence is not None:
+            tools = _FENCED_TOOLS[id(tools)]
+        text, calls = tool_fn(messages, tools)
         if not calls:
             messages.append({"role": "assistant", "content": text or "(no reply)"})
             messages.append({"role": "user", "content": _NUDGE})
@@ -586,10 +664,11 @@ class ProxyAgentAdapter:
                 return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
-            st.stopped = True
+            st.stopped = st.done = True
             self._activity(act)
             return None
         self._activity(act)
+        st.actions.append(_summarize(act))
         fp = _fingerprint(act)
         count, tree_then = st.repeats.get(fp, (0, st.tree))
         # Any tree change since the last identical action (a write, sed -i, a
@@ -619,17 +698,25 @@ class ProxyAgentAdapter:
                 return None
             st.reads[rel] = (n, stamp)
         read: _Read | None = None
+        guard = _fence_snapshot(st) if action == "run" else None
         try:
             if action == "read_file":
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
             elif action == "check":
                 observation = _check(st)
+            elif fenced := _fenced(st, act):
+                observation = fenced
             else:
-                observation = self._execute(act, sandbox, worktree, st.files)
+                observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
+        if guard is not None:
+            observation += _revert_fenced_out(st, guard)
         if action == "run":
             observation += _install_notes(st, str(act.get("cmd", "")), observation)
+            st.last_check = f"{_summarize(act)}: {_head(observation)}"
+        elif action == "check":
+            st.last_check = f"check: {_head(observation)}"
         st.tree = _tree_state(worktree)
         st.repeats[fp] = (count, st.tree)
         if count >= _REPEAT_WARN:
@@ -665,6 +752,7 @@ class ProxyAgentAdapter:
         sandbox: Sandbox,
         worktree: Path,
         files: tuple[str, ...] | None = None,
+        write_check: tuple[str, ...] | None = None,
     ) -> str:
         action = act.get("action")
         if action in ("write_file", "delete_file") and files is not None:
@@ -699,8 +787,8 @@ class ProxyAgentAdapter:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             obs = f"wrote {rel} ({len(content)} chars){note}"
-            if target.suffix == ".py":
-                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix())
+            if target.suffix == ".py" and write_check is not None:
+                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix(), write_check)
             return obs
         if action == "delete_file":
             target = _contained(worktree, str(act.get("path", "")))
@@ -745,6 +833,155 @@ class ProxyAgentAdapter:
                 )
             return obs
         return f"ERROR: unknown action {action!r}"
+
+
+_FAILING_LINE = re.compile(r"error|fail|assert|traceback|exception", re.IGNORECASE)
+
+
+def _head(observation: str) -> str:
+    """The status line of an observation and its first failing lines (else its
+    first lines)."""
+    lines = [ln.strip() for ln in observation.splitlines() if ln.strip()]
+    if not lines:
+        return "(no output)"
+    failing = [ln for ln in lines[1:] if _FAILING_LINE.search(ln)]
+    return " | ".join([lines[0], *(failing or lines[1:])[:_DIGEST_LINES]])
+
+
+def _digest(st: _Loop, authored: Mapping[str, str], deleted: Sequence[str]) -> str:
+    """The summary of a session that ended without ``done`` (turn cap, repeat or
+    read-thrash stop): built from the loop's record, not asked of the model."""
+
+    def paths(items: Iterable[str]) -> str:
+        names = sorted(items)
+        more = f" (+{len(names) - _DIGEST_PATHS} more)" if len(names) > _DIGEST_PATHS else ""
+        return ", ".join(names[:_DIGEST_PATHS]) + more if names else "none"
+
+    parts = [
+        f"{STOPPED_DIGEST} the session ended before done",
+        f"files written: {paths(authored)}",
+        *([f"files deleted: {paths(deleted)}"] if deleted else []),
+        f"files read: {paths(st.reads)}",
+        f"last check: {st.last_check or 'none run'}",
+        "last actions: " + (" -> ".join(st.actions[-_DIGEST_ACTIONS:]) or "none"),
+    ]
+    return "; ".join(parts)[:DIGEST_CAP]
+
+
+def _fenced(st: _Loop, act: dict[str, Any]) -> str | None:
+    """The refusal of a fixer's write or delete outside its target (``st.fence``)
+    that states no ``reason``, else None (an outside write with one is recorded,
+    and its file admitted from then on).
+
+    The escape is the model's stated reason, not the files a traceback names: a
+    failing test's traceback names the code it calls, and editing that code (not the
+    test) is exactly the stray fix the fence is for. A reason costs one more call,
+    makes the cross-file edit deliberate, and leaves a line a reviewer can judge."""
+    from foundry.agents.implementation.tickets import in_write_scope
+
+    if st.fence is None or act.get("action") not in ("write_file", "delete_file"):
+        return None
+    raw = str(act.get("path", ""))
+    rel = PurePosixPath(raw).as_posix() if raw else raw
+    if not rel or in_write_scope(rel, st.fence):
+        return None
+    reason = " ".join(str(act.get("reason") or "").split())
+    if reason:
+        st.fence = (*st.fence, rel)  # admitted for the rest of the session
+        st.outside.append(f"fix pass changed {rel} outside its target: {reason[:300]}")
+        return None
+    return (
+        f"ERROR: not written — {rel} is outside this fix pass's target. Edit only: "
+        + ", ".join(st.fence)
+        + f". If the failure really needs {rel} changed, repeat the call with a "
+        "`reason` saying why."
+    )
+
+
+# What a fenced session's `run` guard reads per run (before and after): past it the
+# run goes unguarded, and the observation says so.
+_FENCE_GUARD_MAX = 32 << 20
+
+
+def _fence_snapshot(st: _Loop) -> dict[str, bytes] | str | None:
+    """A fenced session's files outside its target before a ``run`` (a note when the
+    tree is too large to guard), else None: unfenced."""
+    if st.fence is None:
+        return None
+    try:
+        tree = walk_worktree(st.worktree, max_total=_FENCE_GUARD_MAX)
+    except TreeTooLargeError:
+        return "\nNOTE: the tree is too large to guard this run's edits outside the target."
+    return _fenced_out(st, tree)
+
+
+def _fenced_out(st: _Loop, tree: dict[str, bytes]) -> dict[str, bytes]:
+    from foundry.agents.implementation.tickets import in_write_scope
+
+    fence = st.fence or ()
+    return {rel: data for rel, data in tree.items() if not in_write_scope(rel, fence)}
+
+
+def _revert_fenced_out(st: _Loop, before: dict[str, bytes] | str) -> str:
+    """Undo what a fenced session's ``run`` did outside its target — ``sed -i``, a
+    heredoc, ``rm`` — and say so. A shell command is never parsed: the tree is
+    compared before and after, so the fence holds however the edit was spelled, and
+    a deliberate cross-file edit goes through ``write_file`` with its ``reason``."""
+    if isinstance(before, str):
+        return before
+    try:
+        after = _fenced_out(st, walk_worktree(st.worktree, max_total=_FENCE_GUARD_MAX))
+    except TreeTooLargeError:
+        return "\nNOTE: the tree grew too large to guard this run's edits outside the target."
+    changed = sorted(
+        rel for rel in before.keys() | after.keys() if before.get(rel) != after.get(rel)
+    )
+    if not changed:
+        return ""
+    reverted: list[str] = []
+    for rel in changed:
+        try:
+            _restore(st.worktree, rel, before.get(rel))
+            reverted.append(rel)
+        except OSError as exc:
+            reverted.append(f"{rel} (NOT reverted: {exc.strerror or exc})")
+    return (
+        "\nREVERTED: this run changed files outside this fix pass's target, and those "
+        "changes were undone: "
+        + ", ".join(reverted)
+        + ". Edit only: "
+        + ", ".join(st.fence or ())
+        + ". If the failure really needs another file changed, use write_file (or "
+        "delete_file) with a `reason` saying why — not a shell command."
+    )
+
+
+def _restore(worktree: Path, rel: str, data: bytes | None) -> None:
+    """Put ``rel`` back to ``data`` (None: the run created it — remove it). The run
+    may have left a link at any component, so nothing is written through one."""
+    root = worktree.resolve()
+    path = root / rel
+    if not path.parent.resolve().is_relative_to(root):
+        raise OSError(f"{rel}: its directory now leads out of the worktree")
+    if data is None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        return
+    try:
+        # In place, so the file keeps its mode (a script stays executable).
+        fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        # A link or directory in its place: removed, then the file written fresh.
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
 
 
 def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
@@ -1041,6 +1278,7 @@ def _red_done(st: _Loop) -> str | None:
         except Exception as exc:
             progress.log(f"proxy-agent: gate check failed at done: {type(exc).__name__}: {exc}")
             return None
+        st.last_check = "check at done: " + _head(render(verdict, left=c.left))
     if not verdict.red:
         return None
     st.check_refusals += 1
@@ -1350,35 +1588,50 @@ def _located(content: str, line: int | None, col: int | None, msg: str, kind: st
     return out + "\n" + "\n".join(ctx)
 
 
-# Fast advisory type feedback: --follow-imports=silent checks only the written file
-# (~0.3s); the gate's lenient import flags; no cache written into the worktree.
-_MYPY_ADVISORY = (
-    "python",
-    "-m",
-    "mypy",
-    "--follow-imports=silent",
-    "--cache-dir=/dev/null",
-    "--no-error-summary",
-    "--ignore-missing-imports",
-    "--disable-error-code",
-    "import-not-found",
-    "--disable-error-code",
-    "import-untyped",
-)
-_MYPY_TIMEOUT_S = 5
+# Fast type/import feedback on each written .py: --follow-imports=silent reports only
+# the written file. The cache sits beside the worktree (never in the diff) and lives
+# as long as the sandbox: with /dev/null every write re-analysed every import from
+# scratch, and a project importing a few heavy libraries ran past the timeout, which
+# was dropped silently.
+_MYPY_WRITE = ("--follow-imports=silent", "--no-error-summary", "--show-error-codes")
+_MYPY_CACHE = "mypy-cache"
+_MYPY_TIMEOUT_S = 15
 _MYPY_MAX_LINES = 10
 
 
-def _mypy_advisory(sandbox: Sandbox, rel: str) -> str:
-    """mypy's errors in just-written ``rel``, as advice (a ticket's modules are
-    expected to be partial mid-session, so a type error never rejects a write).
-    Empty when mypy is absent, slow or crashes."""
+def _write_check_flags() -> tuple[str, ...]:
+    """The per-write mypy's flags: the Build gate's lenient mypy flags, plus
+    ``--strict`` when the stack's typecheck is strict. On whatever the self-check
+    mode: with the cache it is cheap, and a cloud-tier or self-check-off session
+    otherwise learns of a type or import error only at the gate."""
+    from foundry.gates.profiles import _MYPY_LENIENT
+    from foundry.gates.self_check import current_check
+
+    spec = current_check()
+    stack = spec.base.state.get("stack") if spec is not None else None
+    strict = stack is not None and "--strict" in stack.typecheck.split()
+    return (*shlex.split(_MYPY_LENIENT)[1:], *(("--strict",) if strict else ()))
+
+
+def _mypy_advisory(sandbox: Sandbox, rel: str, flags: Sequence[str]) -> str:
+    """mypy's errors in just-written ``rel`` on the sandbox's interpreter, as advice
+    (a ticket's modules are expected to be partial mid-session, so a type error never
+    rejects a write). Empty when mypy is absent or crashes."""
+    cache = Path(sandbox.worktree).parent / _MYPY_CACHE
+    argv = ["python", "-m", "mypy", *_MYPY_WRITE, f"--cache-dir={cache}", *flags, rel]
     try:
-        result = sandbox.run([*_MYPY_ADVISORY, rel], timeout_s=_MYPY_TIMEOUT_S)
+        result = sandbox.run(argv, timeout_s=_MYPY_TIMEOUT_S)
     except OSError:
         return ""
-    if result.timed_out or result.returncode not in (0, 1):
+    if result.timed_out:
+        return (
+            f"\nNOTE: type check timed out ({_MYPY_TIMEOUT_S}s, mypy on this file only) — "
+            "run the project's typecheck before done"
+        )
+    if result.returncode not in (0, 1):
         return ""
+    # Errors only: notes (an [annotation-unchecked] on every annotated line of an
+    # untyped function) would crowd the capped lines.
     errors = [
         ln for ln in result.stdout.splitlines() if ln.startswith(f"{rel}:") and ": error:" in ln
     ]

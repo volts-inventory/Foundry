@@ -26,7 +26,22 @@ CONTRACT_DUP_TRIAGE = "contract-duplicate"
 CONTRACT_DRIFT_TRIAGE = "contract-drift"
 # An implementation ticket's last attempt still changed a stubbed public signature.
 SIGNATURE_CHANGE_TRIAGE = "signature-change"
+# One note per attempt (build or fix-loop rebuild) the stub-signature guard rejected;
+# the attempt number is in the name, as for FAIL_TRIAGE.
+SIGNATURE_REJECTED_TRIAGE = "signature-rejected"
+# A ticket whose attempts the guard rejected REPLAN_AFTER times: its planned interface
+# is likely wrong, so it is left to a re-plan instead of rebuilt again.
+REPLAN_TRIAGE = "ticket-replan"
+REPLAN_AFTER = 2
+# The planner's answer to a REPLAN note, at most one per ticket per run: it revised
+# the ticket's contracts (which supersedes the ticket's earlier notes here, by
+# emission epoch, so it is built afresh) or declined to.
+PLANNER_NODE_ID = "planner"
+INTERFACE_REVISED_TRIAGE = "interface-revised"
+INTERFACE_DECLINED_TRIAGE = "interface-declined"
 SKELETON_TRIAGE = "skeleton"
+# A failed attempt's written files its retry starts from (explanation: their snapshot blob).
+CARRY_TRIAGE = "ticket-carry"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2

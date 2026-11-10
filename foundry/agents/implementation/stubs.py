@@ -40,6 +40,7 @@ __all__ = [
     "is_stub",
     "python_skeleton",
     "signature_changes",
+    "signature_findings",
     "stub_signatures",
 ]
 
@@ -501,26 +502,68 @@ def stub_signatures(text: str) -> dict[str, str] | None:
     return out
 
 
-def signature_changes(stub: str, written: str | None) -> tuple[str, ...]:
-    """One finding per stubbed name ``written`` (the ticket's final file; None if
-    deleted) removes, or whose parameter list or return annotation it changes. A
-    class keeps every base the stub gave it; anything added is free."""
+def _declaration(name: str, sig: str) -> str:
+    """``name``'s declaration as source spells it: ``class A(B)``, ``def f(x) -> int``
+    (:func:`stub_signatures` keeps only a class's base list)."""
+    if not sig.startswith("class "):
+        return sig
+    bases = sig.removeprefix("class ").strip()
+    return f"class {name}" + (f"({bases})" if bases else "")
+
+
+def signature_findings(stub: str, written: str | None) -> tuple[tuple[str, str], ...]:
+    """(stubbed name, finding) for every stubbed name ``written`` (the ticket's final
+    file; None if deleted) removes, or whose parameter list or return annotation it
+    changes. A class keeps every base the stub gave it; anything added is free. A
+    removed class's finding covers its methods."""
     planned = stub_signatures(stub) or {}
     if written is None:
-        return tuple(f"{n} was removed (the file is gone)" for n in planned)
+        return tuple(
+            (n, f"`{_declaration(n, s)}` was removed (the file is gone)")
+            for n, s in planned.items()
+            if "." not in n
+        )
     now = stub_signatures(written)
     if now is None:
         return ()  # a syntax error is the syntax check's finding
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
     for name, sig in planned.items():
         got = now.get(name)
+        owner = name.rpartition(".")[0]
+        if got is None and owner and owner not in now:
+            continue
         if got is None:
-            out.append(f"{name} was removed or renamed (planned: `{sig}`)")
+            instead = [
+                f"`{_declaration(n, s)}`"
+                for n, s in now.items()
+                if n not in planned
+                and n.rpartition(".")[0] == owner
+                and not n.rpartition(".")[2].startswith("_")  # helpers, __init__: allowed
+            ]
+            where = f"class {owner}" if owner else "the file"
+            found = (
+                f"{where} declares instead: {', '.join(instead)}"
+                if instead
+                else f"{where} declares nothing in its place"
+            )
+            out.append(
+                (
+                    name,
+                    f"{name} was removed or renamed (planned: `{_declaration(name, sig)}`; "
+                    f"{found})",
+                )
+            )
         elif sig.startswith("class "):
             want = {b.strip() for b in sig.removeprefix("class ").split(",") if b.strip()}
             have = {b.strip() for b in got.removeprefix("class ").split(",")}
             if not want <= have:
-                out.append(f"class {name} dropped its base {', '.join(sorted(want - have))}")
+                dropped = ", ".join(sorted(want - have))
+                out.append((name, f"class {name} dropped its base {dropped}"))
         elif got != sig:
-            out.append(f"{name} changed from `{sig}` to `{got}`")
+            out.append((name, f"{name} changed from `{sig}` to `{got}`"))
     return tuple(out)
+
+
+def signature_changes(stub: str, written: str | None) -> tuple[str, ...]:
+    """The findings of :func:`signature_findings`, without their names."""
+    return tuple(f for _n, f in signature_findings(stub, written))

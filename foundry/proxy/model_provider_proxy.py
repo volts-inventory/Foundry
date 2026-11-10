@@ -506,7 +506,14 @@ def default_drift_policy() -> DriftPolicy:
 
 class ProxyUnavailable(RuntimeError):
     """Transport exhausted retries. Judgment nodes pause-and-escalate —
-    there is no silent fallback to another model or family (fail-closed)."""
+    there is no silent fallback to another model or family (fail-closed).
+
+    ``replayable`` is False when the budget spent was a call that already ran its
+    whole time cap (a CLI hard-kill, a local timeout): a resume would replay it."""
+
+    def __init__(self, message: str, *, replayable: bool = True) -> None:
+        super().__init__(message)
+        self.replayable = replayable
 
 
 class PinnedIdDriftError(RuntimeError):
@@ -583,23 +590,56 @@ def is_transient_failure(exc: BaseException) -> bool:
     ProxyUnavailable / pause-and-escalate, not a real build failure. An
     unparseable structured reply is not transient: the re-invoked node sends the
     same prompt and a deterministic model (temperature 0, or a local model's
-    request-derived seed) answers the same."""
+    request-derived seed) answers the same. Nor is a spent time-cap budget (a
+    CLI hard-kill or local timeout, already retried a level lower): a resume
+    would run the same call into the same cap."""
     if isinstance(exc.__cause__, StructuredOutputError):
+        return False
+    if getattr(exc, "replayable", True) is False:
         return False
     return "ProxyUnavailable" in type(exc).__name__ or "pause-and-escalate" in str(exc)
 
 
+_MISS_TAIL_CHARS = 2000
+
+
+def _lower_effort(request: dict[str, Any]) -> dict[str, Any]:
+    """``request`` one local thinking level lower (xhigh -> medium -> off) when it
+    thinks, its local seed re-derived from the new request."""
+    lowered = dict(request)
+    if lowered.get("local_thinking") is True:
+        if lowered.get("local_effort") == "xhigh":
+            lowered["local_effort"] = "medium"
+        else:
+            lowered["local_thinking"] = False
+    if "local_sampling" in lowered:
+        profile = {k: v for k, v in lowered["local_sampling"].items() if k != "seed"}
+        lowered["local_sampling"] = _seeded(lowered, profile)
+    return lowered
+
+
 def _with_parse_correction(
-    request: dict[str, Any], miss: ProviderResponse, attempt: int
+    request: dict[str, Any],
+    miss: ProviderResponse,
+    attempt: int,
+    error: str = "",
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """``request`` with the previous unparseable reply named in its last user turn,
-    so the re-roll is a different prompt: a temperature-0 (or seeded) call resent
-    unchanged returns the same reply (and the call cache would replay it)."""
+    """``request`` with the previous unparseable reply's error and tail in its last
+    user turn, one thinking level below ``previous`` (the attempt that missed;
+    default ``request``): a temperature-0 (or seeded) call resent unchanged
+    returns the same reply (and the call cache would replay it), and a model that
+    rambled past a parseable answer at one effort will again."""
+    text = miss.text or ""
+    tail = text[-_MISS_TAIL_CHARS:]
+    shown = f" It ended with:\n<<<\n{tail}\n>>>\n" if tail.strip() else " It was empty. "
     note = (
-        f"\n\n[Retry {attempt}: your previous reply ({len(miss.text)} chars, stop reason "
-        f"{miss.stop_reason!r}) was not one complete JSON object. Reply with ONLY that "
-        "JSON object. If it was cut off it ran past the output limit: be concise, with "
-        "short strings and no repeated or near-duplicate entries.]"
+        f"\n\n[Retry {attempt}: your previous reply ({len(text)} chars, stop reason "
+        f"{miss.stop_reason!r}) was not one complete JSON object"
+        f"{f' ({error})' if error else ''}.{shown}"
+        "Reply with ONLY that JSON object, complete, with no prose before or after it. "
+        "If it was cut off it ran past the output limit: be concise, with short strings "
+        "and no repeated or near-duplicate entries.]"
     )
     messages = [dict(m) for m in request.get("messages") or ()]
     last = messages[-1] if messages else None
@@ -609,17 +649,9 @@ def _with_parse_correction(
         last["content"] = [*last["content"], {"type": "text", "text": note.strip()}]
     else:
         messages.append({"role": "user", "content": note.strip()})
-    corrected = {**request, "messages": messages}
-    if miss.stop_reason == "length" and corrected.get("local_thinking") is True:
-        # The reasoning ran out the budget; a second attempt at the same effort would
-        # too, so step down a level (xhigh -> medium -> off).
-        if corrected.get("local_effort") == "xhigh":
-            corrected["local_effort"] = "medium"
-        else:
-            corrected["local_thinking"] = False
-    if "local_sampling" in request:
-        corrected["local_sampling"] = _seeded(corrected, request["local_sampling"])
-    return corrected
+    base = previous if previous is not None else request
+    effort = {k: base[k] for k in ("local_thinking", "local_effort") if k in base}
+    return _lower_effort({**request, **effort, "messages": messages})
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,7 +794,8 @@ _RATE_LIMIT_MARKERS = (
     "timeout",
 )
 
-# A CLI subprocess killed at its wall-clock cap (cli_transports) already spent the
+# A CLI subprocess killed at its wall-clock cap (cli_transports), or a local
+# model call that hit its multi-hour HTTP timeout, already spent the
 # whole cap — up to FOUNDRY_CLI_TIMEOUT_S. Re-running the identical prompt on the
 # rate-limit budget (6 tries) silently burned 30+ minutes on one planner call, so
 # it gets its own budget of one retry and then fails closed.
@@ -772,6 +805,12 @@ _WALL_CLOCK_KILL_RETRIES = 1
 
 def _is_wall_clock_kill(exc: BaseException) -> bool:
     return _WALL_CLOCK_KILL_MARKER in str(exc).lower()
+
+
+def _is_local_timeout(exc: BaseException) -> bool:
+    """A local-server HTTP timeout: the openai client's 4h cap (APITimeoutError,
+    httpx ``*Timeout``) already elapsed, so it must not ride the rate-limit budget."""
+    return "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
 
 
 def _int_env(name: str, default: int) -> int:
@@ -1145,13 +1184,16 @@ class ModelProviderProxy:
         purpose: Purpose,
         schema: dict[str, Any] | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
+        effort: Literal["medium", "xhigh"] | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
 
         ``tools`` (Anthropic shape: name/description/input_schema) offers native
         tool calls, returned on ``CompletionResult.tool_calls``; a backend without
-        a tool channel raises :class:`ToolsUnsupported`."""
+        a tool channel raises :class:`ToolsUnsupported`. ``effort`` overrides the
+        local thinking level (agent turns medium, one-shot calls xhigh) for a
+        call that edits rather than invents, e.g. a plan repair."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1173,8 +1215,10 @@ class ModelProviderProxy:
             # agent loops (one turn of many). xhigh on the plan JSON thought past a 40K
             # cap without answering, so one-shot calls get the room the context leaves.
             agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
-            request["local_effort"] = "medium" if agent_turn else "xhigh"
-            cap = _LOCAL_THINKING_MAX_TOKENS if agent_turn else _LOCAL_DEEP_THINKING_MAX_TOKENS
+            level = effort or ("medium" if agent_turn else "xhigh")
+            request["local_effort"] = level
+            deep = level == "xhigh"
+            cap = _LOCAL_DEEP_THINKING_MAX_TOKENS if deep else _LOCAL_THINKING_MAX_TOKENS
             request["max_tokens"] = max(int(request["max_tokens"]), cap)
         elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
@@ -1298,6 +1342,7 @@ class ModelProviderProxy:
         gate_name: str = "review",
         failing_gates: Iterable[str] = (),
         failing_tests: Iterable[str] = (),
+        effort: Literal["medium", "xhigh"] | None = None,
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -1310,7 +1355,7 @@ class ModelProviderProxy:
         ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
         ids that failed on the reviewed tree in the caller's attested gate results;
         a finding citing anything else blocks only with a differing reproduction
-        (:func:`_verdict_findings`).
+        (:func:`_verdict_findings`). ``effort`` is :meth:`complete`'s.
         """
         if self._signer is None:
             raise RuntimeError(
@@ -1323,7 +1368,13 @@ class ModelProviderProxy:
                 "signs seq.node_id; a mismatched record would never verify coherently"
             )
         completion = self.complete(
-            node_id, tier, system_sop, messages, purpose="judgment", schema=VERDICT_SCHEMA
+            node_id,
+            tier,
+            system_sop,
+            messages,
+            purpose="judgment",
+            schema=VERDICT_SCHEMA,
+            effort=effort,
         )
         verdict = completion.parsed
         if not isinstance(verdict, dict) or verdict.get("status") not in _STATUS_BY_VERDICT:
@@ -1537,7 +1588,9 @@ class ModelProviderProxy:
                     try:
                         parsed = _extract_json_object(response.text)
                     except StructuredOutputError as miss:
-                        sent = _with_parse_correction(request, response, attempt + 1)
+                        sent = _with_parse_correction(
+                            request, response, attempt + 1, str(miss), previous=sent
+                        )
                         raise StructuredOutputError(
                             f"{miss} (stop reason {response.stop_reason!r})"
                         ) from None
@@ -1545,16 +1598,19 @@ class ModelProviderProxy:
             except ToolsUnsupported:
                 raise
             except Exception as exc:
-                if _is_wall_clock_kill(exc):
+                if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):
                     if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:
                         raise ProxyUnavailable(
-                            f"{exc} on {kill_attempt + 1} attempt(s); "
-                            "judgment nodes must pause-and-escalate"
+                            f"{exc} on {kill_attempt + 1} attempt(s); not resumed: "
+                            "a resume would rerun the same call into the same cap",
+                            replayable=False,
                         ) from exc
                     wait = self._retry.backoff_base_s * (2**kill_attempt)
                     log_retry(exc, kill_attempt + 1, _WALL_CLOCK_KILL_RETRIES, wait)
                     self._retry.sleep_before_retry(kill_attempt)
                     kill_attempt += 1
+                    if local:
+                        sent = _lower_effort(sent)
                     continue
                 is_rl, retry_after = _classify_rate_limit(exc)
                 if is_rl:

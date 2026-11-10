@@ -8,10 +8,20 @@ from typing import TYPE_CHECKING, Any
 from foundry import progress
 from foundry.agents._runtime import AgentRuntime
 from foundry.agents.implementation.tickets.adapter import _ScopedAdapter
-from foundry.agents.implementation.tickets.constants import _FEATURE_DIFF_KIND, NODE_ID
+from foundry.agents.implementation.tickets.constants import (
+    _FEATURE_DIFF_KIND,
+    FAIL_TRIAGE,
+    NODE_ID,
+)
+from foundry.agents.implementation.tickets.escalation import session_digests
 from foundry.agents.implementation.tickets.scope import in_write_scope
-from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
+from foundry.agents.implementation.tickets.tasks import (
+    _ticket_notes,
+    task_id_for_ticket,
+    unbuilt_task_ids,
+)
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapters.tiered import DIGEST_CAP
 from foundry.execution.work_pool import BudgetExceededError, ExecutionTask, LocalWorkPool
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
@@ -64,17 +74,43 @@ def _restart_prep(
     log = _pass_log(state, passes, resolve, blobs) if blobs is not None and tried else []
     failing = fix_failures(state, resolve)[:_RESTART_FAILURE_LINES]
     paths = sorted({*reset[0], *reset[1]})
+    digests = session_digests(state)
+    unbuilt = unbuilt_task_ids(state)
+    attempts = _ticket_notes(state, FAIL_TRIAGE)
     memo: dict[str, tuple[str, ...]] = {}
     notes: list[GateTriage] = []
     for t in wave:
         tid = task_id_for_ticket(t.id)
         files = ", ".join(p for p in paths if in_write_scope(p, t.files)) or ", ".join(t.files)
+        if tid in unbuilt:
+            failed = tuple(
+                n.explanation for n in sorted(attempts.get(tid, ()), key=lambda n: n.seq)
+            )
+            lead: tuple[str, ...] = (
+                f"ticket {t.id} was never built: its {len(failed)} attempt(s) failed, so it "
+                "was skipped and its scenarios fail unexecuted. Build it now: write its "
+                f"files ({files}) from the ticket's spec and criteria, as the tree has them "
+                "(a repair pass may have touched them). Its attempts failed with "
+                "(do not repeat these):",
+                *failed,
+            )
+            what = f"built after it was skipped ({len(failed)} failed attempt(s))"
+        else:
+            lead = (
+                f"repairing ticket {t.id} did not converge, so it is built again from "
+                f"scratch: its files ({files}) were reset to the tree before it was first "
+                f"built{why}. Write them again from the ticket's spec and criteria.",
+            )
+            what = f"rebuilt from scratch after {tried} fix pass(es) did not converge"
         memo[tid] = (
             "[fresh restart]",
-            f"repairing ticket {t.id} did not converge, so it is built again from scratch: "
-            f"its files ({files}) were reset to the tree before it was first built{why}. "
-            "Write them again from the ticket's spec and criteria.",
+            *lead,
             *log,
+            *(
+                (f"its first build's session ended early: {digests[tid][:DIGEST_CAP]}",)
+                if tid in digests
+                else ()
+            ),
             "the failures the earlier attempts left (the rebuild must not repeat them):",
             *failing,
         )
@@ -82,15 +118,12 @@ def _restart_prep(
             GateTriage(
                 name=RESTARTED_TRIAGE,
                 run_against=f"task/{tid}",
-                explanation=(
-                    f"rebuilt from scratch after {tried} fix pass(es) did not "
-                    f"converge; files reset: {files or 'none'}"
-                )[:2000],
+                explanation=f"{what}; files reset: {files or 'none'}"[:2000],
                 produced_by=NODE_ID,
                 seq=rt.seq(config, NODE_ID, f"{RESTARTED_TRIAGE}:{tid}"),
             )
         )
-        progress.log(f"restart {tid} from scratch (reset {files or 'nothing'})")
+        progress.log(f"restart {tid} ({what}; reset {files or 'nothing'})")
     return reset, memo, notes
 
 

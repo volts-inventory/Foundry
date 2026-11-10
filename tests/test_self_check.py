@@ -25,10 +25,12 @@ from foundry.agents.implementation.tickets import CHECK_RULE, verify_rules
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import (
     CHECK_EXHAUSTED,
+    CHECK_OVERRIDDEN,
+    CHECK_RED_LAST_TURN,
     CHECK_UNVERIFIED,
     ProxyAgentAdapter,
 )
-from foundry.execution.adapters.tiered import TieredAdapter, session_stop_reason
+from foundry.execution.adapters.tiered import DIGEST_TRIAGE, TieredAdapter, session_stop_reason
 from foundry.execution.sandbox import Sandbox
 from foundry.gates import sandbox as gate_sandbox
 from foundry.gates.pydeps import PythonEnvCache
@@ -447,6 +449,46 @@ def test_a_red_done_is_refused_at_most_twice(
     assert "call done again" in obs[2]
     assert result.turns_used == 4
     assert session_stop_reason(result.triage) is None  # checks were left
+    forced = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_OVERRIDDEN)]
+    assert len(forced) == 1 and "app.py:1: error: not done yet" in forced[0], result.triage
+
+
+def test_a_red_done_on_the_last_turn_is_not_called_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No turn was left to refuse it: "accepted after 0 refused done(s)" misstated it."""
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "a"},
+        ],
+        turn_budget=3,
+    )
+    notes = [t.explanation for t in result.triage]
+    assert not any(n.startswith(CHECK_OVERRIDDEN) for n in notes), notes
+    (red,) = [n for n in notes if n.startswith(CHECK_RED_LAST_TURN)]
+    assert "app.py:1: error: not done yet" in red
+    assert session_stop_reason(result.triage) is None
+
+
+def test_the_check_run_at_done_is_the_digests_last_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "a"},
+            {"action": "read_file", "path": "app.py"},
+        ],
+        turn_budget=3,
+    )
+    digest = next(t.explanation for t in result.triage if t.name == DIGEST_TRIAGE)
+    assert "last check: check at done: CHECK FAILED" in digest, digest
 
 
 def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(
@@ -871,3 +913,31 @@ def test_concurrent_builds_reuse_a_failed_install_and_never_delete_a_held_venv(
     third.install(wd, timeout_s=5)
     assert installs == ["pip", "pip"]
     cache.close()
+
+
+def test_a_fixer_sent_for_smoke_checks_the_smoke_command() -> None:
+    """The shop run: smoke failed on a missing smoke.py, and the fixer's check (build
+    + scenarios only) never showed it."""
+    from foundry.gates.profiles import PROFILES
+
+    state, resolve, blob = _state({"app.py": "X = 1\n"})
+    settings = SelfCheckSettings(profile=PROFILES["python-app"])
+    with check_base(
+        state,
+        resolve=resolve,
+        resolve_blob=blob,
+        rt=_Rt(),  # type: ignore[arg-type]
+        settings=settings,
+    ) as base:
+        quiet = CheckSpec(base=base, scope=frozenset(), own_refs=frozenset())
+        assert "smoke" not in SessionCheck(quiet).opening().checked
+        spec = CheckSpec(
+            base=base, scope=frozenset(), own_refs=frozenset(), smoke=True, own_smoke=True
+        )
+        session = SessionCheck(spec)
+        opening = session.opening()
+        fixed = session.check({"smoke.py": "import app\n"}, ())
+    assert "smoke" in opening.checked and opening.red
+    assert opening.yours[0] == "[smoke gate FAILED]"
+    assert any("smoke.py" in line for line in opening.yours), opening.yours
+    assert fixed.green, fixed

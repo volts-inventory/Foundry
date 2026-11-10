@@ -48,24 +48,24 @@ _TEST_NODE = "test_gate"
 _SMOKE_NODE = "smoke_gate"
 
 
-def _run_gate(
-    gate: GateImpl,
+def _run_gates(
+    gates: list[tuple[GateImpl, str]],
     *,
     rt: AgentRuntime,
     runner: TwoZoneGateRunner,
     config: RunnableConfig,
     run_against: str,
     workdir: Path,
-    node_id: str,
-) -> GateResult:
-    """Run ONE gate via the runner and return its ATTESTED verdict.
+) -> list[GateResult]:
+    """Run one boundary's ``(gate, node_id)`` list, in order, via the runner and
+    return their ATTESTED verdicts (possibly the runner's reused originals).
 
-    Mints the verdict's ``Seq`` via ``rt.seq`` (resume-monotonic epoch, AR2)
-    keyed on the gate's grounding so a re-execution outranks the stale record it
-    supersedes. The runner attests the result; we never sign or construct one.
+    Mints each verdict's ``Seq`` via ``rt.seq`` (resume-monotonic epoch, AR2)
+    keyed on the gate's grounding so a re-execution — or a reuse — outranks the
+    stale record it supersedes. The runner attests; we never sign or construct one.
     """
-    seq = rt.seq(config, node_id, f"verdict:{gate.name}")
-    return runner.run(gate, run_against, seq, workdir)
+    units = [(g, rt.seq(config, node_id, f"verdict:{g.name}")) for g, node_id in gates]
+    return runner.run_unit(units, run_against, workdir)
 
 
 def gate_profile(
@@ -224,16 +224,15 @@ def run_spec_gate(
     attested it (an unsigned write would be dropped, L5).
     """
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
-    result = _run_gate(
-        SpecGate(seal_key=runner.seal_key),
+    results = _run_gates(
+        [(SpecGate(seal_key=runner.seal_key), _SPEC_NODE)],
         rt=rt,
         runner=runner,
         config=config,
         run_against=run_against,
         workdir=workdir,
-        node_id=_SPEC_NODE,
     )
-    return {"gates": [result]}
+    return {"gates": results}
 
 
 def run_build_test_gates(
@@ -306,15 +305,6 @@ def _build_test_smoke(
     pyenv: PythonBuildEnv | None,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
-    build = _run_gate(
-        _build_gate(profile, runner, pyenv),
-        rt=rt,
-        runner=runner,
-        config=config,
-        run_against=run_against,
-        workdir=workdir,
-        node_id=_BUILD_NODE,
-    )
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
     # COMPILED Test gate when a factory is injected (A-M4-01): a gamed-green suite
     # that clears the floor but survives a held-out mutant FAILs here, not just in
@@ -341,16 +331,30 @@ def _build_test_smoke(
             profile_name=profile.name if profile is not None else "",
             pyenv=pyenv,
         )
-    test = _run_gate(
-        test_gate,
+    # Every run carries a smoke verdict: the stack's own run command, else an
+    # attested "not pinned" PASS (the boundary is always build/test/smoke).
+    from foundry.gates.smoke import SmokeGate
+
+    smoke: GateImpl
+    if profile is not None and profile.unavailable:
+        smoke = UnavailableGate("smoke", profile.unavailable)
+    elif profile is not None and profile.smoke_cmd is not None:
+        smoke = SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key, pyenv=pyenv)
+    else:
+        smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
+    gates = _run_gates(
+        [
+            (_build_gate(profile, runner, pyenv), _BUILD_NODE),
+            (test_gate, _TEST_NODE),
+            (smoke, _SMOKE_NODE),
+        ],
         rt=rt,
         runner=runner,
         config=config,
         run_against=run_against,
         workdir=workdir,
-        node_id=_TEST_NODE,
     )
-    gates = [build, test]
+    test = gates[1]
     out: dict[str, Any] = {"gates": gates}
     if (
         profile is not None
@@ -372,28 +376,6 @@ def _build_test_smoke(
                 seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
             )
         ]
-    # Every run carries a smoke verdict: the stack's own run command, else an
-    # attested "not pinned" PASS (the boundary is always build/test/smoke).
-    from foundry.gates.smoke import SmokeGate
-
-    smoke: GateImpl
-    if profile is not None and profile.unavailable:
-        smoke = UnavailableGate("smoke", profile.unavailable)
-    elif profile is not None and profile.smoke_cmd is not None:
-        smoke = SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key, pyenv=pyenv)
-    else:
-        smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
-    gates.append(
-        _run_gate(
-            smoke,
-            rt=rt,
-            runner=runner,
-            config=config,
-            run_against=run_against,
-            workdir=workdir,
-            node_id=_SMOKE_NODE,
-        )
-    )
     return out
 
 
@@ -535,32 +517,23 @@ def run_build_gate(
         ]
     profile = gate_profile(state, profile)
     with _build_env(profile, workdir, rt) as pyenv:
-        build = _run_gate(
-            _build_gate(profile, runner, pyenv, planned=files),
-            rt=rt,
-            runner=runner,
-            config=config,
-            run_against=run_against,
-            workdir=workdir,
-            node_id=_BUILD_NODE,
-        )
-        out["gates"] = [build]
+        gates: list[tuple[GateImpl, str]] = [
+            (_build_gate(profile, runner, pyenv, planned=files), _BUILD_NODE)
+        ]
         test = _wave_test_gate(profile, runner, scenarios, pyenv) if scenarios else None
         if test is not None:
             # Same tree digest as the build, so the fixer reads both verdicts as this
             # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
             # ever runs on a later tree (a failing wave check is fixed or halts).
-            out["gates"].append(
-                _run_gate(
-                    test,
-                    rt=rt,
-                    runner=runner,
-                    config=config,
-                    run_against=run_against,
-                    workdir=workdir,
-                    node_id=_TEST_NODE,
-                )
-            )
+            gates.append((test, _TEST_NODE))
+        out["gates"] = _run_gates(
+            gates,
+            rt=rt,
+            runner=runner,
+            config=config,
+            run_against=run_against,
+            workdir=workdir,
+        )
     return out
 
 

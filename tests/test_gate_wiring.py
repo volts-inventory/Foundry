@@ -762,3 +762,59 @@ def test_spec_gate_reads_the_newest_criterion_per_id(tmp_path, rt, runner, verif
         workdir=tmp_path / "spec2",
     )
     assert out["gates"][0].status is GateStatus.FAIL
+
+
+# ---- gate verdict reuse: an identical tree re-run, and a resumed process ----
+
+
+def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records, verifier):
+    from foundry import telemetry
+    from foundry.gates.reuse import VerdictCache
+    from foundry.state.seq import EpochCounter
+
+    store = tmp_path / "verdicts"
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
+    state, resolve, resolve_blob = _seed(criteria, (_feature_diff(files),))
+
+    def gates(the_rt, the_state, the_resolve, the_blob, w):
+        runner = TwoZoneGateRunner(
+            ZoneBSigner(KEY, KEY_ID),
+            records,
+            SCANNER_REV,
+            LINEAGE_REV,
+            verdicts=VerdictCache(store),
+        )
+        with telemetry.counting() as counts:
+            out = run_build_test_gates(
+                the_state,
+                _config(2),
+                rt=the_rt,
+                runner=runner,
+                resolve=the_resolve,
+                resolve_blob=the_blob,
+                workdir=tmp_path / w,
+            )
+        return out["gates"], counts.snapshot()
+
+    first, fired = gates(rt, state, resolve, resolve_blob, "bt1")
+    assert [g.status for g in first] == [GateStatus.PASS] * 3 and fired == {}
+
+    again, fired = gates(rt, state, resolve, resolve_blob, "bt2")
+    assert fired == {"gate.reuse.build": 1, "gate.reuse.test": 1, "gate.reuse.smoke": 1}
+    assert [g.runner_attestation for g in again] == [g.runner_attestation for g in first]
+    assert all(b.seq > a.seq for a, b in zip(first, again, strict=True))
+    assert set(merge_gates(first, again)) == set(again)
+
+    # A resumed process: a fresh epoch counter floored at the run's records.
+    resumed = AgentRuntime(proxy=rt.proxy, epochs=EpochCounter())
+    resumed.epochs.raise_floor(RUN_ID, max(g.seq.emission_epoch for g in again))
+    after, fired = gates(resumed, state, resolve, resolve_blob, "bt3")
+    assert len(fired) == 3
+    assert all(c.seq > b.seq for b, c in zip(again, after, strict=True))
+
+    # One changed byte in the tree re-runs every gate.
+    files = {"app.py": "VALUE = 43\n", "test_app.py": _PASSING_TEST}
+    changed, c_resolve, c_blob = _seed(criteria, (_feature_diff(files),))
+    rerun, fired = gates(rt, changed, c_resolve, c_blob, "bt4")
+    assert fired == {} and rerun[0].run_against != first[0].run_against

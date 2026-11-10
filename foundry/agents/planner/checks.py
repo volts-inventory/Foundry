@@ -143,6 +143,96 @@ def _builtin_method_findings(
     return tuple(out)
 
 
+# A constructor taking something besides the receiver.
+_CTOR_ARGS = re.compile(r"\b(?:__init__|constructor)\s*\(\s*(?!(?:self\s*)?\))")
+
+# A top-level (unindented) function: a factory beside the class.
+_TOP_FUNCTION = re.compile(
+    r"^(?:async\s+)?def\s+\w+\s*\(|^(?:export\s+)?(?:async\s+)?function\s+\w+",
+    re.MULTILINE,
+)
+_UNINDENTED = re.compile(r"^\S", re.MULTILINE)
+_RETURNS = re.compile(r"\)\s*(?:->|:)\s*([^\n{]*)")
+_PY_BASES = re.compile(r"\bclass\s+\w+\s*\(([^)]*)\)")
+_TS_BASES = re.compile(r"\b(?:extends|implements)\s+([\w.,\s]+?)\s*\{")
+
+
+def _bases(signature: str) -> set[str]:
+    found = _PY_BASES.findall(signature) + _TS_BASES.findall(signature)
+    return {w for group in found for w in re.findall(r"\w+", group)}
+
+
+def _top_functions(signature: str) -> list[str]:
+    """Each top-level function of ``signature``, up to the next unindented line."""
+    starts = [m.start() for m in _TOP_FUNCTION.finditer(signature)]
+    out: list[str] = []
+    for start in starts:
+        nxt = _UNINDENTED.search(signature, start + 1)
+        out.append(signature[start : nxt.start() if nxt else len(signature)])
+    return out
+
+
+def _builds(function: str, made: set[str], deps: Sequence[str]) -> bool:
+    """A function is a factory for a class only if it returns the class (or a base
+    of it) or takes one of the dependencies: a ``def main() -> None`` beside the
+    class hands it nothing."""
+    m = _RETURNS.search(function)
+    params, returned = (function[: m.start()], m.group(1)) if m else (function, "")
+    named = set(re.findall(r"\w+", returned))
+    return bool(named & made) or any(re.search(rf"\b{re.escape(d)}\b", params) for d in deps)
+
+
+def _wiring_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """An entrypoint ticket's class contract that composes other tickets' class
+    contracts but declares no way to receive them: its stub is a bare class nothing
+    can hand the store/services to, and the stub-signature guard rejects the
+    factory the implementer reaches for. A constructor taking arguments, a factory
+    function (in the signature or a function contract of the same ticket), or a
+    signature naming the dependencies itself is enough."""
+    by_name = {i.name: i for i in interfaces}
+
+    def injected(name: str) -> bool:
+        i = by_name.get(name) or by_name.get(name.partition(".")[0])
+        return i is not None and i.kind == "class" and not _declaration_only(i)
+
+    out: list[str] = []
+    for t in tickets:
+        if not t.entrypoint or t.id in _GENERATED_TICKETS:
+            continue
+        deps = sorted(
+            {n.partition(".")[0] for n in t.consumes if n not in t.implements and injected(n)}
+        )
+        if not deps:
+            continue
+        ctor = any(n.endswith((".__init__", ".constructor")) for n in t.implements)
+        functions = [
+            f.signature
+            for n in t.implements
+            if (f := by_name.get(n)) is not None and f.kind == "function" and "." not in n
+        ]
+        for name in t.implements:
+            i = by_name.get(name)
+            if i is None or i.kind != "class" or _declaration_only(i) or ctor:
+                continue
+            sig = i.signature
+            made = {name, *_bases(sig)}
+            if (
+                _CTOR_ARGS.search(sig)
+                or any(_builds(f, made, deps) for f in (*functions, *_top_functions(sig)))
+                or any(re.search(rf"\b{re.escape(d)}\b", sig) for d in deps)
+            ):
+                continue
+            out.append(
+                f"Contract {name} (entrypoint ticket {t.id}) composes {', '.join(deps)} "
+                "but declares no way to receive them: give its signature an __init__ "
+                "taking them, or add a factory function to the contract that takes "
+                f"them and returns a {name}."
+            )
+    return tuple(out)
+
+
 _GOAL_ID = re.compile(r"(MH|SC)[-_ ]?0*(\d+)", re.IGNORECASE)
 
 
@@ -430,5 +520,44 @@ def _compile(
             for c in base.contracts
             if c.get("kind") in CODE_CONTRACT_KINDS and c["name"] not in new
         ] + code
-    strict = stack is not None and "--strict" in stack.typecheck
+    strict = stack is not None and "--strict" in stack.typecheck.split()
     return check_contracts(code, language, strict=strict)
+
+
+# Telemetry slugs for the finding templates above (and the Spec gate's own), most
+# specific first; a finding none of them matches counts as "other".
+_FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(p), kind)
+    for p, kind in (
+        (r"^Contract \S.* is implemented by \d+ tickets", "contract-multi-impl"),
+        (r"consumes contract .*, but no ticket implements it", "contract-unimplemented"),
+        (r"consumes contract .* but does not depend on", "contract-dep-missing"),
+        (r"after a builtin its own annotations use", "contract-builtin-method"),
+        (r"already exists in the base tree", "contract-redeclared"),
+        (r"declares no way to receive them", "contract-unwired"),
+        (r"^Contract \S.* does not compile", "contract-compile"),
+        (r"more \S+ error\(s\)\.$", "contract-compile"),
+        (r"^Scenario \S+ is not owned by a live ticket", "scenario-orphan"),
+        (r"^Scenario \S+ covers unknown id", "scenario-unknown-cover"),
+        (r"^Scenario \S+ asserts that installing dependencies", "scenario-offline-install"),
+        (r"has no covering scenario", "goal-uncovered"),
+        (r"^Feature ticket \S+ has no scenarios", "ticket-no-scenarios"),
+        (r"^No entrypoint ticket", "entrypoint-missing"),
+        (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
+        (r"^stack\.run is empty", "run-missing"),
+        (r"starts the server, which never exits", "run-server"),
+        (r"^stack\.bdd ", "bdd-command"),
+        (r"^Stack command file \S+ is written by no ticket", "stack-file-unowned"),
+        (r"exceed the (per-epic )?cap of", "overflow"),
+        (r"^criterion \S+: missing/empty", "criterion-incomplete"),
+        (r"^criterion \S+: scenario has no", "scenario-steps-missing"),
+        (r"security/abuse|security_abuse", "security-gap"),
+    )
+)
+
+
+def finding_kind(finding: str) -> str:
+    """A short stable slug for ``finding``'s template, e.g. ``contract-unimplemented``.
+    The Spec gate's ``contract fit:`` / ``coverage:`` prefixes are looked through."""
+    text = re.sub(r"^(contract fit|coverage): ", "", finding.strip())
+    return next((kind for pattern, kind in _FINDING_KINDS if pattern.search(text)), "other")

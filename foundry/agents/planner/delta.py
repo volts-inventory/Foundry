@@ -17,6 +17,7 @@ from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS, _
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
 from foundry.schemas.product import AcceptanceCriterion, IntentBrief
+from foundry.telemetry import count
 
 
 def _ticket_frame(frame: _Frame) -> _Frame:
@@ -229,6 +230,7 @@ def _merge_delta(
 
 
 def _rejected(why: str) -> None:
+    count("planner.delta.rejected")
     progress.log(f"planner delta rejected: {why}; re-planning in full")
     return None
 

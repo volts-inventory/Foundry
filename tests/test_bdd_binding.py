@@ -246,6 +246,122 @@ def test_a_failed_scenario_says_not_to_write_its_generated_test(tmp_path: Path) 
     assert "never write a test function of that name yourself" in hit
 
 
+def test_a_step_module_that_fails_to_import_is_a_fail_not_an_error(tmp_path: Path) -> None:
+    """pytest exits 2 on a collection error; as an ERROR the fix loop scored the
+    tree None, so a pass that broke the import was never judged worse or rolled back."""
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "from admin import AdminServiceImpl\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.FAIL
+
+
+def test_a_tree_syntax_error_at_collection_is_a_fail(tmp_path: Path) -> None:
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "def (:\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.FAIL
+
+
+def test_the_tree_importing_a_name_the_harness_lacks_is_a_fail(tmp_path: Path) -> None:
+    """``from pytest_bdd import step_given`` names the harness, but the tree's own
+    import is wrong: editing the tree fixes it."""
+    gate = TestGate()
+    obs = gate.execute(_project(tmp_path, "from pytest_bdd import step_given\n" + _STEPS))
+    assert obs.exit_codes == (2,)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.stdout
+
+
+_HARNESS_BLOCK = (
+    "____ ERROR collecting tests/test_t1.py ____\n"
+    "ImportError while importing test module '/w/tests/test_t1.py'.\n"
+    "Traceback:\n"
+    "/usr/lib/python3.12/importlib/__init__.py:90: in import_module\n"
+    "    return _bootstrap._gcd_import(name[level:], package, level)\n"
+    "tests/test_t1.py:1: in <module>\n"
+    "    from pytest_bdd import scenarios\n"
+    "{inner}"
+    "E   {error}\n"
+    "=========================== short test summary info ============================\n"
+    "ERROR tests/test_t1.py\n"
+)
+
+
+def test_a_missing_harness_module_stays_an_error(tmp_path: Path) -> None:
+    from foundry.gates.test import collect_error_owners
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_t1.py").write_text("from pytest_bdd import scenarios\n")
+    out = _HARNESS_BLOCK.format(inner="", error="ModuleNotFoundError: No module named 'pytest_bdd'")
+    assert collect_error_owners(out, tmp_path) == {"tests/test_t1.py": "harness"}
+
+
+def test_an_import_failing_inside_harness_code_stays_an_error(tmp_path: Path) -> None:
+    from foundry.gates.test import collect_error_owners
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_t1.py").write_text("from pytest_bdd import scenarios\n")
+    inner = (
+        "/venv/lib/python3.12/site-packages/pytest_bdd/__init__.py:5: in <module>\n"
+        "    from pytest_bdd.parser import x\n"
+    )
+    for error in (
+        "ImportError: cannot import name 'x' from 'pytest_bdd.parser'",
+        "ImportError: cannot import name 'Parser' from 'gherkin'",
+    ):
+        out = _HARNESS_BLOCK.format(inner=inner, error=error)
+        assert collect_error_owners(out, tmp_path) == {"tests/test_t1.py": "harness"}, error
+    tree = _HARNESS_BLOCK.format(
+        inner="", error="ImportError: cannot import name 'step_given' from 'pytest_bdd'"
+    )
+    assert collect_error_owners(tree, tmp_path) == {"tests/test_t1.py": "tree"}
+
+
+def test_a_collect_path_under_a_subdir_rootdir_is_the_trees(tmp_path: Path) -> None:
+    """A ``pytest.ini`` under ``tests/`` makes it pytest's rootdir: the block header
+    names ``test_t1.py``, not ``tests/test_t1.py``."""
+    from foundry.gates.test import collect_error_owners
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_t1.py").write_text("from app import x\n")
+    out = (
+        "____ ERROR collecting test_t1.py ____\n"
+        "tests/test_t1.py:1: in <module>\n"
+        "    from app import x\n"
+        "E   ModuleNotFoundError: No module named 'app'\n"
+        "=========================== short test summary info ============================\n"
+        "ERROR tests/test_t1.py\n"
+    )
+    want = {"test_t1.py": "tree", "tests/test_t1.py": "tree"}
+    assert collect_error_owners(out, tmp_path) == want
+    rooted = f"rootdir: {tmp_path / 'tests'}\n" + out
+    assert collect_error_owners(rooted, tmp_path) == want
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "test_t1.py").write_text("")
+    # Ambiguous without the rootdir line; the line pins it.
+    assert collect_error_owners(out, tmp_path)["test_t1.py"] == "harness"
+    assert collect_error_owners(rooted, tmp_path) == want
+
+
+def test_a_tree_collection_error_under_a_subdir_rootdir_is_a_fail(tmp_path: Path) -> None:
+    root = _project(tmp_path, "from admin import AdminServiceImpl\n" + _STEPS)
+    (root / "tests" / "pytest.ini").write_text("[pytest]\n")
+    gate = TestGate(cmd=(*TestGate().cmd, "tests"))
+    obs = gate.execute(root)
+    assert obs.exit_codes == (2,)
+    assert "ERROR collecting test_t1.py" in obs.stdout
+    assert gate.decide(obs) is GateStatus.FAIL, obs.stdout
+
+
+def test_a_collection_error_outside_the_tree_stays_an_error(tmp_path: Path) -> None:
+    out = (
+        "____ ERROR collecting ../harness/gen_steps.py ____\n"
+        "E   ModuleNotFoundError: No module named 'app'\n"
+    )
+    from foundry.gates.test import collect_error_owners
+
+    assert collect_error_owners(out, tmp_path) == {"../harness/gen_steps.py": "harness"}
+
+
 def test_a_conftest_import_error_is_an_error_that_says_why(tmp_path: Path) -> None:
     root = _project(tmp_path, None)
     (root / "tests").mkdir(exist_ok=True)

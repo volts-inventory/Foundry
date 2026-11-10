@@ -14,8 +14,9 @@ mid-work.
 A result is split for the session: failures that are its own (its scenarios, its
 files, anything it broke) and pre-existing ones (red on the tree it started from).
 The engineering node and the fixer pass a :class:`CheckSpec` per session through
-:func:`check_scope`; the proxy-agent loop reads it with :func:`current_check`. Every
-proxy-agent session gets it — the local tiers, and the cloud API backends
+:func:`check_scope`; the proxy-agent loop (its ``check`` action) and claude-code
+sessions (the ``foundry-check`` relay, ``adapters/claude_check.py``) read it with
+:func:`current_check`. Every such session gets it — the local tiers, and the cloud API backends
 (``--adapter proxy-agent``) too — unless ``FOUNDRY_SELF_CHECK`` says otherwise:
 ``0``/``off`` turns it off, ``local`` keeps it to the local tiers' sessions (the
 tiered adapter marks those, :func:`local_session`); unset or anything else is on.
@@ -71,6 +72,9 @@ _UNJUDGED_FREE = 2
 # Per gate step (the install, the build, the scoped scenarios): a local check is
 # seconds to a minute; a hung one must not eat the session.
 CHECK_TIMEOUT_S = 180.0
+# A smoke run boots the app for one request: seconds. A server that never exits
+# (the app's `run` command as smoke) is the failure to report, not to wait out.
+SMOKE_TIMEOUT_S = 60.0
 # "0"/"off": no check anywhere; "local": local-tier sessions only (an A/B on the bench).
 DISABLE_ENV = "FOUNDRY_SELF_CHECK"
 _OFF = frozenset({"0", "off", "false", "no"})
@@ -122,7 +126,7 @@ class CheckBase:
     the materialized tree before any session's changes (gate inputs included, the
     manifest not scaffolded — each check scaffolds its own copy). Built lazily by
     the first session that checks (its opening check), so a wave whose adapter never
-    checks (claude-code, stub) never builds it; the opening check's gate run is
+    checks (stub) never builds it; the opening check's gate run is
     shared by every session with the same scenario scope."""
 
     def __init__(
@@ -145,8 +149,8 @@ class CheckBase:
         self._resolve_blob = resolve_blob
         self._lock = threading.Lock()
         self._built: tuple[Path, tuple[str, ...]] | None = None
-        self._openings: dict[frozenset[str], tuple[GateOutcome, ...]] = {}
-        self._opening_locks: dict[frozenset[str], threading.Lock] = {}
+        self._openings: dict[tuple[frozenset[str], bool], tuple[GateOutcome, ...]] = {}
+        self._opening_locks: dict[tuple[frozenset[str], bool], threading.Lock] = {}
 
     def tree(self) -> tuple[Path, tuple[str, ...]]:
         """(the materialized tree, every ticket's planned files). Raises
@@ -177,12 +181,13 @@ class CheckBase:
         """The gates on the unchanged tree for ``spec``'s scope, run once per scope.
         The unbuilt files are the planned files still absent, the session's own
         included: each session judges which of them are its own."""
+        key = (spec.scope, spec.smoke)
         with self._lock:
-            lock = self._opening_locks.setdefault(spec.scope, threading.Lock())
+            lock = self._opening_locks.setdefault(key, threading.Lock())
         with lock:
-            if spec.scope not in self._openings:
-                self._openings[spec.scope] = run_check(spec, {}, ())
-            return self._openings[spec.scope]
+            if key not in self._openings:
+                self._openings[key] = run_check(spec, {}, ())
+            return self._openings[key]
 
 
 @contextlib.contextmanager
@@ -214,14 +219,18 @@ class CheckSpec:
     """One session's check: the scenario refs the scoped Test gate runs, which of
     them are the session's own (``None``: every item is), its write scope (also the
     files whose failures are its own; empty = anything but the gate inputs), whether
-    a red build is always its own (a fixer aimed at the build), and the packet-rule
-    rewrites for a session that can check."""
+    a red build is always its own (a fixer aimed at the build), whether the check
+    also runs the stack's smoke command (a fixer sent for a red smoke) and whether a
+    red smoke is always its own, and the packet-rule rewrites for a session that can
+    check."""
 
     base: CheckBase
     scope: frozenset[str]
     own_refs: frozenset[str] | None
     own_files: tuple[str, ...] = ()
     own_build: bool = False
+    smoke: bool = False
+    own_smoke: bool = False
     rules: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -298,9 +307,9 @@ def _outcome(gate: GateImpl, workdir: Path) -> GateOutcome:
 def run_check(
     spec: CheckSpec, files: Mapping[str, str], deleted: Iterable[str] = ()
 ) -> tuple[GateOutcome, ...]:
-    """Build + scoped Test on the base tree with ``files`` written and ``deleted``
-    removed (the session's in-scope changes), exactly as the wave check would
-    judge it once integrated."""
+    """Build + scoped Test (+ Smoke when ``spec.smoke``) on the base tree with
+    ``files`` written and ``deleted`` removed (the session's in-scope changes),
+    exactly as the wave check would judge it once integrated."""
     from foundry.graph.gate_wiring import (
         _build_env,
         _build_gate,
@@ -340,6 +349,14 @@ def run_check(
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)
                 if test is not None:
                     gates.append(test)
+            if spec.smoke and profile is not None and profile.smoke_cmd and not profile.unavailable:
+                from foundry.gates.smoke import SmokeGate
+
+                gates.append(
+                    SmokeGate(
+                        profile.smoke_cmd, pyenv=pyenv, timeout_s=min(timeout, SMOKE_TIMEOUT_S)
+                    )
+                )
             return tuple(_unattested(g, work, unbuilt, root) for g in gates)
 
 
@@ -415,14 +432,14 @@ def _norm(line: str) -> str:
 
 
 def _split_build(
-    spec: CheckSpec, g: GateOutcome, start: GateOutcome
+    spec: CheckSpec, g: GateOutcome, start: GateOutcome, everything: bool
 ) -> tuple[list[str], list[str]]:
-    """(own, other) lines of a FAILed build. A line is the session's when it names
-    one of its files, or is new since ``start`` (per normalized line: a broken
-    caller in another file is new too). A line naming or importing a planned file
-    not built yet waits on that ticket and is never the session's to fix; neither
-    is a line already failing at ``start`` that names other files."""
-    everything = spec.own_refs is None or spec.own_build
+    """(own, other) lines of a FAILed build (or smoke). A line is the session's when
+    ``everything``, when it names one of its files, or is new since ``start`` (per
+    normalized line: a broken caller in another file is new too). A line naming or
+    importing a planned file not built yet waits on that ticket and is never the
+    session's to fix; neither is a line already failing at ``start`` that names
+    other files."""
     own_files = spec.own_files
     unbuilt = [
         p
@@ -487,7 +504,8 @@ def judge(
         before = base[g.name]
         head = f"[{g.name} gate FAILED]"
         if g.name != "test":
-            own, other = _split_build(spec, g, before)
+            own_all = everything or (spec.own_smoke if g.name == "smoke" else spec.own_build)
+            own, other = _split_build(spec, g, before, own_all)
             if own:
                 yours += [head, *own]
             if other:

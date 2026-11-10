@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
 from foundry.agents.implementation.junior_engineer import _failed_gates
-from foundry.agents.implementation.tickets.constants import NODE_ID
+from foundry.agents.implementation.tickets.constants import _FEATURE_DIFF_KIND, NODE_ID
 from foundry.agents.implementation.tickets.rules import _BDD_FINDING
 from foundry.agents.implementation.tickets.tasks import (
     _skipped_task_ids,
@@ -20,14 +20,18 @@ from foundry.agents.implementation.tickets.tasks import (
 from foundry.agents.implementation.tickets.waves import next_wave
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.tiered import (
+    DIGEST_CAP,
+    DIGEST_TRIAGE,
     ESCALATE_DECLINED_TRIAGE,
     ESCALATE_FALLBACK_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
+    STOPPED_DIGEST,
     STOPPED_TRIAGE,
 )
 from foundry.schemas.base import Artifact
 from foundry.schemas.implementation import Ticket
+from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
@@ -67,14 +71,49 @@ def pending_escalations(state: FactoryState, resolve: ArtifactResolver) -> tuple
     return tuple(sorted((asked & planned) - _escalation_settled(state)))
 
 
-def stopped_tickets(state: FactoryState) -> dict[str, str]:
-    """Task id -> why its kept local session stopped early (turn cap, repeat or
-    read-thrash detector), for tickets whose stopped attempt was integrated."""
+def session_digests(state: FactoryState) -> dict[str, str]:
+    """Task id -> the digest of its newest session, for tasks whose newest session
+    ended before done (one that finished leaves an empty digest)."""
     return {
         t.run_against.removeprefix("task/"): t.explanation
-        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
-        if t.name == STOPPED_TRIAGE and t.produced_by == NODE_ID
+        for t in state.get("gate_triage") or ()
+        if t.name == DIGEST_TRIAGE and t.produced_by == NODE_ID and t.explanation
     }
+
+
+def stopped_tickets(state: FactoryState) -> dict[str, str]:
+    """Task id -> why its kept local session stopped early (turn cap, repeat or
+    read-thrash detector), for tickets whose stopped attempt was integrated and not
+    since rebuilt: a diff of the ticket's own (or its ``restart-<id>``) newer than
+    the stopped session's diff is a later session that finished, so the stop no
+    longer speaks for it."""
+    from foundry.graph.gate_wiring import RESTART_PREFIX
+
+    diffs: dict[str, list[Seq]] = {}
+    for a in state.get("artifacts") or ():
+        if a.kind == _FEATURE_DIFF_KIND and a.task_id:
+            diffs.setdefault(a.task_id.removeprefix(RESTART_PREFIX), []).append(a.seq)
+    out: dict[str, str] = {}
+    for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq):
+        if t.name != STOPPED_TRIAGE or t.produced_by != NODE_ID:
+            continue
+        tid = t.run_against.removeprefix("task/")
+        # Epochs count per Seq key, so a stop note and a diff don't order by Seq:
+        # the stopped session's own diff is the one minted in the stop's superstep,
+        # and later sessions are the diffs that outrank it.
+        own = max(
+            (
+                s
+                for s in diffs.get(tid, ())
+                if (s.run_id, s.superstep_index) == (t.seq.run_id, t.seq.superstep_index)
+            ),
+            default=t.seq,
+        )
+        if any(s > own for s in diffs.get(tid, ())):
+            out.pop(tid, None)
+        else:
+            out[tid] = t.explanation
+    return out
 
 
 def _escalation_settled(state: FactoryState) -> set[str]:
@@ -200,7 +239,11 @@ def _escalation_context(
         f"not finish it: {reason[:300]}",
         f"you are re-running it once on {target}; {tree}",
         f"the earlier attempt touched: {touched}",
-        *(f"the earlier attempt reported: {r[:300]}" for r in reported),
+        *(
+            "the earlier attempt reported: "
+            + r[: DIGEST_CAP if r.startswith(STOPPED_DIGEST) else 300]
+            for r in reported
+        ),
         *failures,
     )
 

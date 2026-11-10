@@ -16,7 +16,8 @@ fidelity machinery is Phase 2; its reuse-key binding is wired NOW —
 a rotation boundary when rotation arrives.
 
 Exit-code semantics (pytest): 0 green, 1 test failures, 2/3/4 harness/usage
-errors (→ ERROR: infra, not a verdict), 5 no tests collected (→ adequacy FAIL
+errors (→ ERROR: infra, not a verdict; but 2 with only tree modules that failed
+to collect for the tree's own reasons → FAIL), 5 no tests collected (→ adequacy FAIL
 when a floor is set). A stack-provided command (``stack_harness``: npm test, go
 test, the Cucumber ``bdd`` command) is not pytest: 0 passes, 126/127 (the shell
 could not find or run a binary — missing toolchain) is ERROR, anything else FAIL.
@@ -46,6 +47,7 @@ from typing import TYPE_CHECKING
 
 from foundry.schemas.gates import GateStatus, VerdictClass
 from foundry.schemas.implementation import BDD_REPORT_ENV, FEATURE_DIR
+from foundry.telemetry import count, counted
 
 from . import cucumber
 from .bdd_scaffold import parse_feature, parse_fields, step_captures, step_matches
@@ -70,6 +72,7 @@ _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
 # pytest exit codes that are harness/usage failures, not verdicts.
 _INFRA_EXIT_CODES = frozenset({2, 3, 4})
+_INTERRUPTED = 2
 _NO_TESTS_COLLECTED = 5
 
 # Env key naming the host paths to FENCE OFF from the pinned-harness subprocess.
@@ -378,8 +381,82 @@ def bdd_findings(
 
 
 _COLLECT_ERROR = re.compile(r"^(?:_+ )?ERROR (?:collecting )?(\S+?\.py)\b", re.MULTILINE)
+_COLLECT_BLOCK = re.compile(r"^_+ ERROR collecting (\S+?\.py) _+$", re.MULTILINE)
+_BLOCK_END = re.compile(r"^(?:_{3,} |={3,})", re.MULTILINE)
+# Structured key: {errored module: "tree" | "harness"} for a run pytest interrupted.
+COLLECT_ERRORS_KEY = "collect_errors"
+# The trusted modules the bootstrap imports before any workdir code (plus pytest's
+# internals and plugin manager): the harness's own import failing is not the tree's.
+_HARNESS_MODULES = frozenset({"pytest", "_pytest", "pytest_bdd", "pluggy"})
+_IMPORT_NAMED = re.compile(
+    r"No module named '([A-Za-z_][\w.]*)'|cannot import name '[^']*' from '([A-Za-z_][\w.]*)'"
+)
+_ROOTDIR = re.compile(r"^rootdir: (\S+)", re.MULTILINE)
 
 
+def _collected_path(mod: str, roots: list[Path], tree: Path) -> Path | None:
+    """The tree file pytest's ``mod`` names. pytest prints collect paths relative to
+    its rootdir, which a ``pytest.ini`` / ``conftest.py`` under ``tests/`` moves below
+    the workdir (and ``-q`` hides the ``rootdir:`` line): a path under no known root
+    is matched by suffix against the tree's files when exactly one matches."""
+    for root in roots:
+        path = (root / mod).resolve()
+        if path.is_relative_to(tree) and path.is_file():
+            return path
+    parts = PurePosixPath(mod).parts
+    if mod.startswith("/") or ".." in parts:
+        return None
+    hits = [
+        p
+        for p in tree.rglob(parts[-1])
+        if p.relative_to(tree).parts[-len(parts) :] == parts
+        and not any(s.startswith(".") for s in p.relative_to(tree).parts)
+        and p.is_file()
+    ]
+    return hits[0].resolve() if len(hits) == 1 else None
+
+
+def _harness_owned(block: str, tree: Path) -> bool:
+    """Did this collection error die in the harness? When a harness module itself is
+    missing, or the import failed inside code outside the tree — not the tree's own
+    ``from pytest_bdd import <a name it does not export>``, whose innermost frame is
+    the tree's module."""
+    errors = _IMPORT_NAMED.findall(block)
+    if any(missing in _HARNESS_MODULES for missing, _ in errors):
+        return True
+    frames = [m.group(1) for s in block.splitlines() if (m := _FRAME_OPEN.match(s.strip()))]
+    if frames:
+        last = frames[-1]
+        if _tree_frame(last) or (
+            last.startswith("/") and Path(last).resolve().is_relative_to(tree)
+        ):
+            return False
+        if _HARNESS_MODULES & set(last.split("/")):
+            return True
+    return any((a or b).split(".", 1)[0] in _HARNESS_MODULES for a, b in errors)
+
+
+def collect_error_owners(output: str, workdir: Path) -> dict[str, str]:
+    """Each module pytest failed to collect -> ``"tree"`` when it is a file of the
+    tree whose import died for the tree's own reasons (a missing tree module or name,
+    a syntax error, an undeclared dependency, a name the harness does not export),
+    else ``"harness"`` (a module outside the tree, or a failure in the harness)."""
+    tree = Path(workdir).resolve()
+    roots = [tree / r for r in _ROOTDIR.findall(output)] + [tree]
+    blocks: dict[Path, str] = {}
+    for m in _COLLECT_BLOCK.finditer(output):
+        end = _BLOCK_END.search(output, m.end())
+        if (path := _collected_path(m.group(1), roots, tree)) is not None:
+            blocks[path] = output[m.end() : end.start() if end else len(output)]
+    out: dict[str, str] = {}
+    for mod in dict.fromkeys(_COLLECT_ERROR.findall(output)):
+        path = _collected_path(mod, roots, tree)
+        harness = path is None or _harness_owned(blocks.get(path, ""), tree)
+        out[mod] = "harness" if harness else "tree"
+    return out
+
+
+@counted("test.uncollected_binding")
 def uncollected_binding_reasons(output: str, workdir: Path, refs: list[str]) -> dict[str, str]:
     """Scenario ref -> why it never ran, for each of ``refs`` whose feature file a
     step module binds that pytest failed to import (``ERROR collecting <module>``).
@@ -445,6 +522,7 @@ def _is_test_module(name: str) -> bool:
     )
 
 
+@counted("test.shared_state")
 def shared_state_hints(output: str, workdir: Path) -> tuple[str, ...]:
     """One line per unique key a test's insert collided on. Tests in one pytest
     process share a module-level database (an in-memory SQLite engine lives as long
@@ -513,6 +591,7 @@ def _called_name(func: ast.expr) -> str | None:
     return func.attr if isinstance(func, ast.Attribute) else None
 
 
+@counted("test.conftest_binding")
 def conftest_binding_note(workdir: Path) -> str | None:
     """A finding naming the conftest.py files that call ``scenarios(``: pytest
     imports a conftest for fixtures but never collects its tests, so a binding
@@ -581,6 +660,7 @@ def _rebound_names(node: ast.stmt) -> set[str]:
     return {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
 
 
+@counted("test.shadowed_scenario")
 def shadowed_scenario_notes(workdir: Path, refs: list[str]) -> tuple[str, ...]:
     """A finding per bound-but-unexecuted scenario whose generated test a later
     module-level definition replaces: ``scenarios(...)`` puts the scenario's test in
@@ -640,6 +720,93 @@ _ID_SHAPED = re.compile(r"^(?:FAILED|ERROR|BDD criterion)\b")
 _DETAIL_FLOOR = 8
 
 
+def _quoted(s: str) -> str:
+    return f"| {s}"[:300] if _ID_SHAPED.match(s.strip()) else s[:300]
+
+
+def _detail_line(st: str) -> bool:
+    return (
+        st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____", "BDD criterion"))
+        or "assert" in st
+        or "Error" in st
+        or st.startswith("def test")
+    )
+
+
+# A failure block's header (``____ test_x ____``, ``____ ERROR collecting x.py ____``;
+# never the ``_ _ _`` line between long-traceback frames), that separator, and the
+# ``---- Captured stdout call ----`` sections after the traceback.
+_BLOCK_HEADER = re.compile(r"^_{3,} (.+?) _{3,}$")
+_COLLECTING = re.compile(r"^_{3,} ERROR collecting (\S+) _{3,}$")
+_FRAME_SEPARATOR = re.compile(r"^(?:_ ){3,}_?$")
+_CAPTURED = re.compile(r"^-{3,} .+ -{3,}$")
+# A frame's location: ``path:12: in func`` opens a --tb=short frame (its source line
+# follows); ``path:12:`` / ``path:12: AssertionError`` closes a --tb=long one.
+_FRAME_OPEN = re.compile(r"^(\S+?):\d+: in \S+$")
+_FRAME_CLOSE = re.compile(r"^(\S+?\.pyi?):\d+:(?: [\w.]+)?$")
+_CARETS = re.compile(r"^\s*[\^~]+\s*$")
+_EXC_LINE = re.compile(r"^E\s+((?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Error|Exception|Exit)\b.*)$")
+_FOREIGN_PARTS = frozenset(
+    {"site-packages", "dist-packages", ".venv", "venv", "_pytest", "pluggy", "pytest_bdd", ".."}
+)
+_TB_FRAMES = 3
+
+
+def _tree_frame(path: str) -> bool:
+    """A frame in the tree's own code: a relative path (pytest prints the files under
+    its rootdir relative) outside any installed package or pytest's internals."""
+    return not path.startswith(("/", "<")) and not _FOREIGN_PARTS & set(path.split("/"))
+
+
+def _failure_block(header: str, body: list[str]) -> list[str]:
+    """One failing test's detail: its header, then the exception (``E``) lines, then
+    the last ``_TB_FRAMES`` frames of the tree's own code (location + source line) —
+    frames in installed packages, the stdlib and pytest drop out. A collection error
+    leads with its module and exception. Lines in no frame (captured output) keep the
+    generic filter."""
+    errors: list[str] = []
+    frames: list[list[str]] = []  # [path, location / source lines...]
+    loose: list[str] = []
+    pending: list[str] = []
+    current: list[str] | None = None
+    captured = False
+    for s in body:
+        st = s.strip()
+        if st == "E" or st.startswith(("E ", "E\t")):
+            errors.append(s)
+        elif captured:
+            loose.append(s)
+        elif _CAPTURED.match(st) or _FRAME_SEPARATOR.match(st):
+            captured = _CAPTURED.match(st) is not None
+            loose.extend(pending)
+            pending, current = [], None
+        elif (m := _FRAME_OPEN.match(st)) is not None:
+            loose.extend(pending)
+            pending, current = [], [m.group(1), s]
+            frames.append(current)
+        elif current is None and (m := _FRAME_CLOSE.match(st)) is not None:
+            frames.append([m.group(1), *(p for p in pending if p.lstrip().startswith(">")), s])
+            pending = []
+        elif current is not None:
+            if not _CARETS.match(s):
+                current.append(s)
+        else:
+            pending.append(s)
+    loose.extend(pending)
+    out = [header]
+    collecting = _COLLECTING.match(header.strip())
+    if collecting is not None:
+        excs = [m.group(1) for e in errors if (m := _EXC_LINE.match(e.strip()))]
+        if excs:
+            out.append(f"{collecting.group(1)}: {excs[-1]}")
+            loose = [s for s in loose if not s.startswith("ImportError while importing")]
+    out.extend(errors)
+    for frame in [f for f in frames if _tree_frame(f[0])][-_TB_FRAMES:]:
+        out.extend(frame[1:])
+    out.extend(s for s in loose if _detail_line(s.strip()))
+    return out
+
+
 def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) -> tuple[str, ...]:
     """Human-readable failure lines from pytest output — the failing tests + the
     assertion (expected vs got) — so the fix loop can target the SPECIFIC failure
@@ -648,7 +815,9 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     The ``FAILED``/``ERROR`` summary lines come last but name every failing test, so
     they keep their room under ``limit``; the detail lines (each kept once) fill what
     is left, but never fewer than ``_DETAIL_FLOOR``, the exception (``E``) lines
-    first when they do not all fit. Only
+    first when they do not all fit. Each failing test's detail block leads with its
+    exception lines, then a short tail of the tree's own frames (``_failure_block``).
+    Only
     the lines of pytest's LAST short-summary section count as summary lines (a test
     can print a header of its own, never after pytest's): an id-shaped line anywhere
     else — a test's captured output — is quoted (``| ``), so a test cannot choose
@@ -662,20 +831,29 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     )
     keep: list[str] = []
     summary: list[str] = []
+    block: tuple[str, list[str]] | None = None
     for i, raw in enumerate(lines):
         s = raw.rstrip()
         st = s.strip()
         if not st:
             continue
+        opens = _BLOCK_HEADER.match(st) is not None
+        ends = opens or st.startswith("=")
+        if start is not None and i > start and st.startswith(("FAILED ", "ERROR ")):
+            ends = True
+        if ends and block is not None:
+            keep.extend(_quoted(ln) for ln in _failure_block(*block))
+            block = None
         if start is not None and i > start and st.startswith(("FAILED ", "ERROR ")):
             summary.append(s[:300])
-        elif (
-            st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____", "BDD criterion"))
-            or "assert" in st
-            or "Error" in st
-            or st.startswith("def test")
-        ):
-            keep.append(f"| {s}"[:300] if _ID_SHAPED.match(st) else s[:300])
+        elif opens:
+            block = (s, [])
+        elif block is not None:
+            block[1].append(s)
+        elif _detail_line(st):
+            keep.append(_quoted(s))
+    if block is not None:
+        keep.extend(_quoted(ln) for ln in _failure_block(*block))
     summary = summary[:limit]
     detail = list(dict.fromkeys(keep))
     room = max(limit - len(summary), _DETAIL_FLOOR)
@@ -856,6 +1034,7 @@ def _unset_target_note(
     )
 
 
+@counted("test.step_argument")
 def step_argument_hints(
     stdout: str, workdir: Path | None = None, features: Iterable[str] = ()
 ) -> tuple[str, ...]:
@@ -888,6 +1067,7 @@ def step_argument_hints(
 _DUPLICATE_NOTES_MAX = 8
 
 
+@counted("test.duplicate_step")
 def duplicate_step_notes(workdir: Path, features: Iterable[str]) -> tuple[str, ...]:
     """One line per step text a step module that binds ``features`` defines more than
     once with the same keyword. pytest-bdd runs only the last of them for every
@@ -1134,6 +1314,7 @@ def step_module_notes(
     return tuple(out)
 
 
+@counted("test.static_step")
 def static_step_notes(
     workdir: Path, features: Iterable[str], *, params: bool = True
 ) -> tuple[str, ...]:
@@ -1167,6 +1348,11 @@ def pinned_test_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     if extra:
         env.update(extra)
     return env
+
+
+def _tree_collect_errors(obs: ZoneAObservation) -> bool:
+    owners = obs.structured.get(COLLECT_ERRORS_KEY)
+    return isinstance(owners, dict) and bool(owners) and set(owners.values()) == {"tree"}
 
 
 class TestGate:
@@ -1310,6 +1496,7 @@ class TestGate:
         except cucumber.ReportError as exc:
             from .profiles import bdd_runner_hint
 
+            count("test.bdd_runner")
             hint = bdd_runner_hint(self.profile_name.removeprefix("stack:")) or (
                 'e.g. cucumber-js --format "message:$FOUNDRY_BDD_REPORT"'
             )
@@ -1322,6 +1509,7 @@ class TestGate:
             ]
             literal = _unexpanded_report_paths(workdir)
             if literal:
+                count("test.unexpanded_report_path")
                 notes.append(
                     f"the bdd command wrote its report to {', '.join(literal)} — a path "
                     f"literally named after ${_BDD_REPORT_ENV}: the variable was not "
@@ -1388,6 +1576,10 @@ class TestGate:
             "cmd": list(cmd),
             "summary": parse_pytest_summary(out),
         }
+        if rc == _INTERRUPTED and not self.stack_harness:
+            owners = collect_error_owners(f"{out}\n{err}", workdir)
+            if owners:
+                structured[COLLECT_ERRORS_KEY] = owners
         findings: tuple[str, ...] = ()
         # A red run carries its WHY: the failing tests + assertions, parsed off the
         # pinned harness's own stdout (zone A) so the fix loop feeds the SPECIFIC
@@ -1518,6 +1710,10 @@ class TestGate:
                 return GateStatus.ERROR  # missing toolchain: infra, never latched
             if rc != 0:
                 return GateStatus.FAIL
+        elif rc == _INTERRUPTED and _tree_collect_errors(obs):
+            # A test module of the tree that fails to import is a verdict on the tree:
+            # as an ERROR the fix loop could neither score it nor restore the best tree.
+            return GateStatus.FAIL
         elif rc in _INFRA_EXIT_CODES:
             return GateStatus.ERROR  # harness failure is not a verdict (DS7)
         if rc == _NO_TESTS_COLLECTED:

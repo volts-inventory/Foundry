@@ -62,6 +62,7 @@ from foundry.agents.implementation.tickets.constants import (
     _FEATURE_DIFF_KIND,
     _LOCAL_TURN_BUDGET,
     CAP_TRIAGE,
+    CARRY_TRIAGE,
     CONTRACT_DUP_TRIAGE,
     CONTRACT_KIND,
     DEFAULT_WORKERS,
@@ -69,10 +70,14 @@ from foundry.agents.implementation.tickets.constants import (
     MAX_TICKET_ATTEMPTS,
     NODE_ID,
     OVERLAY_TRIAGE,
+    REPLAN_AFTER,
+    REPLAN_TRIAGE,
+    SIGNATURE_REJECTED_TRIAGE,
     SKIP_TRIAGE,
     TICKET_KIND,
 )
 from foundry.agents.implementation.tickets.contracts import (
+    SignatureChangeError,
     _flag_contract_duplicates,
     contract_duplicates,
     contract_members,
@@ -86,6 +91,7 @@ from foundry.agents.implementation.tickets.escalation import (
     escalation_pick,
     escalation_target,
     pending_escalations,
+    session_digests,
     stopped_tickets,
 )
 from foundry.agents.implementation.tickets.packet import (
@@ -123,6 +129,8 @@ from foundry.agents.implementation.tickets.scope import (
 )
 from foundry.agents.implementation.tickets.skeleton import (
     _skeleton_diff,
+    restub_revised,
+    shared_stub_names,
     skeleton_files,
     stub_rules,
 )
@@ -132,10 +140,15 @@ from foundry.agents.implementation.tickets.tasks import (
     built_task_ids,
     cap_stopped,
     has_tickets,
+    interface_revisions,
+    pending_interface_replans,
     read_tickets,
+    replan_task_ids,
+    signature_rejections,
     task_from_ticket,
     task_id_for_ticket,
     tier_for,
+    unbuilt_task_ids,
 )
 from foundry.agents.implementation.tickets.waves import (
     _order_after_integrated,
@@ -148,6 +161,7 @@ from foundry.agents.implementation.tickets.waves import (
 )
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
+    DIGEST_TRIAGE,
     ESCALATE_DECLINED_TRIAGE,
     ESCALATE_REQUEST_TRIAGE,
     ESCALATED_TRIAGE,
@@ -208,21 +222,26 @@ __all__ = [
     "escalation_pick",
     "has_tickets",
     "in_write_scope",
+    "interface_revisions",
     "make_engineering_node",
     "next_wave",
     "note_fix_writes",
     "pending_escalations",
+    "pending_interface_replans",
     "pending_wave",
     "plan_wave_count",
     "read_tickets",
+    "replan_task_ids",
     "scenario_rules",
     "scenario_verify",
+    "session_digests",
     "stopped_tickets",
     "task_from_ticket",
     "task_id_for_ticket",
     "tickets_settled",
     "tier_for",
     "trim_to_write_scope",
+    "unbuilt_task_ids",
     "unwritten_ticket_files",
     "verify_commands",
     "verify_rules",
@@ -316,11 +335,86 @@ def make_engineering_node(
         contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         prior = _prior_failures(state)
         failures = _ticket_notes(state, FAIL_TRIAGE)
+        rejections = signature_rejections(state)
+
+        def _note_rejection(tid: str, exc: Exception) -> bool:
+            """Count an attempt the stub-signature guard rejected; True when this one
+            leaves ``tid`` to a re-plan (the planned interface is likely wrong)."""
+            # The work pool raises its own error, the adapter's chained on.
+            guard = exc if isinstance(exc, SignatureChangeError) else exc.__cause__
+            if not isinstance(guard, SignatureChangeError):
+                return False
+            n = rejections[tid] = rejections.get(tid, 0) + 1
+            notes = merged.setdefault("gate_triage", [])
+            notes.append(
+                GateTriage(
+                    name=f"{SIGNATURE_REJECTED_TRIAGE}:{n}",
+                    run_against=f"task/{tid}",
+                    explanation=str(guard)[:2000],
+                    produced_by=NODE_ID,
+                    seq=rt.seq(config, NODE_ID, f"{SIGNATURE_REJECTED_TRIAGE}:{tid}:{n}"),
+                )
+            )
+            if n != REPLAN_AFTER:
+                return False
+            progress.log(f"{tid}: planned signatures rejected {n} times, excluded from restarts")
+            notes.append(
+                GateTriage(
+                    name=REPLAN_TRIAGE,
+                    run_against=f"task/{tid}",
+                    explanation=(
+                        f"the stub-signature guard rejected {n} attempts of {tid}: the "
+                        "planned interface is likely wrong. The ticket is excluded from "
+                        "fix-loop restarts and left to the planner to revise its interface "
+                        f"(once per run). Guard: {guard}"
+                    )[:2000],
+                    produced_by=NODE_ID,
+                    seq=rt.seq(config, NODE_ID, f"{REPLAN_TRIAGE}:{tid}"),
+                )
+            )
+            return True
+
         from foundry.graph.gate_wiring import contract_paths
 
         contract_files = contract_paths(state, resolve)
         built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
         skeleton = skeleton_files(state, resolve, blobs)
+        # A ticket whose interface the planner revised is held to the revised stubs on
+        # every later build; its first rebuild (never built since) carries them into
+        # its diff, a restart's reset puts them back.
+        restubbed, reset = restub_revised(
+            wave,
+            interface_revisions(state),
+            restarts,
+            skeleton,
+            contracts,
+            built_contracts,
+            reset,
+        )
+        overlay.update(reset[0])
+        # A retry after a named violation starts from its failed attempt's files.
+        carried: dict[str, dict[str, str]] = {}
+        in_wave = {task_id_for_ticket(t.id) for t in wave}
+        for tid, kept in _ticket_notes(state, CARRY_TRIAGE).items():
+            # A next-wave ticket is unbuilt; an escalation or restart starts afresh.
+            if blobs is None or tid not in in_wave or tid in requested or tid in restarts:
+                continue
+            note = max(kept, key=lambda n: n.seq)
+            last = max(failures.get(tid, ()), key=lambda n: n.seq, default=None)
+            if last is not None and last.seq > note.seq:  # same pass mints both
+                continue
+            from foundry.graph.gate_wiring import MaterializationError, snapshot_files
+
+            try:
+                carried[tid] = snapshot_files(note.explanation, blobs)
+            except (MaterializationError, KeyError, ValueError) as exc:
+                progress.log(
+                    f"{tid}: its failed attempt's files are unreadable, not carried: {exc}"
+                )
+        for tid, files in restubbed.items():
+            if tid not in done and not requested and not restarts:
+                carried.setdefault(tid, {}).update(files)
+        resigned = {p for files in restubbed.values() for p in files}
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.
@@ -375,6 +469,7 @@ def make_engineering_node(
                 a.task_id: a
                 for a in sorted(_of_kind(state, FEATURE_DIFF_KIND), key=lambda a: a.seq)
             }
+            digests = session_digests(state)
             for tid in requested:
                 reasons[tid] = asked.get(tid, "the wave check failed twice")
                 diff = newest.get(tid)
@@ -394,9 +489,12 @@ def make_engineering_node(
                     reason=reasons[tid],
                     touched=touched,
                     reported=[
-                        t.explanation
-                        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
-                        if t.run_against == f"task/{tid}" and t.name == "adapter-report"
+                        *(
+                            t.explanation
+                            for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+                            if t.run_against == f"task/{tid}" and t.name == "adapter-report"
+                        ),
+                        *([digests[tid]] if tid in digests else []),
                     ],
                     kept=True,
                     failures=fix_context,
@@ -407,7 +505,10 @@ def make_engineering_node(
             sandbox = _sandbox_for(rt, source_dir, snapshot_store, str(tier) if tier else None)
             if overlay:
                 apply_overlay(sandbox.worktree, overlay)
-            bases[str(etask.packet.task["id"])] = sandbox.snapshot()
+            tid = str(etask.packet.task["id"])
+            bases[tid] = sandbox.snapshot()
+            if tid in carried:  # after the base: the diff the retry lands must carry them
+                apply_overlay(sandbox.worktree, carried[tid])
             return sandbox
 
         names: dict[str, tuple[Mapping[str, Sequence[str]], bool]] = {}
@@ -423,17 +524,21 @@ def make_engineering_node(
                 tid = task_id_for_ticket(t.id)
                 names[tid] = (required, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
         stubs: dict[str, tuple[Mapping[str, str], bool]] = {}
+        shared: dict[str, frozenset[str]] = {}
         for t in wave:
             # Judged against the stub as the ticket finds it (a wave-0 fixer may have
             # re-signed it to satisfy the type checker), unless that is no longer a stub.
             stubbed = {
-                p: cur if isinstance(cur := overlay.get(p), str) and is_stub(cur) else text
+                p: cur
+                if p not in resigned and isinstance(cur := overlay.get(p), str) and is_stub(cur)
+                else text
                 for p, text in skeleton.items()
                 if p in t.files and text
             }
             if stubbed:
                 tid = task_id_for_ticket(t.id)
                 stubs[tid] = (stubbed, len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS)
+                shared[tid] = shared_stub_names(t, tickets, stubbed, contracts, overlay)
         for table in (names, stubs):
             for tid in restarts:
                 if tid in table:  # a restart's first attempt is strict, its retry lenient
@@ -464,6 +569,8 @@ def make_engineering_node(
             stubs,
             skeleton,
             checks,
+            shared,
+            carried,
         )
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
@@ -514,6 +621,12 @@ def make_engineering_node(
                 own = tuple(
                     n.explanation for n in sorted(failures.get(tid, ()), key=lambda n: n.seq)
                 )
+                if tid in carried and own:
+                    own = (
+                        f"[continuing attempt {len(own)}] {', '.join(sorted(carried[tid]))} "
+                        "already hold your previous attempt's work as it left it: keep that "
+                        f"work and fix only this one violation, then finish. {own[-1]}",
+                    )
                 packet = _ticket_packet(
                     tasks[tid],
                     ticket,
@@ -610,9 +723,20 @@ def make_engineering_node(
                     results[tid] = pool.result(pool_id)
                 except Exception as exc:
                     results[tid] = exc
+            first_failed: dict[str, Exception] = {}
             if restart_memo:
+                for tid in restart_memo:
+                    if isinstance(got := results.get(tid), Exception):
+                        first_failed[tid] = got
+                replan = {tid for tid, exc in first_failed.items() if _note_rejection(tid, exc)}
                 _retry_restarts(
-                    pool, scoped, results, packets, restart_memo, adapter_name, cost_budget_microusd
+                    pool,
+                    scoped,
+                    results,
+                    packets,
+                    {tid: m for tid, m in restart_memo.items() if tid not in replan},
+                    adapter_name,
+                    cost_budget_microusd,
                 )
             stopped: dict[str, str] = {}
             if target and not requested and not restarts:
@@ -689,6 +813,21 @@ def make_engineering_node(
                         rid = f"{RESTART_PREFIX}{tid}"
                         task = task.model_copy(update={"id": rid, "branch": f"task/{rid}"})
                     out = _finalize_diff(rt, task, constraints, bases[tid], got, config)
+                    # Adapter seqs repeat across a task's sessions, so its first digest
+                    # would outlive them: re-minted here, each session's digest (empty
+                    # after done) supersedes the one before.
+                    out["gate_triage"] = [
+                        *(t for t in out.get("gate_triage") or () if t.name != DIGEST_TRIAGE),
+                        GateTriage(
+                            name=DIGEST_TRIAGE,
+                            run_against=f"task/{tid}",
+                            explanation=next(
+                                (t.explanation for t in got.triage if t.name == DIGEST_TRIAGE), ""
+                            ),
+                            produced_by=NODE_ID,
+                            seq=rt.seq(config, NODE_ID, f"{DIGEST_TRIAGE}:{tid}"),
+                        ),
+                    ]
                     if tid in restart_memo:
                         out.pop("tasks", None)
                 except RunCapExceeded as exc:
@@ -705,10 +844,30 @@ def make_engineering_node(
                 except Exception as exc:
                     if tid in restart_memo:  # its earlier build stays integrated
                         progress.log(f"restart of {tid} failed: {exc}")
+                        if exc is not first_failed.get(tid):
+                            _note_rejection(tid, exc)
                         continue
+                    attempt = len(failures.get(tid, ())) + 1
                     merged.setdefault("gate_triage", []).extend(
-                        _failure_notes(rt, config, tid, len(failures.get(tid, ())) + 1, exc)
+                        _failure_notes(rt, config, tid, attempt, exc)
                     )
+                    _note_rejection(tid, exc)
+                    if (
+                        (wrote := scoped.carry.get(tid))
+                        and attempt < MAX_TICKET_ATTEMPTS
+                        and rt.cas is not None
+                    ):
+                        from foundry.graph.gate_wiring import snapshot_blob
+
+                        merged["gate_triage"].append(
+                            GateTriage(
+                                name=CARRY_TRIAGE,
+                                run_against=f"task/{tid}",
+                                explanation=rt.cas.put_blob(snapshot_blob(wrote)),
+                                produced_by=NODE_ID,
+                                seq=rt.seq(config, NODE_ID, f"{CARRY_TRIAGE}:{tid}"),
+                            )
+                        )
                     continue
                 built.append(ticket)
                 for channel, records in out.items():
@@ -759,16 +918,29 @@ def make_engineering_node(
         else:
             skeleton_concerns = ()
         _order_after_integrated(state, merged)
+        narrowed: tuple[dict[str, str], tuple[str, ...]] | None = reset
         if restarts and len(built) < len(wave):
-            # The reset covers every restarted ticket's files: landing it without each
-            # rebuild would delete the code of a ticket whose rebuild failed.
+            # A failed rebuild keeps its earlier build: the reset lands only where a
+            # rebuild replaces it (the wave check judges the mixed tree).
+            from foundry.graph.gate_wiring import narrow_reset
+
+            failed = [t for t in wave if t not in built]
+            if blobs is None:
+                narrowed = None
+            elif reset[0] or reset[1]:
+                narrowed = narrow_reset(
+                    state, reset, built, failed, resolve=resolve, resolve_blob=blobs
+                )
+        if restarts and narrowed is None:
+            # Landing the reset whole would delete the code of a ticket whose rebuild
+            # failed: no rebuild lands this wave.
             merged["artifacts"] = [
                 a
                 for a in merged.get("artifacts") or ()
                 if not (a.task_id or "").startswith(RESTART_PREFIX)
             ]
-        elif restarts and (reset[0] or reset[1]):
-            _land_reset(rt, config, state, resolve, merged, reset, wave)
+        elif restarts and built and narrowed is not None and (narrowed[0] or narrowed[1]):
+            _land_reset(rt, config, state, resolve, merged, narrowed, built)
         for channel, records in merged.items():
             writes.setdefault(channel, []).extend(records)
         writes.setdefault("agent_journal", []).append(

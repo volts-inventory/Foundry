@@ -1065,6 +1065,7 @@ class ToolchainCache:
 
     def __init__(self) -> None:
         self._root: str | None = None
+        self._installs: str | None = None
         self._lock = threading.Lock()
 
     @property
@@ -1073,6 +1074,15 @@ class ToolchainCache:
             if self._root is None:
                 self._root = _real(tempfile.mkdtemp(prefix="foundry-toolchain-"))
             return self._root
+
+    @property
+    def installs(self) -> Path:
+        """The run's stored dependency installs (``foundry.gates.build``): a separate
+        directory, never bound into any step, so only the host side writes it."""
+        with self._lock:
+            if self._installs is None:
+                self._installs = _real(tempfile.mkdtemp(prefix="foundry-installs-"))
+            return Path(self._installs)
 
     def env(self) -> dict[str, str]:
         r = self.root
@@ -1090,10 +1100,11 @@ class ToolchainCache:
 
     def close(self) -> None:
         with self._lock:
-            root, self._root = self._root, None
-        if root is None:
-            return
-        force_rmtree(Path(root))
+            roots = (self._root, self._installs)
+            self._root = self._installs = None
+        for root in roots:
+            if root is not None:
+                force_rmtree(Path(root))
 
 
 _OFFLINE_ENV = {"CARGO_NET_OFFLINE": "true"}

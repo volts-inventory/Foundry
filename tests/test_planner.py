@@ -25,6 +25,7 @@ from typing import Any
 import pytest
 from langchain_core.runnables import RunnableConfig
 
+from foundry import telemetry
 from foundry.agents import AgentRuntime, planner
 from foundry.agents.planner import (
     MAX_EPIC_TICKETS,
@@ -409,9 +410,26 @@ def test_self_review_omission_is_flagged_blocking_and_stamped_self() -> None:
 # ---- spec_fix re-entry -----------------------------------------------------------
 
 
-def test_reentry_after_spec_fail_carries_the_findings_and_prior_criteria() -> None:
+def _content(request: dict[str, Any]) -> str:
+    return str(request["messages"][0]["content"])
+
+
+def _efforts(rt: AgentRuntime) -> list[str | None]:
+    """The ``effort`` of every model call ``rt`` makes from here on."""
+    seen: list[str | None] = []
+    real = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("effort"))
+        return real(*args, **kwargs)
+
+    rt.proxy.complete = spy  # type: ignore[method-assign]
+    return seen
+
+
+def test_reentry_after_spec_fail_repairs_the_prior_plan() -> None:
     cas = ArtifactStore()
-    # An empty delta: the re-entry falls back to the full re-plan.
+    # An empty delta: the re-entry repairs the previous pass, which closes it.
     rt, tx = runtime_for(PLAN, {}, PLAN, cas=cas)
     node = make_planner_node(rt)
     first = node({"request": "x"}, config_for("r"))
@@ -424,16 +442,47 @@ def test_reentry_after_spec_fail_carries_the_findings_and_prior_criteria() -> No
         "scope_tier": first["scope_tier"],
         "gates": [_spec_verdict(GateStatus.FAIL, (finding,), epoch=1)],
     }
-    second = node(state, config_for("r", step=5))
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        second = node(state, config_for("r", step=5))
 
-    prompt = _prompt(tx)
     assert len(tx.requests) == 3
     assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
-    assert "REVISION PASS" in prompt
+    assert efforts == ["medium", "medium"]
+    prompt = _content(tx.requests[2])
+    assert "REPAIR PASS — the signed Spec gate" in prompt
     assert "no criterion flags security_abuse=true" in prompt
-    assert "id=AC-001 (ticket=T-002)" in prompt and "id=AC-002" in prompt  # keep ids
+    plan = prompt.split("YOUR PREVIOUS PLAN:\n", 1)[1]
+    assert '"id": "T-002"' in plan and '"id": "AC-001"' in plan  # the prior plan, by id
+    assert "todo/api.py" in plan and "Interface contracts:" in plan
     assert "scope_tier" not in second  # single-writer: the first pass's decision holds
     assert "Revised after a Spec-gate failure" in second["agent_journal"][0].summary
+    got = counts.snapshot()
+    assert got["planner.repair.closed"] == 1
+    assert got["planner.finding.security-gap"] == 1
+
+
+def test_a_spec_gate_repair_left_failing_falls_back_to_one_fresh_replan() -> None:
+    cas = ArtifactStore()
+    flagged = _plan(criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]})
+    # Empty delta; the repair leaves an omission open; the fresh re-plan is clean.
+    rt, tx = runtime_for(PLAN, {}, flagged, PLAN, cas=cas)
+    node = make_planner_node(rt)
+    first = node({"request": "x"}, config_for("r"))
+    state: FactoryState = {
+        "request": "x",
+        "artifacts": first["artifacts"],
+        "scope_tier": first["scope_tier"],
+        "gates": [_spec_verdict(GateStatus.FAIL, ("no rate-limit scenario",), epoch=1)],
+    }
+    with telemetry.counting() as counts:
+        node(state, config_for("r", step=5))
+
+    assert len(tx.requests) == 4  # delta, repair, ONE fresh re-plan
+    fresh = _content(tx.requests[3])
+    assert "REVISION PASS" in fresh and "REPAIR PASS" not in fresh
+    assert "id=AC-001 (ticket=T-002)" in fresh and "id=AC-002" in fresh  # keep ids
+    assert counts.snapshot()["planner.repair.fallback"] == 1
 
 
 def test_a_newer_spec_pass_supersedes_an_older_fail() -> None:
@@ -809,12 +858,16 @@ def test_one_to_one_test_tickets_fold_into_their_features_end_to_end() -> None:
 
 def test_flagged_self_review_revises_once_in_node() -> None:
     flagged = _plan(criteria_review={"missing": [], "security_abuse_omissions": ["no rate limit"]})
-    # Even if the revision still flags a gap, there is no third call.
-    rt, tx = runtime_for(flagged, flagged, PLAN)
+    # The repair still flags the gap: one fresh revision follows, never a fourth call.
+    rt, tx = runtime_for(flagged, flagged, flagged, PLAN)
+    efforts = _efforts(rt)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 2
+    assert len(tx.requests) == 3 and efforts == [None, "medium", None]
     assert "SELF-REVIEW REVISION" not in json.dumps(tx.requests[0])
+    repair = _content(tx.requests[1])
+    assert "REPAIR PASS — your own criteria_review" in repair and "no rate limit" in repair
+    assert "YOUR PREVIOUS PLAN:" in repair and '"id": "T-002"' in repair
     assert "SELF-REVIEW REVISION" in _prompt(tx) and "no rate limit" in _prompt(tx)
     assert "Self-revised once" in writes["agent_journal"][0].summary
 
@@ -842,8 +895,8 @@ def test_revision_with_tickets_emits_the_revised_tickets() -> None:
     rt, tx = runtime_for(flagged, revised, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 2
-    assert "same ids for tickets and scenarios" in _prompt(tx)
+    assert len(tx.requests) == 2  # the repair closed the gap
+    assert "keep every id" in _prompt(tx)
     assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 4
     [handle] = [a for a in writes["artifacts"] if a.kind == "ownership_map"]
     assert cas.resolve(handle).unit_criteria["todo/limits.py"] == ("AC-009",)
@@ -1116,7 +1169,8 @@ def test_only_flagged_epics_self_revise_and_their_gaps_are_tagged() -> None:
     )
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 1 + 3 + 1
+    # E2's repair still flags a gap: one fresh self-revision follows.
+    assert len(tx.requests) == 1 + 3 + 2
     revisions = [_epic_of(r) for r in tx.requests if "SELF-REVIEW" in json.dumps(r)]
     assert revisions == ["E2"]
     [critique] = _bodies(cas, writes, "criteria_findings")
@@ -1155,7 +1209,7 @@ def test_spec_fix_naming_a_criterion_reruns_only_its_epic() -> None:
     }
     cas = ArtifactStore()
     node, tx, first = _first_pass(
-        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REVISION PASS"))
+        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REPAIR PASS"))
     )
     state = _failed(first, "criterion E2-AC01: scenario has no then step")
     second = node(state, config_for("r", step=5))
@@ -1186,10 +1240,11 @@ def test_spec_fix_with_a_plan_level_finding_reruns_everything() -> None:
     state = _failed(first, "no criterion flags security_abuse=true")
     node(state, config_for("r", step=5))
     delta, *new = tx.requests[4:]
-    assert DELTA_SOP_KEY in json.dumps(delta)  # it changed nothing: the full re-plan runs
-    assert len(new) == 4
-    assert PLANNER_SOP_KEY in json.dumps(new[0]) and "REVISION PASS" in json.dumps(new[0])
+    assert DELTA_SOP_KEY in json.dumps(delta)  # it changed nothing: the repair runs
+    assert len(new) == 4  # the repair: call 1 and every epic, at medium effort
+    assert PLANNER_SOP_KEY in json.dumps(new[0]) and "REPAIR PASS" in json.dumps(new[0])
     assert sorted(filter(None, map(_epic_of, new))) == ["E1", "E2", "E3"]
+    assert all("REPAIR PASS" in json.dumps(r) for r in new[1:])
 
 
 def test_epics_are_positional_capped_and_validated() -> None:
@@ -1294,7 +1349,7 @@ def test_a_scenario_dropped_by_a_replan_stays_dropped() -> None:
     revised = {**replies["E2"], "tickets": [{**e2[0], "scenarios": [_scn("AC05")]}, e2[1]]}
     cas = ArtifactStore()
     node, tx, first = _first_pass(
-        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REVISION PASS"))
+        cas, ResponseScript(json.dumps(revised), match=_match("YOUR EPIC: E2", "REPAIR PASS"))
     )
     state = _failed(first, "criterion E2-AC01: scenario has no then step")
     second = node(state, config_for("r", step=5))
@@ -1328,11 +1383,13 @@ def test_a_full_replan_pairs_epics_by_title_not_position() -> None:
     cas = ArtifactStore()
     node, tx, first = _first_pass(
         cas,
-        ResponseScript(json.dumps(replan), match=_match(PLANNER_SOP_KEY, "REVISION PASS")),
+        ResponseScript(json.dumps(replan), match=_match(PLANNER_SOP_KEY, "REPAIR PASS")),
         ResponseScript(json.dumps(replies["E3"]), match=_match("YOUR EPIC: E4")),
     )
     node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
-    prompts = {_epic_of(r): json.dumps(r, ensure_ascii=False) for r in tx.requests[4:]}
+    prompts: dict[str | None, str] = {}
+    for r in tx.requests[4:]:  # the repair pass's epic calls, before any fallback
+        prompts.setdefault(_epic_of(r), json.dumps(r, ensure_ascii=False))
     # The API epic moved E2 -> E3: it reproduces its own tickets, re-prefixed.
     assert "E3-T01 [backend] backend T01" in prompts["E3"] and "E3-AC01:" in prompts["E3"]
     # The new E2 continues nothing: the old plan is reference, not ids to reproduce.

@@ -15,7 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from foundry import progress
+from foundry import progress, telemetry
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import TICKET_KIND
 from foundry.cli import defaults, doubles, invoke, output, wiring
@@ -35,6 +35,7 @@ from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import DurableBackends, durable_backends, state_dir_from_env
 from foundry.gates import TwoZoneGateRunner
+from foundry.gates.reuse import VerdictCache
 from foundry.graph.factory_graph import build_factory_graph
 from foundry.graph.gate_wiring import FixPolicy
 from foundry.graph.supervisor import MODE_ASSISTANT, resume_boundary
@@ -50,6 +51,7 @@ from foundry.proxy.token_meter import TokenMeter
 from foundry.schemas.implementation import TaskEvent
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
+from foundry.state.seq import max_epoch
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -389,8 +391,15 @@ def run(
     # Seal the zone-A observation channel (fail-closed forged-results hardening):
     # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
     # gate produces is sealed under the same per-run key the runner verifies.
+    # Gate units re-run on identical inputs reuse the original attested verdicts; under
+    # the run's state dir so a resumed process reuses what the interrupted one judged.
     runner = TwoZoneGateRunner(
-        wiring._zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV, seal_key=os.urandom(32)
+        wiring._zone_b_signer(),
+        records,
+        _SCANNER_REV,
+        _LINEAGE_REV,
+        seal_key=os.urandom(32),
+        verdicts=VerdictCache(run_dir / "verdicts" if run_dir is not None else None),
     )
 
     # -- materialization seam (Phase-1 2b) ------------------------------------
@@ -437,6 +446,7 @@ def run(
     token = set_gate_write_verifier(wiring._gate_verifier(records))
     with (
         progress.sink(log_cb) if log_cb is not None else contextlib.nullcontext(),
+        telemetry.counting() as fire_counts,
         tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
     ):
         try:
@@ -482,7 +492,7 @@ def run(
             # verdict would rank below the stale one it supersedes.
             prior = invoke._prior_values(app, config)
             if prior:
-                rt.epochs.raise_floor(thread_id, invoke._max_epoch(prior, thread_id))
+                rt.epochs.raise_floor(thread_id, max_epoch(prior, thread_id))
             # `spec` is additive and seeded ONLY when provided (request-only runs
             # keep the historical {"request": ...} seed exactly). The product
             # nodes read it off the `spec` channel to ground the IntentBrief/PRD.
@@ -645,6 +655,12 @@ def run(
                     )
                 raise
         finally:
+            if run_dir is not None:
+                # This process's counts only, written even when the run stops or
+                # raises: a caller resuming a run (scripts/bench.py) sums segments.
+                with contextlib.suppress(OSError):
+                    run_dir.mkdir(parents=True, exist_ok=True)
+                    (run_dir / telemetry.COUNTS_FILE).write_text(json.dumps(fire_counts.snapshot()))
             reset_gate_write_verifier(token)
             rt.python_envs.close()  # the run's gate venvs end with the run
             rt.toolchain_cache.close()
@@ -663,6 +679,7 @@ def run(
         mode=mode,
         backend=backend,
     )
+    result = replace(result, hint_counts=fire_counts.snapshot())
     if level_table is not None:
         result = replace(
             result,

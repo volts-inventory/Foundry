@@ -18,14 +18,17 @@ from foundry.agents.implementation.tickets import (
     escalation_pick,
     make_engineering_node,
     pending_escalations,
+    session_digests,
     stopped_tickets,
     task_from_ticket,
 )
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
+    DIGEST_TRIAGE,
     ESCALATE_FALLBACK_TRIAGE,
     ESCALATED_TRIAGE,
+    STOPPED_DIGEST,
     TieredAdapter,
 )
 from foundry.execution.sandbox import Sandbox
@@ -64,13 +67,21 @@ THRASH = "stopped early: read app.py 6 times without changing it — partial wor
 class _Session(_Recorder):
     """A ``_Recorder`` whose session reports ``stop[tid]`` the first ``times`` runs,
     the way proxy-agent reports a turn cap or an early stop, and can make one model
-    call per session through ``proxy`` at the packet's tier."""
+    call per session through ``proxy`` at the packet's tier. A stopped session
+    reports ``digest[tid]`` as its summary, the way proxy-agent does."""
 
     def __init__(
-        self, *, stop: dict[str, str] | None = None, times: int = 99, proxy: Any = None, **kw: Any
+        self,
+        *,
+        stop: dict[str, str] | None = None,
+        times: int = 99,
+        proxy: Any = None,
+        digest: dict[str, str] | None = None,
+        **kw: Any,
     ) -> None:
         super().__init__(**kw)
         self.stop = dict(stop or {})
+        self.digest = dict(digest or {})
         self.times = times
         self.proxy = proxy
         self.tiers: list[tuple[str, str | None]] = []
@@ -91,7 +102,13 @@ class _Session(_Recorder):
                 produced_by="proxy-agent",
                 seq=Seq("run", 0, 0, "proxy-agent", 0),
             )
-            result = result.model_copy(update={"triage": (note,)})
+            triage: tuple[GateTriage, ...] = (note,)
+            if tid in self.digest:
+                head = note.model_copy(
+                    update={"name": DIGEST_TRIAGE, "explanation": self.digest[tid]}
+                )
+                triage = (head, note)
+            result = result.model_copy(update={"triage": triage})
         return result
 
 
@@ -650,6 +667,50 @@ def test_a_stopped_ticket_escalates_on_the_first_failing_wave_check(tmp_path: Pa
     assert len([t for t in out["gate_triage"] if t.name == "escalate-request"]) == 1
 
 
+def test_a_stopped_sessions_digest_reaches_its_escalation_whole(tmp_path: Path) -> None:
+    digest = (
+        f"{STOPPED_DIGEST} the session ended before done; files written: app.py; "
+        "files read: app.py, tests/test_app.py; last check: run 'pytest -q': FAILED: exit 1 "
+        "| E   AssertionError: assert 2 == 1; last actions: "
+        + " -> ".join(["read_file app.py"] * 5)
+        + "; tail-marker"
+    )
+    assert len(digest) > 300
+    local = _Session(
+        stop={"T-001": TURN_CAP},
+        digest={"T-001": digest},
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "T-002": {"app.py": "def two():\n    return 2\n"},
+        },
+    )
+    cloud = _Session(writes={"T-001": {"app.py": "def one():\n    return 1\n"}})
+    _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    context = cloud.packets["T-001"].prior_failures
+    # The stop note and the digest are separate records: neither hides the other.
+    assert f"the earlier attempt reported: {digest}" in context
+    assert any("reported: " + TURN_CAP[:30] in line for line in context)
+
+
+def test_a_finished_session_supersedes_its_tasks_stopped_digest(tmp_path: Path) -> None:
+    digest = f"{STOPPED_DIGEST} the session ended before done; files written: app.py"
+    local = _Session(
+        stop={"T-001": TURN_CAP},
+        digest={"T-001": digest},
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "T-002": {"app.py": "def two():\n    return 2\n"},
+        },
+    )
+    cloud = _Session(writes={"T-001": {"app.py": "def one():\n    return 1\n"}})
+    out, _ran, _store = _wave_run(tmp_path, _tiered(cloud, local), tickets=_two_waves())  # type: ignore[arg-type]
+    assert f"the earlier attempt reported: {digest}" in cloud.packets["T-001"].prior_failures
+    # The escalated session ended with done: a later escalation or restart of T-001
+    # reads no digest, and the stopped session's record is not left on the channel.
+    assert "T-001" not in session_digests(out)
+    assert not any(t.explanation == digest for t in out["gate_triage"])
+
+
 def test_a_final_wave_stop_keeps_its_work_and_never_escalates(tmp_path: Path) -> None:
     # No wave check runs after the last wave: the supervisor's gates (and its cloud
     # fixer, on T1 in hybrid) judge the kept work.
@@ -747,3 +808,41 @@ def test_an_empty_session_error_carries_the_adapter_report(tmp_path: Path) -> No
     msg = str(err.value)
     assert "wrote none of the ticket's files (go.mod)" in msg
     assert "after 40 turn(s)" in msg and "subtype=error_max_turns" in msg
+
+
+def test_a_later_finished_session_retires_a_stopped_early_note() -> None:
+    # T-001's local session stopped early (its own diff, then the stop note); a
+    # later session for T-001 (a restart, an escalation, a rebuild) finished. The
+    # stale stop must not make the next first failure escalate T-001.
+    store = ArtifactStore()
+    stop = GateTriage(
+        name="stopped-early",
+        run_against="task/T-001",
+        explanation=TURN_CAP,
+        produced_by="engineering",
+        seq=Seq("run", 1, 1, "e", 1),
+    )
+
+    def diff(task_id: str, step: int) -> Artifact:
+        return Artifact(
+            kind="feature_diff",
+            uri=f"cas://feature_diff/{task_id}-{step}",
+            produced_by="junior_engineer",
+            task_id=task_id,
+            seq=Seq("run", 1, step, "e", 0),
+        )
+
+    def first(*later: Artifact) -> tuple[dict[str, str], tuple[str, ...]]:
+        state = _check_state(store, _pair(), "app.py:1: error")
+        state = {
+            **state,
+            "artifacts": [*state["artifacts"], *later],
+            "gate_triage": [*state["gate_triage"], stop],
+        }
+        return stopped_tickets(state), _candidates(state, store, stopped_only=True)
+
+    assert first() == ({"T-001": TURN_CAP}, ("T-001",))
+    assert first(diff("T-001", 3)) == ({}, ())
+    assert first(diff("restart-T-001", 3)) == ({}, ())
+    # Another ticket's newer diff leaves T-001's stop standing.
+    assert first(diff("T-002", 3)) == ({"T-001": TURN_CAP}, ("T-001",))

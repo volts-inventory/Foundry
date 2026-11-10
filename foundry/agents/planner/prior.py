@@ -7,8 +7,9 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
+from foundry.agents._common import as_text
 from foundry.agents.planner.assembly import _Fit, _Frame
-from foundry.agents.planner.build import _BRIEF_CAP, _EPIC_KEY, _contract_text, _Epic
+from foundry.agents.planner.build import _BRIEF_CAP, _EPIC_KEY, _clip, _contract_text, _Epic
 from foundry.agents.planner.checks import _declaration_only, _goals_text
 from foundry.agents.planner.prompt import _GATE
 from foundry.agents.planner.readers import (
@@ -172,9 +173,9 @@ def _prior_plan(
     intent = _newest_intent(state, rt)
     brief = (
         "PLAN (from the previous pass):\n"
-        f"Product: {prd.title}\n{_prose(rt, prd.prd_uri)[:_BRIEF_CAP]}"
+        f"Product: {prd.title}\n{_clip(_prose(rt, prd.prd_uri))}"
         + (
-            f"\nArchitecture: {design.title}\n{_prose(rt, design.design_uri)[:_BRIEF_CAP]}\n"
+            f"\nArchitecture: {design.title}\n{_clip(_prose(rt, design.design_uri))}\n"
             f"Components: {', '.join(design.components) or '(none)'}"
             if design
             else ""
@@ -305,15 +306,27 @@ def _epic_revision_text(
     epic_id: str,
     continues: str | None,
     source: tuple[str, str] = _GATE,
+    *,
+    repair: bool = False,
 ) -> str:
     """The revision block of one epic call. ``continues`` is the previous pass's
     epic this one carries on: its tickets are reproduced under this epic's id.
-    Without one, the previous plan's tickets are listed for reference only."""
+    Without one, the previous plan's tickets are listed for reference only. A
+    ``repair`` corrects the carried tickets in place rather than re-deriving them."""
     head = (
-        f"\n\nREVISION PASS — {source[0]} FAILED the previous plan. Return this "
-        "epic's FULL ticket list again"
+        f"\n\n{'REPAIR' if repair else 'REVISION'} PASS — {source[0]} FAILED the previous "
+        "plan. Return this epic's FULL ticket list again"
     )
     tail = f"{source[1]}:\n- " + "\n- ".join(findings) + "\n\n"
+    if prior is not None and continues is not None and repair:
+        head = (
+            f"\n\nREPAIR PASS — {source[0]} faulted the previous plan. Correct this "
+            "epic's ticket list in place and return it in FULL: keep every ticket and "
+            "scenario below that no finding faults exactly as it is (same ids, never "
+            "weakened), and restructure what a finding shows is wrong (give a contract "
+            "its one implementer, add the missing dependency or ticket) so that every "
+            "finding below that concerns this epic is closed.\n"
+        )
     if prior is None or continues is None:
         refs = (
             "\n".join(f"- {t.id} [{t.specialty.value}] {t.title}" for t in prior.tickets)[
@@ -335,19 +348,57 @@ def _epic_revision_text(
 
     lines: list[str] = []
     for t in (t for t in prior.tickets if prior.epic_of[t.id] == continues):
-        lines.append(f"- {rebased(t.id)} [{t.specialty.value}] {t.title} files={list(t.files)}")
+        deps = [rebased(d) for d in t.depends_on if prior.epic_of.get(d) == continues]
+        lines.append(
+            f"- {rebased(t.id)} [{t.specialty.value}] {t.title} files={list(t.files)}"
+            + (f" implements={list(t.implements)}" if t.implements else "")
+            + (f" consumes={list(t.consumes)}" if t.consumes else "")
+            + (f" depends_on={deps}" if deps else "")
+            + (" entrypoint" if t.entrypoint else "")
+        )
         lines += [
             f"    - {rebased(c.id)}: {c.text} (criticality={c.criticality.value}; "
-            f"security_abuse={c.security_abuse})"
+            f"security_abuse={c.security_abuse}"
+            + (f"; covers={list(c.covers)}" if c.covers else "")
+            + ")"
             for c in prior.criteria.values()
             if c.ticket_id == t.id
         ]
-    return (
-        head + ": reproduce every ticket and scenario below (same ids, never weakened; "
+    rule = (
+        ""
+        if repair
+        else ": reproduce every ticket and scenario below (same ids, never weakened; "
         "fix in place any a finding names) AND add scenarios that close every finding "
         "below that concerns this epic.\n"
-        + tail
-        + f"This epic's previous tickets:\n{chr(10).join(lines) or '(none)'}"
+    )
+    return head + rule + tail + f"This epic's previous tickets:\n{chr(10).join(lines) or '(none)'}"
+
+
+def _prior_plan_text(prior: _PriorPlan) -> str:
+    """The previous pass as its repair sees it: the plan brief, contracts and
+    epics, and for an inline plan its tickets with their scenarios (an epic's
+    tickets reach that epic's own call)."""
+    epics = [
+        {
+            "id": e.id,
+            "title": e.title,
+            "summary": e.summary,
+            "depends_on": list(e.depends_on),
+            "provides": list(e.provides),
+            "consumes": list(e.consumes),
+        }
+        for e in prior.epics
+    ]
+    contracts = "\n".join(f"- {n}: {spec}" for n, spec in prior.interfaces)
+    return (
+        prior.brief
+        + f"\nInterface contracts:\n{contracts or '(none)'}"
+        + (f"\nEpics: {as_text(epics)}" if epics else "")
+        + (
+            ""
+            if prior.epics
+            else "\nTickets: " + as_text(_ticket_items(prior.tickets, prior.criteria.values(), {}))
+        )
     )
 
 

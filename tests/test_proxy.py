@@ -970,6 +970,64 @@ def test_wall_clock_hard_kill_recovers_on_its_single_retry():
     assert transport.attempts == 2
 
 
+class _TimeoutTransport:
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def send(self, request: dict[str, Any]) -> ProviderResponse:
+        self.attempts += 1
+        raise RuntimeError("Request timed out.")
+
+
+def test_local_timeout_retries_once_then_fails_closed():
+    transport = _TimeoutTransport()
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        sleeper=lambda _s: None,
+        rate_limit_max_retries=6,
+        local_tiers={"T2"},
+    )
+    with pytest.raises(ProxyUnavailable, match="timed out"):
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert transport.attempts == 2
+
+
+def test_a_local_timeout_retry_thinks_a_level_lower():
+    class _Recording(_TimeoutTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: list[dict[str, Any]] = []
+
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.requests.append(request)
+            return super().send(request)
+
+    transport = _Recording()
+    proxy = ModelProviderProxy(
+        transport,
+        LineageMap(),
+        ZoneBSigner(KEY, KEY_ID),
+        sleeper=lambda _s: None,
+        local_tiers={"T2"},
+        local_thinking="on",
+    )
+    with pytest.raises(ProxyUnavailable, match="not resumed") as caught:
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert [r["local_effort"] for r in transport.requests] == ["xhigh", "medium"]
+    assert caught.value.replayable is False
+
+
+def test_cloud_timeout_still_rides_the_rate_limit_budget():
+    waits: list[float] = []
+    transport = _TimeoutTransport()
+    proxy = _rl_proxy(transport, sleeper=waits.append, rl_retries=3)
+    with pytest.raises(ProxyUnavailable):
+        proxy.complete("n", "T2", "SOP", [{"role": "user", "content": "x"}], purpose="gate")
+    assert transport.attempts == 4
+
+
 def test_every_failed_rate_limit_wait_is_logged(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],

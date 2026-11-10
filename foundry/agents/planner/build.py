@@ -124,6 +124,13 @@ _DROPPED_KEY = "__dropped__"
 
 
 _BRIEF_CAP = 6_000
+_TRUNCATED = " …[truncated]"
+
+
+def _clip(text: str) -> str:
+    """``text`` cut at ``_BRIEF_CAP``, visibly: a repair shown it must rewrite the
+    field rather than copy the cut."""
+    return text if len(text) <= _BRIEF_CAP else text[:_BRIEF_CAP] + _TRUNCATED
 
 
 @dataclass(frozen=True)
@@ -435,10 +442,11 @@ def _epic_content(
     )
 
 
+_A = TypeVar("_A")
 _R = TypeVar("_R")
 
 
-def _run_parallel(fn: Callable[[str], _R], args: Sequence[str]) -> list[_R]:
+def _run_parallel(fn: Callable[[_A], _R], args: Sequence[_A]) -> list[_R]:
     """``fn`` over ``args`` on a thread pool, results in ``args`` order. The first
     failure (e.g. ``TokenCapExceeded``) cancels the calls not yet started and
     propagates once the running ones return."""

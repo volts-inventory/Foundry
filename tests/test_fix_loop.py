@@ -10,7 +10,7 @@ from typing import Any
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents.implementation.junior_engineer import _fix_summary, make_fixer_node
-from foundry.agents.implementation.tickets import pending_wave
+from foundry.agents.implementation.tickets import pending_wave, session_digests
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.sandbox import Sandbox
@@ -337,6 +337,54 @@ def test_a_mass_failure_keeps_its_exception_message() -> None:
     findings = failure_findings(f"{detail}\n=== short test summary info ===\n{tail}\n")
     assert findings.count(cause) == 1
     assert len(failing_ids(findings)) == 50
+
+
+_SITE = "/venv/lib/python3.12/site-packages"
+_PYTEST_SHORT = f"""\
+=================================== FAILURES ===================================
+__________________________________ test_parse __________________________________
+{_SITE}/pytest_bdd/scenario.py:190: in _execute_step_function
+    return_value = call_fixture_func(fixturefunc, request, kwargs)
+tests/test_a.py:13: in then_parsed
+    parse("nope")
+app.py:9: in parse
+    return json.loads(s)
+           ^^^^^^^^^^^^^
+/usr/lib/python3.12/json/decoder.py:356: in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+E   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+_______________________ ERROR collecting tests/test_b.py _______________________
+ImportError while importing test module '/w/tests/test_b.py'.
+Traceback:
+{_SITE}/_pytest/python.py:507: in importtestmodule
+    mod = import_path(
+tests/test_b.py:1: in <module>
+    from app import missing
+E   ImportError: cannot import name 'missing' from 'app' (/w/app.py)
+=========================== short test summary info ============================
+FAILED tests/test_a.py::test_parse - json.decoder.JSONDecodeError: Expecting ...
+ERROR tests/test_b.py
+"""
+
+
+def test_a_failure_excerpt_leads_with_the_exception_and_drops_foreign_frames() -> None:
+    findings = failure_findings(_PYTEST_SHORT)
+    assert findings == (
+        "__________________________________ test_parse __________________________________",
+        "E   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+        "tests/test_a.py:13: in then_parsed",
+        '    parse("nope")',
+        "app.py:9: in parse",
+        "    return json.loads(s)",
+        "_______________________ ERROR collecting tests/test_b.py _______________________",
+        "tests/test_b.py: ImportError: cannot import name 'missing' from 'app' (/w/app.py)",
+        "E   ImportError: cannot import name 'missing' from 'app' (/w/app.py)",
+        "tests/test_b.py:1: in <module>",
+        "    from app import missing",
+        "FAILED tests/test_a.py::test_parse - json.decoder.JSONDecodeError: Expecting ...",
+        "ERROR tests/test_b.py",
+    )
+    assert failing_ids(findings) == ("tests/test_a.py::test_parse", "tests/test_b.py")
 
 
 _PIP = (
@@ -839,10 +887,10 @@ def test_the_window_is_one_boundary_over_one_set_of_ticket_diffs() -> None:
 
 def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
     from foundry.graph.gate_wiring import (
-        _snapshot_blob,
         integrated_files,
         materialize_workdir,
         restore_diff,
+        snapshot_blob,
     )
 
     base = tmp_path / "base"
@@ -884,7 +932,7 @@ def test_a_restore_diff_rebuilds_the_best_tree_exactly(tmp_path: Path) -> None:
         )
 
     snapshot = store.put_blob(
-        _snapshot_blob(
+        snapshot_blob(
             integrated_files(good, resolve=store.resolve, resolve_blob=store.resolve_blob)
         )
     )
@@ -1741,6 +1789,37 @@ def test_a_fix_pass_that_did_not_improve_is_followed_by_a_ticket_restart(
     assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
 
 
+def test_a_restart_is_told_how_its_first_build_session_stopped(tmp_path: Path) -> None:
+    from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
+
+    digest = f"{STOPPED_DIGEST} the session ended before done; files written: a.py"
+
+    class _Stopped(_RestartRecorder):
+        def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+            first = packet.task["id"] == "T-001" and "T-001" not in self.calls
+            result = super().run(packet, sandbox)
+            if not first:
+                return result
+            note = GateTriage(
+                name=DIGEST_TRIAGE,
+                run_against="task/T-001",
+                explanation=digest,
+                produced_by="proxy-agent",
+                seq=Seq("run", 0, 0, "proxy-agent", 0),
+            )
+            return result.model_copy(update={"triage": (note,)})
+
+    rec = _Stopped(
+        writes={"T-001": {"a.py": "def a(:\n"}, "fix-1": {"a.py": "def a_1(:\n"}},
+        again={"T-001": {"a.py": "def a():\n    return 1\n"}},
+    )
+    out, _ran, _store = _wave_run(tmp_path, rec, tickets=_RESTART_TICKETS)
+    memo = rec.packets["T-001"].prior_failures
+    assert memo[0] == "[fresh restart]"
+    assert f"its first build's session ended early: {digest}" in memo
+    assert "T-001" not in session_digests(out)  # the restart's session ended with done
+
+
 def test_a_restarts_gate_check_runs_on_the_reset_tree(tmp_path: Path) -> None:
     from foundry.gates.self_check import current_check
 
@@ -2106,3 +2185,331 @@ def test_a_restart_that_never_lands_does_not_halt_the_loop_as_no_progress(
     assert rec.calls[:5] == ["T-001", "fix-1", "T-001", "T-001", "fix-2"]
     assert not any(a.task_id == "restart-T-001" for a in out["artifacts"])
     assert not any(t.name == NO_FIX_PROGRESS_TRIAGE for t in out.get("gate_triage") or ())
+
+
+def test_a_failed_restart_keeps_its_siblings_rebuild_and_its_own_earlier_build(
+    tmp_path: Path,
+) -> None:
+    from foundry.graph.gate_wiring import materialize_workdir
+
+    rec = _ScriptedRestart(
+        writes={"fix-1": {"a.py": "def a_1(:\n", "c.py": "def c_1(:\n"}},
+        script={
+            "T-001": [{"a.py": "def a(:\n"}, {"a.py": "def a():\n    return 1\n"}],
+            "T-003": [{"c.py": "def c(:\n"}, None, None],
+        },
+    )
+    tickets = [
+        _ticket("T-001", 0, files=("a.py",)),
+        _ticket("T-003", 1, files=("c.py",)),
+        _ticket("T-002", 2, files=("app.py",), deps=("T-001", "T-003")),
+    ]
+    out, _ran, store = _wave_run(tmp_path, rec, max_fix_attempts=6, tickets=tickets)
+    # The wave's sessions run concurrently: count, don't order.
+    assert (rec.calls.count("T-001"), rec.calls.count("T-003")) == (2, 3)
+    passes = sorted(out["fix_passes"], key=lambda p: p.seq)
+    assert passes[1].restart_tickets == ("T-001", "T-003")
+    # Only the landed rebuild is reset and credited as the pass.
+    diffs = [a.task_id for a in out["artifacts"] if a.kind == "feature_diff"]
+    assert "reset-T-001" in diffs and "restart-T-001" in diffs
+    assert not any(d in diffs for d in ("restart-T-003", "reset-T-001+T-003"))
+    assert (passes[2].fix_task, passes[2].touched) == ("restart-T-001", ("a.py",))
+    tree = tmp_path / "tree"
+    materialize_workdir(out, tree, resolve=store.resolve, resolve_blob=store.resolve_blob)
+    assert (tree / "a.py").read_text() == "def a():\n    return 1\n"
+    assert (tree / "c.py").read_text() == "def c_1(:\n"  # T-003's build, as fix-1 left it
+
+
+def test_a_reset_a_kept_rebuild_shares_with_a_failed_tickets_build_is_not_narrowed() -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.graph.gate_wiring import narrow_reset
+
+    store = ArtifactStore()
+    tickets = [_ticket("T-001", 0, files=("src/app/",)), _ticket("T-003", 1, files=("f.py",))]
+    state = _ticket_state(
+        store,
+        tickets,
+        artifacts=[
+            _diff_art(store, "T-001", 1, {"src/app/a.py": "a\n"}),
+            _diff_art(store, "T-003", 2, {"f.py": "f\n", "src/app/f_helpers.py": "h\n"}),
+        ],
+    )
+    kept, failed = read_tickets(state, store.resolve)
+
+    def narrow(deleted: tuple[str, ...]) -> tuple[dict[str, str], tuple[str, ...]] | None:
+        return narrow_reset(
+            state,
+            ({}, deleted),
+            [kept],
+            [failed],
+            resolve=store.resolve,
+            resolve_blob=store.resolve_blob,
+        )
+
+    assert narrow(("f.py", "src/app/a.py")) == ({}, ("src/app/a.py",))
+    # Resetting T-001's scope would delete T-003's earlier helper: no cut keeps both.
+    assert narrow(("f.py", "src/app/a.py", "src/app/f_helpers.py")) is None
+
+
+def test_a_fixer_check_runs_the_scenarios_the_failed_gate_names(monkeypatch) -> None:
+    """The shop run: T08 was never built, so the final gate failed its scenarios
+    while the fixer's check, scoped to the built tickets' scenarios, opened green."""
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+
+    built = "features/T01.feature::S01"
+    red = "features/T08.feature::S17"
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset({built}))
+    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    state = _state(
+        _gate("build", "t", 1, _OK),
+        _gate(
+            "test",
+            "t",
+            2,
+            _RED,
+            f"BDD criterion S17: scenario {red} was not executed",
+            "FAILED tests/test_app.py::test_add - assert 1 == 2",
+        ),
+    )
+    spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
+    assert spec.scope == frozenset({built, red})
+
+
+# ---- a skipped ticket: rebuilt by the fix loop, or left to a re-plan ------------
+
+_SKIP_BDD = "BDD criterion AC-2: scenario features/T-002.feature::AC-2 was not executed"
+
+
+def _note(name: str, tid: str, local: int, text: str = "x") -> GateTriage:
+    return GateTriage(
+        name=name,
+        run_against=f"task/{tid}",
+        explanation=text,
+        produced_by="engineering",
+        seq=Seq("run", 1, local, "engineering", 0),
+    )
+
+
+def _skipped_state(store: ArtifactStore, *notes: GateTriage) -> FactoryState:
+    """T-001 built; T-002 (tests only, carrying AC-2) failed both attempts: skipped."""
+    tickets = [
+        _ticket("T-001", 0, files=("a.py",)),
+        _ticket("T-002", 1, files=("tests/test_b.py",), scenario_ids=("AC-2",)),
+    ]
+    state = _ticket_state(
+        store, tickets, artifacts=[_diff_art(store, "T-001", 1, {"a.py": "x = 1\n"})]
+    )
+    return {
+        **state,
+        "gate_triage": [
+            _note("ticket-failed:1", "T-002", 1, "attempt 1 failed: no steps module"),
+            _note("ticket-failed:2", "T-002", 2, "attempt 2 failed: wrote nothing"),
+            _note("ticket-skipped", "T-002", 3),
+            *notes,
+        ],
+    }
+
+
+def test_a_skipped_ticket_is_restartable_once_and_not_once_left_to_a_replan() -> None:
+    from foundry.graph.gate_wiring import RESTARTED_TRIAGE, restart_set
+
+    store = ArtifactStore()
+    state = _skipped_state(store)
+    # Never built, and of tests only: still rebuilt (there is nothing to rewrite).
+    assert restart_set(state, store.resolve, ["T-002"]) == ("T-002",)
+    spent = _skipped_state(store, _note(RESTARTED_TRIAGE, "T-002", 4))
+    assert restart_set(spent, store.resolve, ["T-002"]) == ()
+    replan = _skipped_state(store, _note("ticket-replan", "T-002", 4))
+    assert restart_set(replan, store.resolve, ["T-002"]) == ()
+
+
+def test_a_skipped_tickets_failing_scenarios_rebuild_it_on_the_first_pass() -> None:
+    from foundry.graph.gate_wiring import keep_best
+
+    store = ArtifactStore()
+    state = _skipped_state(store)
+    out: dict[str, Any] = {
+        "gates": [
+            _gate("build", "t1", 5, _OK),
+            _gate("test", "t1", 6, _RED, _SKIP_BDD, _FAIL_A, _FAIL_B),
+        ]
+    }
+    keep_best(
+        state,
+        _config(),
+        out,
+        boundary=BUILD_TEST_BOUNDARY,
+        scope=frozenset(),
+        rt=_runtime(None, store),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+        rerun=lambda s: {},
+    )
+    [entry] = out["fix_passes"]
+    # The bigger cluster would go first; the missing ticket is built before any repair.
+    assert entry.outcome == "initial"
+    assert (entry.target, entry.restart_tickets) == ("ticket:T-002", ("T-002",))
+
+
+def _pending_skip_restart(store: ArtifactStore, *notes: GateTriage) -> FactoryState:
+    state = _skipped_state(store, *notes)
+    window = fix_window(state, BUILD_TEST_SMOKE_BOUNDARY, frozenset())
+    entry = FixPass(
+        window=window,
+        boundary=BUILD_TEST_SMOKE_BOUNDARY,
+        pass_no=0,
+        tree="t1",
+        score=(-1, 1, 1),
+        failing=("test:features/T-002.feature::AC-2",),
+        outcome="initial",
+        target="ticket:T-002",
+        restart_tickets=("T-002",),
+        seq=Seq("run", 2, 0, "fix_pass", 0),
+    )
+    return {
+        **state,
+        "fix_passes": [entry],
+        "gates": [_gate("build", "t1", 1, _OK), _gate("test", "t1", 2, _RED, _SKIP_BDD)],
+        "budget": BudgetLedger(fix_attempts_since_all_green=1),
+    }
+
+
+def _engineering(tmp_path: Path, rec: Any, store: ArtifactStore) -> Any:
+    from foundry.agents.implementation.tickets import make_engineering_node
+
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / "README.md").write_text("base\n")
+    return make_engineering_node(
+        _runtime(rec, store),
+        source_dir=str(src),
+        resolve=store.resolve,
+        resolve_blob=store.resolve_blob,
+    )
+
+
+def test_a_planned_rebuild_of_a_skipped_ticket_is_told_its_failed_attempts(
+    tmp_path: Path,
+) -> None:
+    from foundry.graph.gate_wiring import RESTARTED_TRIAGE
+
+    store = ArtifactStore()
+    rec = _Recorder()
+    out = _engineering(tmp_path, rec, store)(_pending_skip_restart(store), _config())
+    assert rec.calls == ["T-002"]
+    memo = rec.packets["T-002"].prior_failures
+    assert memo[0] == "[fresh restart]"
+    assert memo[1].startswith("ticket T-002 was never built: its 2 attempt(s) failed")
+    assert memo[2:4] == (
+        "attempt 1 failed: no steps module",
+        "attempt 2 failed: wrote nothing",
+    )
+    assert "restart-T-002" in [a.task_id for a in out["artifacts"] if a.kind == "feature_diff"]
+    [spent] = [t for t in out["gate_triage"] if t.name == RESTARTED_TRIAGE]
+    assert spent.explanation.startswith("built after it was skipped (2 failed attempt(s))")
+
+
+class _GuardRejects(_Recorder):
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        from foundry.agents.implementation.tickets.contracts import SignatureChangeError
+
+        self.calls.append(str(packet.task["id"]))
+        raise SignatureChangeError("b.py: Shop.add's parameters changed")
+
+
+def test_a_build_the_signature_guard_rejects_is_counted(tmp_path: Path) -> None:
+    store = ArtifactStore()
+    state = _ticket_state(store, [_ticket("T-001", 0, files=("a.py",))])
+    out = _engineering(tmp_path, _GuardRejects(), store)(state, _config())
+    notes = {t.name: t.explanation for t in out["gate_triage"]}
+    assert notes["signature-rejected:1"] == "b.py: Shop.add's parameters changed"
+    assert "ticket-replan" not in notes
+
+
+def test_a_rebuild_the_signature_guard_rejects_again_goes_to_a_replan(tmp_path: Path) -> None:
+    from foundry.graph.gate_wiring import restart_set
+
+    store = ArtifactStore()
+    state = _pending_skip_restart(
+        store, _note("signature-rejected:1", "T-002", 4, "b.py: Shop.add's parameters changed")
+    )
+    rec = _GuardRejects()
+    out = _engineering(tmp_path, rec, store)(state, _config())
+    assert rec.calls == ["T-002"]  # no lenient retry: the plan, not the session, is wrong
+    notes = {t.name: t.explanation for t in out["gate_triage"]}
+    assert "signature-rejected:2" in notes
+    assert "the planned interface is likely wrong" in notes["ticket-replan"]
+    assert "Shop.add's parameters changed" in notes["ticket-replan"]
+    merged: FactoryState = {**state, "gate_triage": [*state["gate_triage"], *out["gate_triage"]]}
+    assert restart_set(merged, store.resolve, ["T-002"]) == ()
+
+
+def test_a_fixer_check_runs_smoke_when_smoke_failed(monkeypatch) -> None:
+    """The shop run: smoke failed (no smoke.py) but the fixer's check ran only the
+    build and the scenarios, so the fixer never saw it."""
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset())
+    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    smoke = "smoke command exited 2: python: can't open file './smoke.py'"
+    red = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _RED, smoke))
+    spec = je._fix_check(object(), red, lambda uri: None)  # type: ignore[arg-type]
+    assert spec.smoke and spec.own_smoke
+    green = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _OK))
+    assert not je._fix_check(object(), green, lambda uri: None).smoke  # type: ignore[arg-type]
+
+
+_IMPORT_FAIL = (
+    "BDD criterion AC-1: scenario features/T-001.feature::AC-1 was not executed — "
+    "tests/test_a.py binds it, but pytest failed to import that module (`ERROR "
+    "collecting tests/test_a.py` in the output), so none of its scenarios ran: fix the "
+    "import error the traceback shows"
+)
+_IMPORT_BLOCK = (
+    "______________________ ERROR collecting tests/test_a.py _______________________",
+    "ImportError while importing test module '/tmp/x/tests/test_a.py'.",
+    "E   ImportError: cannot import name 'OrderRoutesImpl' from 'app.routes' (/tmp/x/routes.py)",
+    "ERROR tests/test_a.py",
+)
+
+
+def test_the_fixer_binding_rule_names_the_failed_import_not_a_rebind() -> None:
+    """The fixer's generic rule ("point the step module's binding at it") overrode
+    the gate's import-error reason: the binding was in place, the import was wrong."""
+    from foundry.agents.implementation.junior_engineer import _FIXER_RULES, _binding_rule
+
+    failed = [_gate("test", "t", 2, _RED, _IMPORT_FAIL, *_IMPORT_BLOCK)]
+    # The cluster's scoped view may have cut the collect block: it is read off all.
+    scoped = [_gate("test", "t", 2, _RED, _IMPORT_FAIL)]
+    rule = _binding_rule(scoped, failed, ("app/contracts.py",))
+    assert "point the step module's binding" not in rule
+    assert (
+        "tests/test_a.py: ImportError: cannot import name 'OrderRoutesImpl' from 'app.routes')"
+        in rule
+    )
+    assert "keep each `scenarios(...)` binding" in rule
+    assert "contract files (app/contracts.py)" in rule
+    assert "/tmp/x" not in rule
+    unbound = [_gate("test", "t", 2, _RED, _BDD)]
+    assert _binding_rule(unbound, unbound, ()) == _FIXER_RULES[2]
+
+
+def test_a_fixer_pass_is_fenced_to_its_cluster_and_its_owning_tickets() -> None:
+    from foundry.agents.implementation.junior_engineer import _fix_files
+
+    store = ArtifactStore()
+    tree = {"a.py": "x\n", "tests/test_b.py": "y\n", "admin.py": "z\n"}
+    state = _scoped_state(store, "ticket:T-002")
+    assert _fix_files(state, store.resolve, tree) == ("tests/test_b.py",)
+    # No planned cluster: no fence.
+    assert _fix_files(_scoped_state(store, None), store.resolve, tree) == ()
+    # A scenario's cluster admits the step modules that bind its feature file.
+    state = _scoped_state(store, "ticket:T-001")
+    bdd = "BDD criterion AC-1: scenario features/T-001.feature::AC-1 failed"
+    state["gates"] = [*state["gates"][:1], _gate("test", "t1", 2, _RED, _A1, bdd, _B1)]
+    tree["tests/steps/test_t1.py"] = 'scenarios("../features/T-001.feature")\n'
+    fence = _fix_files(state, store.resolve, tree)
+    assert {"tests/test_a.py", "tests/steps/test_t1.py", "a.py"} <= set(fence)
+    assert "admin.py" not in fence and "tests/test_b.py" not in fence

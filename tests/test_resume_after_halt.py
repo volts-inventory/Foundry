@@ -132,7 +132,7 @@ def test_resume_after_a_spec_halt_reenters_the_planner_revision(tmp_path: Path) 
     ran = _stream(app, {"request": "build a todo app", "phase": RESUME_PHASE}, cfg, records)
     assert ran[:3] == ["triage", "spec_fix", "planner"]
     prompts = [json.dumps(r) for r in tx.requests if PLANNER_SOP_KEY in json.dumps(r)]
-    assert len(prompts) == 2 and "REVISION PASS" in prompts[1]  # a revision, not a re-plan
+    assert len(prompts) == 2 and "REPAIR PASS" in prompts[1]  # a repair, not a re-plan
     spec = [g for g in app.get_state(cfg).values["gates"] if g.name == "spec"]
     assert max(spec, key=lambda g: g.seq).status is GateStatus.PASS
 

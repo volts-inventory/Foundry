@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+import re
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
@@ -53,6 +54,55 @@ def skeleton_files(
         return {}
 
 
+def revised_stubs(
+    tickets: Sequence[Ticket],
+    contracts: Mapping[str, InterfaceContract],
+    contract_texts: Mapping[str, str],
+) -> dict[str, str]:
+    """The typed stubs of ``tickets`` regenerated from the newest ``contracts``: a
+    ticket whose interface the planner revised is held to the revised signatures,
+    not the skeleton's."""
+    if not contract_texts:
+        return {}
+    sk = python_skeleton(list(contracts.values()), tickets, contract_texts)
+    owned = {f for t in tickets for f in t.files}
+    return {p: text for p, text in sk.files.items() if p in owned}
+
+
+def restub_revised(
+    wave: Sequence[Ticket],
+    revised: Collection[str],
+    restarts: Collection[str],
+    skeleton: dict[str, str],
+    contracts: Mapping[str, InterfaceContract],
+    contract_texts: Mapping[str, str],
+    reset: tuple[dict[str, str], tuple[str, ...]],
+) -> tuple[dict[str, dict[str, str]], tuple[dict[str, str], tuple[str, ...]]]:
+    """Hold every build of a ticket whose interface the planner revised to the
+    revised stubs: they replace its plan-time stubs in ``skeleton`` (the guard's
+    reference), and a restart's reset puts them back instead of the plan-time ones
+    the tree before the ticket holds. Returns the revised stubs per task id and the
+    reset."""
+    from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
+
+    restubbed: dict[str, dict[str, str]] = {}
+    if not skeleton:
+        return restubbed, reset
+    for t in wave:
+        tid = task_id_for_ticket(t.id)
+        if tid not in revised:
+            continue
+        fresh = revised_stubs([t], contracts, contract_texts)
+        restubbed[tid] = {p: text for p, text in fresh.items() if p in skeleton}
+        skeleton.update(restubbed[tid])
+    back = {
+        p: text for tid, files in restubbed.items() if tid in restarts for p, text in files.items()
+    }
+    if back:
+        reset = ({**reset[0], **back}, tuple(p for p in reset[1] if p not in back))
+    return restubbed, reset
+
+
 def stub_rules(
     ticket: Ticket, skeleton: Mapping[str, str], contracts: Mapping[str, InterfaceContract]
 ) -> list[str]:
@@ -67,10 +117,10 @@ def stub_rules(
             "the planned contracts: each planned function and method with its exact "
             "signature and a `raise NotImplementedError` body (a contract class is "
             "implemented by the concrete subclass of it the stub declares). Fill in "
-            "every body and add whatever private helpers you need; never rename or "
-            "remove a stubbed class, function or method, and never change its "
-            "parameters or return annotation (checked: a changed public signature "
-            "fails the attempt)."
+            "every body and add an `__init__`, private helpers or extra methods as you "
+            "need; never rename or remove a stubbed class, function or method, and "
+            "never change its parameters or return annotation (checked: a changed "
+            "public signature fails the attempt)."
         )
     impls: dict[str, str] = {}  # contract class -> "XImpl in path"
     for path, text in skeleton.items():
@@ -80,15 +130,7 @@ def stub_rules(
             base = sig.removeprefix("class ").strip()
             if sig.startswith("class ") and base.isidentifier():
                 impls[base] = f"{name} in {path}"
-    wanted = {
-        n
-        for c in ticket.consumes
-        for n in (
-            c,
-            c.rpartition(".")[0],
-            *(contract_members(contracts[c].signature) if c in contracts else ()),
-        )
-    }
+    wanted = _consumed_names(ticket, contracts)
     named = [
         f"{cls} is implemented by {where}" for cls, where in sorted(impls.items()) if cls in wanted
     ]
@@ -98,6 +140,54 @@ def stub_rules(
             "by these names and annotate with the contract types."
         )
     return rules
+
+
+def _consumed_names(ticket: Ticket, contracts: Mapping[str, InterfaceContract]) -> set[str]:
+    """Every name a ticket's consumed contracts declare (a method contract's class too)."""
+    return {
+        n
+        for c in ticket.consumes
+        for n in (
+            c,
+            c.rpartition(".")[0],
+            *(contract_members(contracts[c].signature) if c in contracts else ()),
+        )
+    }
+
+
+def shared_stub_names(
+    ticket: Ticket,
+    tickets: Sequence[Ticket],
+    stubs: Mapping[str, str],
+    contracts: Mapping[str, InterfaceContract],
+    tree: Mapping[str, str | None],
+) -> frozenset[str]:
+    """The top-level names of ``ticket``'s typed ``stubs`` some other ticket depends
+    on: a contract it consumes declares the name (or the base a stubbed class
+    implements, which its IMPLEMENTATIONS rule names), or its plan text or its files
+    in ``tree`` mention it."""
+    declared: dict[str, set[str]] = {}  # top-level name -> its bases (a class)
+    for text in stubs.values():
+        for name, sig in (stub_signatures(text) or {}).items():
+            if "." not in name:
+                parts = sig.removeprefix("class ").split(",") if sig.startswith("class ") else []
+                declared[name] = {b.strip() for b in parts if b.strip()}
+    out: set[str] = set()
+    for other in tickets:
+        if other.id == ticket.id:
+            continue
+        wanted = _consumed_names(other, contracts)
+        text = "\n".join(
+            [
+                other.title,
+                other.description,
+                *(t for f in other.files if f not in stubs and isinstance(t := tree.get(f), str)),
+            ]
+        )
+        for name, bases in declared.items():
+            if name in wanted or bases & wanted or re.search(rf"\b{re.escape(name)}\b", text):
+                out.add(name)
+    return frozenset(out)
 
 
 def _skeleton_diff(

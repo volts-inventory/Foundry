@@ -18,8 +18,10 @@ import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
+from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy import ToolsUnsupported
+from foundry.state.reducers import union_triage
 
 
 def make_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
@@ -135,6 +137,51 @@ def test_turn_budget_bounds_the_loop(tmp_path: Path) -> None:
         result = adapter.run(make_packet(sb.worktree, turn_budget=3), sb)
     assert result.turns_used == 3
     assert any("turn budget exhausted" in t.explanation for t in result.triage)
+
+
+def test_a_session_cut_off_before_done_leaves_a_digest_summary(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "data.txt").write_text("x\n")
+    failing = "python -c 'assert 1 == 2, \"boom\"'"
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "read_file", "path": "data.txt"},
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "run", "cmd": failing},
+                {"action": "search", "pattern": "X ="},
+            ]
+        )
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=4), sb)
+    head, *rest = result.triage
+    assert head.name == DIGEST_TRIAGE and head.explanation.startswith(STOPPED_DIGEST)
+    digest = head.explanation
+    assert "files written: mod.py" in digest and "files read: data.txt" in digest
+    assert "FAILED: exit 1" in digest and "AssertionError: boom" in digest
+    assert digest.endswith(
+        "last actions: read_file data.txt -> write_file mod.py -> "
+        f"run {failing!r} -> search 'X =' in ."
+    )
+    assert [t.name for t in rest] == ["adapter-report"]
+    assert rest[0].explanation.startswith("turn budget exhausted")
+    # Its own record name: the stop note folding into the task's one adapter-report
+    # on the state channel does not take the digest with it.
+    assert {t.name for t in union_triage([], list(result.triage))} == {
+        DIGEST_TRIAGE,
+        "adapter-report",
+    }
+
+
+def test_a_finished_session_has_no_digest(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(scripted([{"action": "done", "summary": "built"}]))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+    assert all(t.name != DIGEST_TRIAGE for t in result.triage)
 
 
 def _repair_packet(worktree: Path, turn_budget: int = 6) -> TaskPacket:
@@ -637,6 +684,91 @@ def test_accepted_write_is_unchanged_and_gets_mypy_advice(tmp_path: Path) -> Non
     assert not any(".mypy_cache" in p for p in tree)
 
 
+_SERVICES = "class AdminService:\n    def ban(self, uid: int) -> None: ...\n"
+# A local fixer wrote a test importing names its module never defined; nothing said so
+# until the gate, an hour later.
+_BAD_TEST = "from app.services import AdminServiceImpl\n\n\ndef test_x() -> None:\n    pass\n"
+
+
+def test_a_written_module_importing_a_missing_name_is_reported_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+
+    cached: list[bool] = []
+    real = proxy_agent._mypy_advisory
+
+    def _spy(sandbox: Sandbox, *args: Any) -> str:
+        out = real(sandbox, *args)
+        cached.append((Path(sandbox.worktree).parent / "mypy-cache").is_dir())
+        return out
+
+    monkeypatch.setattr(proxy_agent, "_mypy_advisory", _spy)
+    seed = {"app/__init__.py": "", "app/services.py": _SERVICES}
+    write = {"action": "write_file", "path": "tests/test_T08.py", "content": _BAD_TEST}
+    obs, tree = write_session(tmp_path, [write, {**write, "content": _BAD_TEST + "\n"}], seed)
+    for o in obs[:2]:
+        assert 'Module "app.services" has no attribute "AdminServiceImpl"' in o, o
+    # The cache persists beside the worktree for the session (a write importing
+    # pydantic + langgraph: 2.7s cold, 0.16s warm; 2.5s every write without it),
+    # never in the diff.
+    assert cached == [True, True]
+    assert not any("mypy" in p for p in tree)
+
+
+@pytest.mark.parametrize("mode", ["off", "local"])
+def test_every_python_write_is_type_checked_whatever_the_self_check_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    monkeypatch.setenv("FOUNDRY_SELF_CHECK", mode)
+    obs, _ = write_session(
+        tmp_path,
+        [
+            {
+                "action": "write_file",
+                "path": "typed.py",
+                "content": "def f() -> str:\n    return 1\n",
+            }
+        ],
+    )
+    assert "typed.py:2: error: Incompatible return value type" in obs[0], obs[0]
+
+
+@pytest.mark.parametrize(
+    ("typecheck", "strict"),
+    [
+        ("mypy --strict .", True),
+        ("mypy --strict-optional --strict-equality .", False),
+        ("mypy .", False),
+    ],
+)
+def test_the_write_check_is_strict_only_on_the_exact_strict_flag(
+    monkeypatch: pytest.MonkeyPatch, typecheck: str, strict: bool
+) -> None:
+    from types import SimpleNamespace
+
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+    import foundry.gates.self_check as self_check
+
+    spec = SimpleNamespace(
+        base=SimpleNamespace(state={"stack": SimpleNamespace(typecheck=typecheck)})
+    )
+    monkeypatch.setattr(self_check, "current_check", lambda: spec)
+    assert ("--strict" in proxy_agent._write_check_flags()) is strict
+
+
+def test_a_type_check_that_times_out_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.execution.adapters.proxy_agent as proxy_agent
+
+    monkeypatch.setattr(proxy_agent, "_MYPY_TIMEOUT_S", 0.01)
+    obs, _ = write_session(
+        tmp_path, [{"action": "write_file", "path": "ok.py", "content": "x = 1\n"}]
+    )
+    assert "NOTE: type check timed out" in obs[0]
+
+
 def runs(n: int) -> list[dict[str, Any]]:
     return [{"action": "run", "cmd": f"echo filler-{i}"} for i in range(n)]
 
@@ -904,6 +1036,27 @@ def test_native_tool_calls_in_one_turn_run_in_order_as_tool_results(tmp_path: Pa
     assert "first" in res[1]["content"]
     assert res[3]["content"].startswith("exit 0") and "second" in res[3]["content"]
     assert [t.explanation for t in result.triage] == ["built", "no docs"]
+
+
+def test_a_native_write_gets_the_type_check_too(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "app").mkdir(parents=True)
+    (src / "app/__init__.py").write_text("")
+    (src / "app/services.py").write_text(_SERVICES)
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns(
+            [
+                [("write_file", {"path": "tests/test_T08.py", "content": _BAD_TEST})],
+                [("done", {"summary": "built"})],
+            ],
+            seen,
+        ),
+    )
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree), sb)
+    assert "AdminServiceImpl" in results_of(seen[1])[0]["content"]
 
 
 def test_native_containment_and_lint_apply_per_tool_call(tmp_path: Path) -> None:
@@ -1419,3 +1572,114 @@ def test_native_sessions_get_the_install_note_and_done_refusal(tmp_path: Path) -
         assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
     assert f"NOTE: {_BCRYPT_NOTE}" in results_of(seen[1])[0]["content"]
     assert results_of(seen[2])[0]["content"].startswith("ERROR: not done —")
+
+
+# ---- a fixer pass's write fence (packet fix_files) --------------------------------
+
+
+def _fenced_packet(worktree: Path) -> TaskPacket:
+    packet = make_packet(worktree)
+    task = {**packet.task, "fix_files": ["tests/test_b.py"]}
+    return packet.model_copy(update={"task": task, "prior_failures": ("x",)})
+
+
+def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) -> None:
+    # The shop fixer, sent for a failing test, rewrote admin.py and broke the routes.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "routes.py").write_text("R = 1\n")
+    seen: list[dict[str, Any]] = []
+    actions = iter(
+        [
+            {"action": "write_file", "path": "admin.py", "content": "X = 1\n"},
+            {"action": "delete_file", "path": "routes.py"},
+            {"action": "write_file", "path": "tests/test_b.py", "content": "Y = 1\n"},
+            {
+                "action": "write_file",
+                "path": "app.py",
+                "content": "Z = 1\n",
+                "reason": "the test imports create_app, which app.py never defined",
+            },
+            {"action": "write_file", "path": "app.py", "content": "Z = 2\n"},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        assert "reason" in schema["properties"]
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    refused = [str(m["content"]) for m in seen[1:3]]
+    assert all("outside this fix pass's target. Edit only: tests/test_b.py" in r for r in refused)
+    assert "`reason`" in refused[0]
+    # The reasoned write lands and admits its file; the unreasoned ones never do.
+    assert body["files"] == {"tests/test_b.py": "Y = 1\n", "app.py": "Z = 2\n"}
+    assert "deleted" not in body
+    assert any(
+        t.explanation.startswith("fix pass changed app.py outside its target: the test imports")
+        for t in result.triage
+    )
+
+
+def test_a_fenced_fixers_run_cannot_edit_outside_its_target(tmp_path: Path) -> None:
+    # `sed -i` / a redirect in a `run` would slip past the write_file fence.
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "admin.py").write_text("A = 1\n")
+    (src / "routes.py").write_text("R = 1\n")
+    (src / "app.py").write_text("Z = 0\n")
+    (src / "tests" / "test_b.py").write_text("B = 1\n")
+    seen: list[dict[str, Any]] = []
+    shell = (
+        "sed -i.orig 's/1/2/' admin.py tests/test_b.py && rm admin.py.orig tests/test_b.py.orig"
+        " && rm routes.py && echo 'N = 1' > new.py && echo 'Z = 3' > app.py"
+    )
+    actions = iter(
+        [
+            {"action": "write_file", "path": "app.py", "content": "Z = 1\n", "reason": "needed"},
+            {"action": "run", "cmd": shell},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+        wt = sb.worktree
+        assert (wt / "admin.py").read_text() == "A = 1\n"
+        assert (wt / "routes.py").read_text() == "R = 1\n"
+        assert not (wt / "new.py").exists()
+    observation = str(seen[2]["content"])
+    assert "REVERTED:" in observation
+    assert "admin.py, new.py, routes.py." in observation
+    assert "`reason`" in observation
+    # In the target, or admitted by an earlier reason: the run's edit stands.
+    assert body["files"] == {"tests/test_b.py": "B = 2\n", "app.py": "Z = 3\n"}
+
+
+def test_native_tools_offer_the_reason_only_to_a_fenced_session(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    offered: list[Any] = []
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        offered.append(tools)
+        return "", [{"id": "d", "name": "done", "input": {"summary": "ok"}}]
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(no_json, tool_complete_fn=_tools).run(_fenced_packet(sb.worktree), sb)
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(no_json, tool_complete_fn=_tools).run(make_packet(sb.worktree), sb)
+    write = {t["name"]: t for t in offered[0]}["write_file"]
+    assert "reason" in write["input_schema"]["properties"]
+    assert offered[-1] is TOOLS

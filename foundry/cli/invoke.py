@@ -7,14 +7,13 @@ import contextlib
 import os
 import sys
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from foundry import progress
 from foundry.graph.supervisor import RESUME_PHASE
 from foundry.proxy.model_provider_proxy import is_transient_failure
 from foundry.proxy.token_meter import BuildStopped, TimeCapExceeded, TokenMeter
-from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -129,17 +128,6 @@ def _prior_values(app: Any, config: RunnableConfig) -> dict[str, Any]:
         return dict(app.get_state(config).values or {})
     except Exception:  # no checkpointer/thread: a fresh run
         return {}
-
-
-def _max_epoch(values: Mapping[str, Any], run_id: str) -> int:
-    """The highest ``emission_epoch`` among this run's records on ``values``."""
-    top = 0
-    for value in values.values():
-        for item in value if isinstance(value, list) else (value,):
-            seq = getattr(item, "seq", None)
-            if isinstance(seq, Seq) and seq.run_id == run_id:
-                top = max(top, seq.emission_epoch)
-    return top
 
 
 def _resume_seed(app: Any, config: RunnableConfig, seed: FactoryState) -> FactoryState:

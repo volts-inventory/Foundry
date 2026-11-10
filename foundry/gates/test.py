@@ -386,29 +386,73 @@ _BLOCK_END = re.compile(r"^(?:_{3,} |={3,})", re.MULTILINE)
 # Structured key: {errored module: "tree" | "harness"} for a run pytest interrupted.
 COLLECT_ERRORS_KEY = "collect_errors"
 # The trusted modules the bootstrap imports before any workdir code (plus pytest's
-# internals and plugin manager): an import error naming one is the harness's, not the tree's.
+# internals and plugin manager): the harness's own import failing is not the tree's.
 _HARNESS_MODULES = frozenset({"pytest", "_pytest", "pytest_bdd", "pluggy"})
 _IMPORT_NAMED = re.compile(
     r"No module named '([A-Za-z_][\w.]*)'|cannot import name '[^']*' from '([A-Za-z_][\w.]*)'"
 )
+_ROOTDIR = re.compile(r"^rootdir: (\S+)", re.MULTILINE)
+
+
+def _collected_path(mod: str, roots: list[Path], tree: Path) -> Path | None:
+    """The tree file pytest's ``mod`` names. pytest prints collect paths relative to
+    its rootdir, which a ``pytest.ini`` / ``conftest.py`` under ``tests/`` moves below
+    the workdir (and ``-q`` hides the ``rootdir:`` line): a path under no known root
+    is matched by suffix against the tree's files when exactly one matches."""
+    for root in roots:
+        path = (root / mod).resolve()
+        if path.is_relative_to(tree) and path.is_file():
+            return path
+    parts = PurePosixPath(mod).parts
+    if mod.startswith("/") or ".." in parts:
+        return None
+    hits = [
+        p
+        for p in tree.rglob(parts[-1])
+        if p.relative_to(tree).parts[-len(parts) :] == parts
+        and not any(s.startswith(".") for s in p.relative_to(tree).parts)
+        and p.is_file()
+    ]
+    return hits[0].resolve() if len(hits) == 1 else None
+
+
+def _harness_owned(block: str, tree: Path) -> bool:
+    """Did this collection error die in the harness? When a harness module itself is
+    missing, or the import failed inside code outside the tree — not the tree's own
+    ``from pytest_bdd import <a name it does not export>``, whose innermost frame is
+    the tree's module."""
+    errors = _IMPORT_NAMED.findall(block)
+    if any(missing in _HARNESS_MODULES for missing, _ in errors):
+        return True
+    frames = [m.group(1) for s in block.splitlines() if (m := _FRAME_OPEN.match(s.strip()))]
+    if frames:
+        last = frames[-1]
+        if _tree_frame(last) or (
+            last.startswith("/") and Path(last).resolve().is_relative_to(tree)
+        ):
+            return False
+        if _HARNESS_MODULES & set(last.split("/")):
+            return True
+    return any((a or b).split(".", 1)[0] in _HARNESS_MODULES for a, b in errors)
 
 
 def collect_error_owners(output: str, workdir: Path) -> dict[str, str]:
     """Each module pytest failed to collect -> ``"tree"`` when it is a file of the
     tree whose import died for the tree's own reasons (a missing tree module or name,
-    a syntax error, an undeclared dependency), else ``"harness"`` (a module outside
-    the tree, or an import error naming the pinned harness)."""
-    blocks: dict[str, str] = {}
+    a syntax error, an undeclared dependency, a name the harness does not export),
+    else ``"harness"`` (a module outside the tree, or a failure in the harness)."""
+    tree = Path(workdir).resolve()
+    roots = [tree / r for r in _ROOTDIR.findall(output)] + [tree]
+    blocks: dict[Path, str] = {}
     for m in _COLLECT_BLOCK.finditer(output):
         end = _BLOCK_END.search(output, m.end())
-        blocks[m.group(1)] = output[m.end() : end.start() if end else len(output)]
-    root = Path(workdir).resolve()
+        if (path := _collected_path(m.group(1), roots, tree)) is not None:
+            blocks[path] = output[m.end() : end.start() if end else len(output)]
     out: dict[str, str] = {}
     for mod in dict.fromkeys(_COLLECT_ERROR.findall(output)):
-        path = (root / mod).resolve()
-        named = {(a or b).split(".", 1)[0] for a, b in _IMPORT_NAMED.findall(blocks.get(mod, ""))}
-        in_tree = path.is_relative_to(root) and path.is_file()
-        out[mod] = "tree" if in_tree and not named & _HARNESS_MODULES else "harness"
+        path = _collected_path(mod, roots, tree)
+        harness = path is None or _harness_owned(blocks.get(path, ""), tree)
+        out[mod] = "harness" if harness else "tree"
     return out
 
 

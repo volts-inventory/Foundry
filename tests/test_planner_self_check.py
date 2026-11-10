@@ -978,7 +978,9 @@ def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_recei
     inline_factory = _ifc(
         "WsgiApp", _BARE_APP.signature + "\n\n\ndef create_app(store: DomainStore) -> WsgiApp: ..."
     )
-    for app in (with_init, inline_factory):
+    # An inline factory that returns the class without naming the dependency.
+    inline_maker = _ifc("WsgiApp", _BARE_APP.signature + "\n\n\ndef make_app() -> WsgiApp: ...")
+    for app in (with_init, inline_factory, inline_maker):
         assert _wiring_findings(tickets, [_STORE, app]) == ()
 
     factory = _ifc("create_app", "def create_app(store: DomainStore) -> WsgiApp: ...", "function")

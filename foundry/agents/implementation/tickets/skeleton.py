@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
@@ -67,6 +67,40 @@ def revised_stubs(
     sk = python_skeleton(list(contracts.values()), tickets, contract_texts)
     owned = {f for t in tickets for f in t.files}
     return {p: text for p, text in sk.files.items() if p in owned}
+
+
+def restub_revised(
+    wave: Sequence[Ticket],
+    revised: Collection[str],
+    restarts: Collection[str],
+    skeleton: dict[str, str],
+    contracts: Mapping[str, InterfaceContract],
+    contract_texts: Mapping[str, str],
+    reset: tuple[dict[str, str], tuple[str, ...]],
+) -> tuple[dict[str, dict[str, str]], tuple[dict[str, str], tuple[str, ...]]]:
+    """Hold every build of a ticket whose interface the planner revised to the
+    revised stubs: they replace its plan-time stubs in ``skeleton`` (the guard's
+    reference), and a restart's reset puts them back instead of the plan-time ones
+    the tree before the ticket holds. Returns the revised stubs per task id and the
+    reset."""
+    from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
+
+    restubbed: dict[str, dict[str, str]] = {}
+    if not skeleton:
+        return restubbed, reset
+    for t in wave:
+        tid = task_id_for_ticket(t.id)
+        if tid not in revised:
+            continue
+        fresh = revised_stubs([t], contracts, contract_texts)
+        restubbed[tid] = {p: text for p, text in fresh.items() if p in skeleton}
+        skeleton.update(restubbed[tid])
+    back = {
+        p: text for tid, files in restubbed.items() if tid in restarts for p, text in files.items()
+    }
+    if back:
+        reset = ({**reset[0], **back}, tuple(p for p in reset[1] if p not in back))
+    return restubbed, reset
 
 
 def stub_rules(

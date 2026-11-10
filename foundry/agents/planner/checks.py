@@ -151,6 +151,7 @@ _TOP_FUNCTION = re.compile(
     r"^(?:async\s+)?def\s+\w+\s*\(|^(?:export\s+)?(?:async\s+)?function\s+\w+",
     re.MULTILINE,
 )
+_UNINDENTED = re.compile(r"^\S", re.MULTILINE)
 _RETURNS = re.compile(r"\)\s*(?:->|:)\s*([^\n{]*)")
 _PY_BASES = re.compile(r"\bclass\s+\w+\s*\(([^)]*)\)")
 _TS_BASES = re.compile(r"\b(?:extends|implements)\s+([\w.,\s]+?)\s*\{")
@@ -166,8 +167,8 @@ def _top_functions(signature: str) -> list[str]:
     starts = [m.start() for m in _TOP_FUNCTION.finditer(signature)]
     out: list[str] = []
     for start in starts:
-        nxt = re.search(r"^\S", signature[start + 1 :], re.MULTILINE)
-        out.append(signature[start : start + 1 + nxt.start() if nxt else len(signature)])
+        nxt = _UNINDENTED.search(signature, start + 1)
+        out.append(signature[start : nxt.start() if nxt else len(signature)])
     return out
 
 
@@ -519,7 +520,7 @@ def _compile(
             for c in base.contracts
             if c.get("kind") in CODE_CONTRACT_KINDS and c["name"] not in new
         ] + code
-    strict = stack is not None and "--strict" in stack.typecheck
+    strict = stack is not None and "--strict" in stack.typecheck.split()
     return check_contracts(code, language, strict=strict)
 
 

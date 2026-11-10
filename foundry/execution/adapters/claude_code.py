@@ -62,6 +62,7 @@ from foundry.execution.adapter_contract import (
     TaskPacket,
     assemble_prompt,
 )
+from foundry.execution.adapters.claude_check import CheckRelay, check_note, open_check
 from foundry.execution.sandbox import Sandbox, SandboxResult
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
@@ -379,10 +380,12 @@ class ClaudeCodeAdapter:
     def available(self) -> bool:
         return shutil.which(self._bin) is not None
 
-    def build_prompt(self, packet: TaskPacket) -> str:
-        return assemble_prompt(packet, epilogue=_EPILOGUE)
+    def build_prompt(self, packet: TaskPacket, check: str | None = None) -> str:
+        """``check``: the opening gate-check report of a session with ``foundry-check``."""
+        epilogue = _EPILOGUE if check is None else f"{check_note(check)}\n\n{_EPILOGUE}"
+        return assemble_prompt(packet, epilogue=epilogue)
 
-    def _argv(self, packet: TaskPacket) -> list[str]:
+    def _argv(self, packet: TaskPacket, check: str | None = None) -> list[str]:
         # stream-json (NDJSON, one object per event) only when someone is listening;
         # it needs --verbose, and the final `result` object carries the same envelope
         # the plain json format returns.
@@ -390,7 +393,7 @@ class ClaudeCodeAdapter:
         argv = [
             self._bin,
             "-p",
-            self.build_prompt(packet),
+            self.build_prompt(packet, check),
             "--output-format",
             *fmt,
             "--max-turns",
@@ -416,6 +419,7 @@ class ClaudeCodeAdapter:
         if self.token_meter is not None:
             self.token_meter.check()
         before = walk_worktree(sandbox.worktree)
+        checker, opening = open_check(packet)
         tier = packet.task.get("tier")
         label = (
             f"agent session: {packet.task.get('id', 'unknown')}"
@@ -423,18 +427,23 @@ class ClaudeCodeAdapter:
         )
         progress.log(f"start {label}")
         started = time.monotonic()
-        if self._on_activity is not None:
-            # STREAMING: each stdout line is an event; report the tool calls as they
-            # happen. `on_stdout_line` is only passed in this branch, so a custom
-            # exec seam that predates it is untouched unless it opts into activity.
-            result = self._exec(
-                sandbox,
-                self._argv(packet),
-                self._timeout_s,
-                on_stdout_line=self._pump_activity,
-            )
-        else:
-            result = self._exec(sandbox, self._argv(packet), self._timeout_s)
+        with contextlib.ExitStack() as relay:
+            if checker is not None:
+                try:
+                    relay.enter_context(CheckRelay(checker, sandbox.worktree, before))
+                except OSError as exc:  # a link where the relay dir goes: run without
+                    progress.log(f"claude-code: no foundry-check here: {exc}")
+                    opening = None
+            argv = self._argv(packet, opening)
+            if self._on_activity is not None:
+                # STREAMING: each stdout line is an event; report the tool calls as they
+                # happen. `on_stdout_line` is only passed in this branch, so a custom
+                # exec seam that predates it is untouched unless it opts into activity.
+                result = self._exec(
+                    sandbox, argv, self._timeout_s, on_stdout_line=self._pump_activity
+                )
+            else:
+                result = self._exec(sandbox, argv, self._timeout_s)
         after = walk_worktree(sandbox.worktree)
 
         envelope = (

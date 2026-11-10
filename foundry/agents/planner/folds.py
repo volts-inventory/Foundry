@@ -8,10 +8,18 @@ from pathlib import PurePosixPath
 
 from foundry.agents.planner.checks import _goal_of, _goal_rows
 from foundry.agents.planner.readers import _uniq
-from foundry.agents.planner.schema import _GENERATED_TICKETS
+from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
+from foundry.agents.planner.sizing import Ceilings, over_ceiling
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
 from foundry.gates.profiles import pytest_bdd_binds
-from foundry.schemas.implementation import CONTRACTS_TICKET_ID, Specialty, StackDecision, Ticket
+from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
+    Difficulty,
+    Specialty,
+    StackDecision,
+    Ticket,
+    scenario_ref,
+)
 from foundry.schemas.product import AcceptanceCriterion, IntentBrief
 
 # Script files a stack command can name as its own repo file (`python3 smoke.py`).
@@ -250,6 +258,108 @@ def _fold_test_bindings(
         else t
         for t in out
     ], concerns
+
+
+_DIFFICULTY_RANK = {Difficulty.TRIVIAL: 0, Difficulty.STANDARD: 1, Difficulty.COMPLEX: 2}
+
+
+def _merged(a: Ticket, b: Ticket) -> Ticket:
+    """``a`` folded into its sole dependent ``b``: ``b``'s id, title, specialty and
+    entrypoint; the union of both scopes; the harder difficulty (the tier follows it)."""
+    files = _uniq((*b.files, *a.files))
+    implements = _uniq((*b.implements, *a.implements))
+    return b.model_copy(
+        update={
+            "description": f"{b.description} Also build what {a.id} ({a.title}) planned"
+            + (f": {a.description}" if a.description else "."),
+            "difficulty": max(a.difficulty, b.difficulty, key=_DIFFICULTY_RANK.__getitem__),
+            "depends_on": _uniq(d for d in (*b.depends_on, *a.depends_on) if d != a.id),
+            "files": files,
+            "reads": _uniq(f for f in (*b.reads, *a.reads) if f not in files),
+            "scenario_ids": _uniq((*b.scenario_ids, *a.scenario_ids)),
+            "implements": implements,
+            "consumes": _uniq(c for c in (*b.consumes, *a.consumes) if c not in implements),
+        }
+    )
+
+
+def _merge_sole_dependents(
+    tickets: Sequence[Ticket],
+    criteria: Sequence[AcceptanceCriterion],
+    stack: StackDecision | None,
+    ceilings: Ceilings,
+) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
+    """Fold a ticket into the ONE ticket that depends on it when both are feature
+    tickets of the same epic and the merge stays within the ceiling of both
+    tickets' tiers: work only one ticket uses is a hand-off that costs a session,
+    a contract and a wave check, and cross-ticket hand-offs are where builds fail.
+    Its scenarios move with it (their records re-pointed, so each keeps exactly
+    one owner) and nothing else depended on it. Repeats until no pair fits, in
+    plan order. The entrypoint is never folded away, and test tickets and file-less
+    acceptance-only tickets (which build nothing to hand off) take no part."""
+    protected = set(stack_files(stack)) if stack is not None else set()
+    out = list(tickets)
+    moved: dict[str, str] = {}
+    concerns: list[str] = []
+
+    def epic(tid: str) -> str | None:
+        m = _EPIC_OF_TICKET.match(tid)
+        return m.group(1) if m else None
+
+    def foldable(t: Ticket) -> bool:
+        return (
+            t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST and bool(t.files)
+        )
+
+    while True:
+        dependents: dict[str, list[str]] = {}
+        for t in out:
+            for d in t.depends_on:
+                dependents.setdefault(d, []).append(t.id)
+        by_id = {t.id: t for t in out}
+        pick: tuple[Ticket, Ticket] | None = None
+        for a in out:
+            ds = dependents.get(a.id, [])
+            if len(ds) != 1 or not foldable(a) or a.entrypoint:
+                continue
+            b = by_id[ds[0]]
+            if not foldable(b) or epic(a.id) != epic(b.id):
+                continue
+            merged = _merged(a, b)
+            if any(
+                over_ceiling(merged, ceilings[d], protected)
+                for d in (b.difficulty, merged.difficulty)
+            ):
+                continue
+            pick = a, merged
+            break
+        if pick is None:
+            break
+        a, merged = pick
+        out = [merged if t.id == merged.id else t for t in out if t.id != a.id]
+        moved = {k: merged.id if v == a.id else v for k, v in moved.items()}
+        moved[a.id] = merged.id
+        concerns.append(
+            f"Ticket {a.id}: merged into {merged.id}, the only ticket that depends on it "
+            "(the merge stays within its size ceiling)."
+        )
+    if not moved:
+        return out, list(criteria), concerns
+    return (
+        [t.model_copy(update={"seq": t.seq._replace(local=i)}) for i, t in enumerate(out)],
+        [
+            c.model_copy(
+                update={
+                    "ticket_id": moved[c.ticket_id],
+                    "oracle_hint": scenario_ref(moved[c.ticket_id], c.id),
+                }
+            )
+            if c.ticket_id in moved
+            else c
+            for c in criteria
+        ],
+        concerns,
+    )
 
 
 def _one_step_module_per_ticket(

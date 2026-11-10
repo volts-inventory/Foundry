@@ -93,7 +93,7 @@ def test_a_fully_covered_plan_has_no_coverage_findings() -> None:
     criteria = {c.id: c for c in _bodies(cas, writes, "acceptance_criterion")}
     assert criteria["AC-001"].covers == ("MH-1", "SC-1")
     tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
-    assert tickets["T-002"].entrypoint and not tickets["T-001"].entrypoint
+    assert tickets["T-002"].entrypoint and "T-001" not in tickets  # folded into T-002
 
 
 # ---- 1. traceability ------------------------------------------------------------------
@@ -183,7 +183,10 @@ def test_a_feature_ticket_without_scenarios_is_a_finding_test_tickets_exempt() -
         "entrypoint": False,
         "scenarios": [],
     }
-    tickets = _tickets_with(T_002={"depends_on": ["T-001", "T-004"]})
+    # A test ticket depends on T-004 too, so it is not folded into T-002.
+    tickets = _tickets_with(
+        T_002={"depends_on": ["T-001", "T-004"]}, T_003={"depends_on": ["T-004"]}
+    )
     findings = _coverage(_plan(tickets=[*tickets, extra]))
     assert findings == (
         "Feature ticket T-004 has no scenarios; give it at least one (or fold it into "
@@ -283,7 +286,8 @@ def test_inline_cap_overflow_is_a_concern_naming_the_dropped_tickets() -> None:
         "Dropped scenario(s) AC-139 with ticket T-139: no kept ticket owns its files." in concerns
     )
     owner = {c.id: c.ticket_id for c in _bodies(cas, writes, "acceptance_criterion")}
-    assert owner["AC-140"] == "T-100" and "AC-139" not in owner
+    # T-100 is then the first filler folded into the entrypoint, its only dependent.
+    assert owner["AC-140"] == "T-002" and "AC-139" not in owner
 
 
 # ---- epic mode: coverage is checked across epics ---------------------------------------------

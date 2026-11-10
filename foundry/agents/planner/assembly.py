@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.plan_contracts import CompileResult
@@ -14,6 +14,7 @@ from foundry.agents.planner.checks import (
     _coverage_findings,
     _offline_scenario_findings,
     _redeclared_findings,
+    _size_findings,
     _unused_contracts,
     _wiring_findings,
 )
@@ -24,11 +25,14 @@ from foundry.agents.planner.folds import (
     _drop_self_consumes,
     _fix_covers,
     _fold_test_bindings,
+    _merge_sole_dependents,
     _one_step_module_per_ticket,
     _own_scenario_bindings,
     _own_stack_files,
     _wire_entrypoint,
+    stack_files,
 )
+from foundry.agents.planner.sizing import ALL_CLOUD, Ceilings
 from foundry.agents.planner.stack import _attach_generated, _python_deps_ticket
 from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
@@ -59,6 +63,7 @@ class _Frame:
     criteria_seq: Seq
     base: BaseView | None = None  # a change build's base tree
     stack_findings: tuple[str, ...] = ()  # of a stack chosen this pass
+    ceilings: Ceilings = field(default_factory=lambda: ALL_CLOUD)  # per-ticket size, by tier
 
 
 @dataclass(frozen=True)
@@ -120,7 +125,14 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         concerns += fold(repair.__name__, more)
     # After the order repairs: the fold reads the final order to judge a scenario
     # no earlier than before.
-    for bind in (_fold_test_bindings, _own_scenario_bindings, _one_step_module_per_ticket):
+    tickets, more = _fold_test_bindings(tickets, frame.stack)
+    concerns += fold(_fold_test_bindings.__name__, more)
+    # After the binding fold, which drops paired test tickets and so leaves a feature
+    # ticket's real dependents; before the step-module folds, so the merged ticket
+    # binds every scenario it now carries from ONE module.
+    tickets, criteria, more = _merge_sole_dependents(tickets, criteria, frame.stack, frame.ceilings)
+    concerns += fold(_merge_sole_dependents.__name__, more)
+    for bind in (_own_scenario_bindings, _one_step_module_per_ticket):
         tickets, more = bind(tickets, frame.stack)
         concerns += fold(bind.__name__, more)
     criteria, more = _drop_orphan_scenarios(tickets, criteria)
@@ -140,6 +152,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *stack_findings,
         *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
         *_offline_scenario_findings(criteria),
+        *_size_findings(
+            tickets, frame.ceilings, set(stack_files(frame.stack)) if frame.stack else set()
+        ),
         *frame.stack_findings,
     )
     return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over), tuple(fired))

@@ -349,7 +349,8 @@ def test_contracts_carry_kind_signature_and_a_structured_body() -> None:
 
 def test_python_stack_without_bdd_or_code_contracts_generates_nothing() -> None:
     writes, cas, _ = _plan_once({**PLAN, "stack": PYTHON_STACK})
-    assert [t.id for t in _tickets(writes, cas)] == ["T-001", "T-002", "T-003"]
+    # T-001 folds into T-002, its only dependent.
+    assert [t.id for t in _tickets(writes, cas)] == ["T-002", "T-003"]
 
 
 def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None:
@@ -403,7 +404,11 @@ def test_a_model_ticket_cannot_take_a_generated_id() -> None:
     tickets[1]["depends_on"] = ["contracts"]
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets})
     ids = [t.id for t in _tickets(writes, cas)]
-    assert ids[:2] == [CONTRACTS_TICKET_ID, HARNESS_TICKET_ID] and "contracts-2" in ids
+    assert ids[:2] == [CONTRACTS_TICKET_ID, HARNESS_TICKET_ID] and "contracts" not in ids[2:]
+    # Renamed, then folded into T-002, its only dependent.
+    concerns = writes["agent_journal"][0].concerns
+    assert "Ticket id 'contracts' renamed to 'contracts-2' (ids name files)." in concerns
+    assert any(c.startswith("Ticket contracts-2: merged into T-002") for c in concerns)
 
 
 # ---- §4 contract fit check -----------------------------------------------------------
@@ -460,6 +465,9 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
     tickets[1]["depends_on"] = []  # consumer not ordered after its producer
     tickets[1]["consumes"] = ["TodoStore.add", "TodoStore.missing"]
     tickets[2]["implements"] = ["TodoStore.list"]  # a second producer
+    # T-003 follows T-001 too, so T-001 is not folded into T-002, its added dependent.
+    tickets[0]["depends_on"] = []
+    tickets[2]["depends_on"] = ["T-001"]
     interfaces = [
         *TS_INTERFACES,
         {

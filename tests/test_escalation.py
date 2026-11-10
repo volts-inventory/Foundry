@@ -808,3 +808,41 @@ def test_an_empty_session_error_carries_the_adapter_report(tmp_path: Path) -> No
     msg = str(err.value)
     assert "wrote none of the ticket's files (go.mod)" in msg
     assert "after 40 turn(s)" in msg and "subtype=error_max_turns" in msg
+
+
+def test_a_later_finished_session_retires_a_stopped_early_note() -> None:
+    # T-001's local session stopped early (its own diff, then the stop note); a
+    # later session for T-001 (a restart, an escalation, a rebuild) finished. The
+    # stale stop must not make the next first failure escalate T-001.
+    store = ArtifactStore()
+    stop = GateTriage(
+        name="stopped-early",
+        run_against="task/T-001",
+        explanation=TURN_CAP,
+        produced_by="engineering",
+        seq=Seq("run", 1, 1, "e", 1),
+    )
+
+    def diff(task_id: str, step: int) -> Artifact:
+        return Artifact(
+            kind="feature_diff",
+            uri=f"cas://feature_diff/{task_id}-{step}",
+            produced_by="junior_engineer",
+            task_id=task_id,
+            seq=Seq("run", 1, step, "e", 0),
+        )
+
+    def first(*later: Artifact) -> tuple[dict[str, str], tuple[str, ...]]:
+        state = _check_state(store, _pair(), "app.py:1: error")
+        state = {
+            **state,
+            "artifacts": [*state["artifacts"], *later],
+            "gate_triage": [*state["gate_triage"], stop],
+        }
+        return stopped_tickets(state), _candidates(state, store, stopped_only=True)
+
+    assert first() == ({"T-001": TURN_CAP}, ("T-001",))
+    assert first(diff("T-001", 3)) == ({}, ())
+    assert first(diff("restart-T-001", 3)) == ({}, ())
+    # Another ticket's newer diff leaves T-001's stop standing.
+    assert first(diff("T-002", 3)) == ({"T-001": TURN_CAP}, ("T-001",))

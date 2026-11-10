@@ -885,9 +885,9 @@ def _fix_focus(state: FactoryState, resolve: ArtifactResolver) -> tuple[str, ...
 # a write elsewhere that carries no ``reason``).
 _FENCE_RULE = (
     "Edit only the files in `fix_files`: the failure cluster this pass fixes and the "
-    "tickets that own it. A write or delete anywhere else is refused unless it "
-    "carries a `reason` saying why this failure needs that file changed; the reason "
-    "is recorded for review."
+    "tickets that own it. Change a file anywhere else only when this failure needs "
+    "it, and say why (where your write action takes a `reason`, a write elsewhere "
+    "without one is refused); the reason is recorded for review."
 )
 
 

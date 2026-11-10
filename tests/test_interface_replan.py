@@ -28,7 +28,7 @@ from foundry.graph.supervisor import build_supervisor_graph
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import InterfaceContract
-from foundry.schemas.base import Artifact, FrozenModel
+from foundry.schemas.base import Artifact, BudgetLedger, FrozenModel
 from foundry.schemas.gates import GateStatus, GateTriage
 from foundry.schemas.implementation import Specialty, Ticket
 from foundry.state.factory_state import FactoryState
@@ -91,7 +91,7 @@ class _Guarded(StubAdapter):
         return super().run(packet, sandbox)
 
 
-def _run(tmp_path: Path, adapter: _Guarded) -> tuple[FactoryState, list[str], MockTransport]:
+def _run(tmp_path: Path, adapter: _Guarded) -> tuple[FactoryState, list[str], MockTransport, Any]:
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
@@ -130,7 +130,17 @@ def _run(tmp_path: Path, adapter: _Guarded) -> tuple[FactoryState, list[str], Mo
         ]
     finally:
         reset_gate_write_verifier(token)
-    return app.get_state(config).values, nodes, tx
+    spec_gate = app.builder.nodes["spec_gate"].runnable
+
+    def _spec(state: FactoryState) -> dict[str, Any]:
+        token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+        try:
+            out: dict[str, Any] = spec_gate.invoke(state, config)
+        finally:
+            reset_gate_write_verifier(token)
+        return out
+
+    return app.get_state(config).values, nodes, tx, _spec
 
 
 def _notes(state: FactoryState, tid: str) -> dict[str, str]:
@@ -147,7 +157,7 @@ def _revisions(tx: MockTransport) -> int:
 
 def test_a_ticket_left_to_a_replan_is_rebuilt_on_its_revised_interface(tmp_path: Path) -> None:
     adapter = _Guarded()
-    final, nodes, tx = _run(tmp_path, adapter)
+    final, nodes, tx, _ = _run(tmp_path, adapter)
 
     # Built once on the plan (both attempts rejected), then re-planned mid-build.
     first = nodes.index("implementation")
@@ -168,7 +178,7 @@ def test_a_ticket_left_to_a_replan_is_rebuilt_on_its_revised_interface(tmp_path:
 
 def test_an_interface_is_revised_at_most_once_per_ticket(tmp_path: Path) -> None:
     adapter = _Guarded(always=True)
-    final, nodes, tx = _run(tmp_path, adapter)
+    final, nodes, tx, _ = _run(tmp_path, adapter)
 
     assert _revisions(tx) == 1
     assert nodes.count("planner") == 2  # the plan, then the one revision
@@ -233,3 +243,84 @@ def test_only_an_unbuilt_ticket_waits_on_the_planner() -> None:
     )
     # A built ticket keeps its build: revising its interface would rebuild nothing.
     assert pending_interface_replans({**left, "artifacts": [diff]}) == ()
+
+
+def test_a_spec_pass_mid_build_keeps_the_fix_budget_the_build_spent(tmp_path: Path) -> None:
+    final, _, _, spec = _run(tmp_path, _Guarded())
+    spent: FactoryState = {**final, "budget": BudgetLedger(fix_attempts_since_all_green=2)}
+    assert "budget" not in spec(spent)
+    # Before anything is built a Spec PASS still hands the build the whole budget.
+    planning: FactoryState = {
+        **spent,
+        "artifacts": [a for a in final["artifacts"] if a.kind != "feature_diff"],
+    }
+    assert spec(planning)["budget"].fix_attempts_since_all_green == 0
+
+
+def test_a_spec_fail_mid_build_halts_instead_of_re_planning(tmp_path: Path) -> None:
+    from tests.test_supervisor import _respec_app
+
+    records = GlobalRecords()
+    app, _ = _respec_app(tmp_path, records)
+    built = Artifact(
+        kind="feature_diff",
+        uri="cas://feature_diff/T-001",
+        produced_by="engineering",
+        task_id="T-001",
+        seq=Seq("run-midbuild", 1, 0, "engineering", 0),
+    )
+    config = _config("run-midbuild")
+    seed: FactoryState = {"request": "build a todo app", "artifacts": [built]}
+    token = set_gate_write_verifier(DevGateWriteVerifier(KEY, KEY_ID, records))
+    try:
+        nodes = [n for step in app.stream(seed, config, stream_mode="updates") for n in step]
+    finally:
+        reset_gate_write_verifier(token)
+    assert nodes == ["triage", "planner", "spec_gate"]
+    assert not app.get_state(config).next
+
+
+def test_a_method_of_a_class_the_contracts_file_declares_is_not_revised() -> None:
+    from foundry.agents.planner.interface import _revised
+
+    seq = Seq("run", 1, 0, "planner", 0)
+    contract = InterfaceContract(
+        name="TodoStore.add",
+        spec_uri="cas://c",
+        kind="function",
+        signature="def add(self, title: str) -> int: ...",
+        seq=seq,
+    )
+    reply = {"contracts": [{"name": "TodoStore.add", "signature": "def add(self) -> int: ..."}]}
+    rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted({})), adapter=None)
+    out, problems = _revised(
+        rt, _config("run"), [contract], reply, {contract.name: contract}, None, {"TodoStore"}
+    )
+    assert out == []
+    assert "class TodoStore is declared in the built contracts file" in problems[0]
+
+
+def test_a_revision_that_adds_a_compile_error_is_refused(monkeypatch: Any) -> None:
+    from foundry.agents.planner.interface import _new_compile_findings
+
+    monkeypatch.setenv("FOUNDRY_PLAN_COMPILE", "1")
+    seq = Seq("run", 1, 0, "planner", 0)
+    todo = InterfaceContract(
+        name="Todo",
+        spec_uri="cas://t",
+        kind="class",
+        signature="class Todo:\n    title: str",
+        seq=seq,
+    )
+    add = InterfaceContract(
+        name="add_todo",
+        spec_uri="cas://a",
+        kind="function",
+        signature="def add_todo(title: str) -> Todo: ...",
+        seq=seq,
+    )
+    planned = {"Todo": todo, "add_todo": add}
+    good = add.model_copy(update={"signature": "def add_todo(title: str, due: str) -> Todo: ..."})
+    bad = add.model_copy(update={"signature": "def add_todo(title: str = 1) -> Todo: ..."})
+    assert _new_compile_findings(planned, [good], None) == []
+    assert any("add_todo" in f for f in _new_compile_findings(planned, [bad], None))

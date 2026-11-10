@@ -400,6 +400,9 @@ def build_supervisor_graph(
             fix_policy=policy,
         )
 
+    def _mid_build(state: FactoryState) -> bool:
+        return any(a.kind == FEATURE_DIFF_KIND for a in state.get("artifacts") or ())
+
     def _gate_workdir(name: str) -> Path:
         # A fresh materialization tree per gate run (materialize_workdir writes
         # into it from the content-addressed handles; the integrated tree_sha is
@@ -426,8 +429,9 @@ def build_supervisor_graph(
         )
         out["phase"] = _SPEC_GATE
         # A Spec PASS resets the counter: the re-plans it took must not shrink the
-        # build/test boundary's fix budget.
-        settle_fix_attempts(
+        # build/test boundary's fix budget. Mid-build (an interface re-plan) it keeps
+        # the budget the build has spent.
+        (bump_fix_attempts if _mid_build(state) else settle_fix_attempts)(
             state,
             config,
             out,
@@ -524,13 +528,16 @@ def build_supervisor_graph(
 
     # -- conditional routers (advance / fix / halt) ---------------------------
     def _route_spec(state: FactoryState, config: RunnableConfig) -> str:
-        return route_after_gates(
+        decision = route_after_gates(
             state,
             config,
             boundary=SPEC_BOUNDARY,
             records=runner.records,
             max_fix_attempts=max_fix_attempts,
         )
+        # A Spec FAIL after an interface re-plan would re-plan the whole build under
+        # the tickets already built: halt instead.
+        return "halt" if decision == "fix" and _mid_build(state) else decision
 
     def _route_build_test(state: FactoryState, config: RunnableConfig) -> str:
         decision = route_after_gates(

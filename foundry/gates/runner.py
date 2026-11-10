@@ -58,13 +58,16 @@ import hmac
 import re
 import shlex
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Protocol
 
 from pydantic import Field
 
+from foundry import progress, telemetry
 from foundry.canonical import canonical_bytes, content_digest
 from foundry.gates.attestation import ZoneBSigner
+from foundry.gates.reuse import VerdictCache, durable_unit, unit_key
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import GateResult, GateStatus, VerdictClass
 from foundry.state.global_records import GlobalRecords
@@ -312,6 +315,7 @@ class TwoZoneGateRunner:
         lineage_map_revision: str,
         *,
         seal_key: bytes | None = None,
+        verdicts: VerdictCache | None = None,
     ) -> None:
         self._signer = signer
         self._records = records
@@ -321,6 +325,8 @@ class TwoZoneGateRunner:
         # the observation channel is SEALED — zone B rejects an unsealed or
         # mismatched observation. Absent → unsealed channel (back-compat).
         self._seal_key = seal_key
+        # The run's reusable gate units (foundry.gates.reuse); None never reuses.
+        self._verdicts = verdicts
 
     @property
     def seal_key(self) -> bytes | None:
@@ -420,10 +426,86 @@ class TwoZoneGateRunner:
         # auto-clears it) and fork-inherited (keyed on the digest, not run_id).
         # ERROR never latches (infra, not a verdict); per-branch FAILs route
         # back to the responsible role without disqualifying any digest.
-        if status is GateStatus.FAIL and _is_integrated_digest(run_against):
-            self._records.latch_stable_fail(run_against, gate.name, seq.run_id)
-
+        self._latch(result)
         return result
+
+    def _latch(self, result: GateResult) -> None:
+        if result.status is GateStatus.FAIL and _is_integrated_digest(result.run_against):
+            self._records.latch_stable_fail(result.run_against, result.name, result.seq.run_id)
+
+    def run_unit(
+        self,
+        gates: Sequence[tuple[GateImpl, Seq]],
+        run_against: str,
+        workdir: Path | str,
+    ) -> list[GateResult]:
+        """Run ``gates`` in order over ``workdir`` — or, when this runner already
+        judged the same gates on provably identical inputs (``reuse.unit_key``),
+        re-reference those verdicts instead of executing anything.
+
+        A reused verdict is the ORIGINAL attested record with only its ``Seq``
+        replaced by the one minted now (``seq`` is outside the attestation tuple),
+        so it verifies under the original signature and outranks older records as a
+        fresh run would. Nothing is re-signed. A reused FAIL on an integrated digest
+        re-latches (idempotent), exactly as a fresh FAIL would."""
+        key = None
+        if self._verdicts is not None:
+            key = unit_key(
+                [g for g, _ in gates],
+                Path(workdir),
+                run_against=run_against,
+                scanner_config_rev=self._scanner_config_rev,
+                lineage_map_revision=self._lineage_map_revision,
+            )
+        cached = self._verdicts.get(key) if self._verdicts is not None and key else None
+        if key and cached is not None and self._reusable(cached, gates, run_against):
+            out = [
+                rec.model_copy(update={"seq": seq})
+                for rec, (_, seq) in zip(cached, gates, strict=True)
+            ]
+            for result in out:
+                self._latch(result)
+                telemetry.count(f"gate.reuse.{result.name}")
+            # Audit provenance: the original verdict each reused record re-references.
+            verdicts = ", ".join(
+                f"{r.name}={r.status} from {r.seq.run_id}@{r.seq.emission_epoch}" for r in cached
+            )
+            progress.log(f"reuse gate verdicts {verdicts} (identical inputs, key {key[:12]})")
+            return out
+        results = [self.run(g, run_against, seq, workdir) for g, seq in gates]
+        if (
+            self._verdicts is not None
+            and key
+            and all(r.status in (GateStatus.PASS, GateStatus.FAIL) for r in results)
+        ):
+            self._verdicts.put(key, results, durable=durable_unit([g for g, _ in gates]))
+        return results
+
+    def _reusable(
+        self,
+        cached: list[GateResult],
+        gates: Sequence[tuple[GateImpl, Seq]],
+        run_against: str,
+    ) -> bool:
+        """Fail-closed check of stored records before reuse: one per gate, in order,
+        PASS/FAIL only, bound to this tree and these revisions, and carrying the
+        attestation this runner's own key derives (the on-disk store is untrusted)."""
+        if len(cached) != len(gates):
+            return False
+        for rec, (gate, _) in zip(cached, gates, strict=True):
+            if (
+                rec.name != gate.name
+                or rec.status not in (GateStatus.PASS, GateStatus.FAIL)
+                or rec.run_against != run_against
+                or rec.scanner_config_rev != self._scanner_config_rev
+                or rec.lineage_map_revision != self._lineage_map_revision
+                or not rec.runner_attestation
+                or not hmac.compare_digest(
+                    self._signer.attest_gate(rec).encode(), rec.runner_attestation.encode()
+                )
+            ):
+                return False
+        return True
 
     def reuse_key(self, gate: GateImpl, state_sha: str) -> str:
         """Dependency-scoped verdict-cache key for this gate at this state. (§1f)

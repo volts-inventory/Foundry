@@ -35,6 +35,7 @@ from foundry.durability.artifact_store import ArtifactStore
 from foundry.durability.checkpointer import FoundryCheckpointer
 from foundry.durability.persistence import DurableBackends, durable_backends, state_dir_from_env
 from foundry.gates import TwoZoneGateRunner
+from foundry.gates.reuse import VerdictCache
 from foundry.graph.factory_graph import build_factory_graph
 from foundry.graph.gate_wiring import FixPolicy
 from foundry.graph.supervisor import MODE_ASSISTANT, resume_boundary
@@ -390,8 +391,15 @@ def run(
     # Seal the zone-A observation channel (fail-closed forged-results hardening):
     # the gate-wiring builds each gate with `runner.seal_key`, so the observation a
     # gate produces is sealed under the same per-run key the runner verifies.
+    # Gate units re-run on identical inputs reuse the original attested verdicts; under
+    # the run's state dir so a resumed process reuses what the interrupted one judged.
     runner = TwoZoneGateRunner(
-        wiring._zone_b_signer(), records, _SCANNER_REV, _LINEAGE_REV, seal_key=os.urandom(32)
+        wiring._zone_b_signer(),
+        records,
+        _SCANNER_REV,
+        _LINEAGE_REV,
+        seal_key=os.urandom(32),
+        verdicts=VerdictCache(run_dir / "verdicts" if run_dir is not None else None),
     )
 
     # -- materialization seam (Phase-1 2b) ------------------------------------

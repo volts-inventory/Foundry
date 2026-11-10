@@ -14,8 +14,9 @@ mid-work.
 A result is split for the session: failures that are its own (its scenarios, its
 files, anything it broke) and pre-existing ones (red on the tree it started from).
 The engineering node and the fixer pass a :class:`CheckSpec` per session through
-:func:`check_scope`; the proxy-agent loop reads it with :func:`current_check`. Every
-proxy-agent session gets it — the local tiers, and the cloud API backends
+:func:`check_scope`; the proxy-agent loop (its ``check`` action) and claude-code
+sessions (the ``foundry-check`` relay, ``adapters/claude_check.py``) read it with
+:func:`current_check`. Every such session gets it — the local tiers, and the cloud API backends
 (``--adapter proxy-agent``) too — unless ``FOUNDRY_SELF_CHECK`` says otherwise:
 ``0``/``off`` turns it off, ``local`` keeps it to the local tiers' sessions (the
 tiered adapter marks those, :func:`local_session`); unset or anything else is on.
@@ -125,7 +126,7 @@ class CheckBase:
     the materialized tree before any session's changes (gate inputs included, the
     manifest not scaffolded — each check scaffolds its own copy). Built lazily by
     the first session that checks (its opening check), so a wave whose adapter never
-    checks (claude-code, stub) never builds it; the opening check's gate run is
+    checks (stub) never builds it; the opening check's gate run is
     shared by every session with the same scenario scope."""
 
     def __init__(

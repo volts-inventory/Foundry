@@ -40,8 +40,10 @@ from foundry.graph.gate_wiring.restarts import (
     restart_set,
     unbuilt_restart,
 )
-from foundry.graph.gate_wiring.routing import _BOUNDARY_GATES, _fix_attempts
+from foundry.graph.gate_wiring.routing import _BOUNDARY_GATES, FIX, _fix_attempts
+from foundry.schemas.base import BudgetLedger
 from foundry.schemas.gates import FixPass, GateTriage
+from foundry.state.reducers import merge_gates, union_fix_passes
 from foundry.telemetry import count
 
 if TYPE_CHECKING:
@@ -52,6 +54,31 @@ if TYPE_CHECKING:
     from foundry.graph.gate_wiring.diffs import BlobResolver
     from foundry.graph.gate_wiring.materialize import ArtifactResolver
     from foundry.state.factory_state import FactoryState
+
+
+def post_check(state: FactoryState, out: dict[str, Any]) -> FactoryState:
+    """``state`` with a check node's ``out`` folded in, as its router will read it."""
+    return {
+        **state,
+        "gates": merge_gates(state.get("gates"), out.get("gates")),
+        "fix_passes": union_fix_passes(state.get("fix_passes"), out.get("fix_passes")),
+        "budget": out.get("budget") or state.get("budget") or BudgetLedger(),
+    }
+
+
+def keep_splits_if_fixing(
+    state: FactoryState, out: dict[str, Any], route: Callable[[FactoryState], str]
+) -> None:
+    """Withdraw the split requests :func:`keep_best` put on ``out`` unless ``route``
+    on the post-check state goes on fixing: a split is a pass of the loop, never a
+    way past a spent budget or a stop."""
+    from foundry.agents.implementation.tickets.constants import SPLIT_REQUEST_TRIAGE
+    from foundry.agents.implementation.tickets.split import withdraw_splits
+
+    if any(t.name == SPLIT_REQUEST_TRIAGE for t in out.get("gate_triage") or ()) and (
+        route(post_check(state, out)) != FIX
+    ):
+        withdraw_splits(out)
 
 
 def keep_best(
@@ -68,6 +95,7 @@ def keep_best(
     policy: FixPolicy | None = None,
     unbuilt_waves: int | None = None,
     carried: frozenset[str] = frozenset(),
+    escalates: bool = False,
 ) -> bool:
     """Record the check ``out`` holds in the fix-pass ledger and, when its tree is
     worse than the window's best, restore the best tree: a ``revert-<n>`` diff on
@@ -84,6 +112,8 @@ def keep_best(
     left, :func:`advanced_from`): failures an earlier wave advanced with. A
     check failing on those alone stops (:data:`CARRIED_STOP`), and no pass is
     aimed at a cluster of them while the wave has failures of its own.
+    ``escalates``: the check can escalate a local ticket (a wave check), so a split
+    waits for that ticket's escalation.
 
     Call before the budget is settled, on ``out``'s own verdicts."""
     known = len(out.get("fix_passes") or ())
@@ -175,15 +205,18 @@ def keep_best(
         )
         if restart and dead_end:
             stop = None
-        if not restart:
+        if not restart and stop is None:
             # The targeted cluster's tickets spent their restart (and escalation):
-            # ask the planner to split them instead (once per ticket).
+            # ask the planner to split them instead (once per ticket). A loop that
+            # stops here has no pass left to hand the split to.
             from foundry.agents.implementation.tickets.split import (
                 split_after_restart,
                 split_request,
             )
 
-            for tid in split_after_restart(state, resolve, rt, clusters, target, passes):
+            for tid in split_after_restart(
+                state, resolve, rt, clusters, target, passes, escalates=escalates
+            ):
                 out.setdefault("gate_triage", []).append(
                     split_request(
                         rt,

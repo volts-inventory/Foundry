@@ -138,7 +138,8 @@ def split_items(
         mine = list(dict.fromkeys(_strs(child.get("scenario_ids"))))
         paths = list(dict.fromkeys(_strs(child.get("files"))))
         names = list(dict.fromkeys(_strs(child.get("implements"))))
-        after = [a for a in child.get("after") or () if isinstance(a, int)]
+        # A bool is an int to isinstance: True would read as "after child 1".
+        after = [a for a in child.get("after") or () if type(a) is int]
         if unknown := [s for s in mine if s not in scenarios]:
             return None, [], f"child {n} lists scenario(s) {', '.join(unknown)} not the ticket's"
         if not paths or (unknown := [f for f in paths if f not in files]):

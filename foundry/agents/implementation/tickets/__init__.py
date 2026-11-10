@@ -41,7 +41,6 @@ from foundry.agents._runtime import AgentRuntime, NodeFn
 from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
 from foundry.agents.implementation.junior_engineer import (
     _adapter_name,
-    _failed_gates,
     _finalize_diff,
     _fix_summary,
     _prior_failures,
@@ -86,6 +85,7 @@ from foundry.agents.implementation.tickets.contracts import (
 from foundry.agents.implementation.tickets.escalation import (
     _escalated_packet,
     _escalation_context,
+    _escalation_settled,
     _is_local,
     escalated_task_ids,
     escalation_candidates,
@@ -136,11 +136,12 @@ from foundry.agents.implementation.tickets.skeleton import (
     stub_rules,
 )
 from foundry.agents.implementation.tickets.split import (
-    failing_owners,
+    SplitView,
     may_split,
     pending_splits,
     split_carries,
     split_request,
+    split_view,
 )
 from foundry.agents.implementation.tickets.tasks import (
     _skipped_task_ids,
@@ -792,12 +793,32 @@ def make_engineering_node(
                     cost_budget_microusd,
                 )
             stopped: dict[str, str] = {}
+            declined: set[str] = set()  # escalations the quota did not admit
+            view: SplitView | None = None
+
+            def _would_split(tid: str, exc: Exception) -> bool:
+                """``tid``'s failed last attempt asks for a split (:func:`may_split`),
+                the owners being the tickets whose builds failed in this pass and the
+                ones left unbuilt: this wave's failures, not an earlier check's."""
+                nonlocal view
+                if (
+                    tid in done
+                    or isinstance(exc, RunCapExceeded)
+                    or len(failures.get(tid, ())) + 1 < MAX_TICKET_ATTEMPTS
+                ):
+                    return False
+                view = view or split_view(state, resolve)
+                failing = {t for t, r in results.items() if isinstance(r, Exception)}
+                return may_split(view, tid, failing | unbuilt_task_ids(state), asked=split_asked)
+
+            split_asked: set[str] = set()
             if target and not requested and not restarts:
                 # A local session that hit its turn cap or was stopped early keeps its
                 # partial work: the next wave check escalates it on a first failure
                 # (a final wave's is left to the supervisor's gates and cloud fixer).
                 # One that wrote none of its files has nothing to check, so it re-runs
                 # once on the cloud level now, in a fresh cloud-tier sandbox.
+                # A last local attempt that failed escalates before a split is asked.
                 retry: dict[str, str] = {}
                 for tid, got in results.items():
                     if tid in already or not _is_local(rt, tasks[tid].tier):
@@ -806,13 +827,17 @@ def make_engineering_node(
                         if (stop := session_stop_reason(got.triage)) is not None:
                             stopped[tid] = stop
                         continue
-                    if (reason := scoped.empty.get(tid)) is None:
+                    touched = "none of its files"
+                    if (reason := scoped.empty.get(tid)) is None and _would_split(tid, got):
+                        reason = f"its last local attempt failed: {got}"
+                        touched = "its files; that attempt failed"
+                    if reason is None:
                         continue
                     ctx = _escalation_context(
                         tier=tasks[tid].tier,
                         target=target,
                         reason=reason,
-                        touched="none of its files",
+                        touched=touched,
                         reported=[],
                         kept=False,
                         failures=prior,
@@ -829,6 +854,7 @@ def make_engineering_node(
                         )
                     except BudgetExceededError as exc:
                         progress.log(f"escalation of {tid} not admitted: {exc}")
+                        declined.add(tid)
                         continue
                     escalations[tid] = reason
                     progress.log(f"escalate {tid}: {tasks[tid].tier} -> {target} ({reason[:120]})")
@@ -851,8 +877,7 @@ def make_engineering_node(
             # Finalize in Seq order, single-threaded: rt.seq and rt.cas body writes
             # never race. A failed ticket never takes its siblings' diffs with it.
             built: list[Ticket] = []
-            owners: set[str] | None = None  # who the newest failing gates blame
-            split_asked: set[str] = set()
+            settled = _escalation_settled(state) | set(escalations) | declined
             for ticket in wave:
                 tid = task_id_for_ticket(ticket.id)
                 if tid not in results:
@@ -907,11 +932,12 @@ def make_engineering_node(
                         _failure_notes(rt, config, tid, attempt, exc)
                     )
                     left_to_replan = _note_rejection(tid, exc)
-                    split = False
-                    if attempt >= MAX_TICKET_ATTEMPTS and not left_to_replan and tid not in done:
-                        if owners is None:
-                            owners = failing_owners(state, resolve, _failed_gates(state))
-                        split = may_split(state, resolve, tid, owners, asked=split_asked)
+                    # In hybrid a local ticket splits only once its escalation is spent.
+                    split = (
+                        not left_to_replan
+                        and (not target or not _is_local(rt, tasks[tid].tier) or tid in settled)
+                        and _would_split(tid, exc)
+                    )
                     if split:
                         split_asked.add(tid)
                         progress.log(f"{tid}: failed after its retry, asking for a split")

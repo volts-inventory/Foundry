@@ -1268,33 +1268,36 @@ def make_planner_node(
         ticket (split or declined)."""
         from foundry.agents.implementation.junior_engineer import _prior_failures
         from foundry.agents.implementation.tickets.constants import (
-            CARRY_TRIAGE,
             FAIL_TRIAGE,
-            SPLIT_CARRY_TRIAGE,
+            SPLIT_CHILD_TRIAGE,
             SPLIT_DECLINED_TRIAGE,
             SPLIT_REQUEST_TRIAGE,
             SPLIT_TRIAGE,
         )
-        from foundry.agents.implementation.tickets.constants import (
-            NODE_ID as ENGINEERING_NODE_ID,
-        )
+        from foundry.agents.implementation.tickets.split import parent_carries
+        from foundry.agents.implementation.tickets.tasks import _ticket_notes
         from foundry.schemas.gates import GateTriage
 
         def seq(key: str) -> Seq:
             return rt.seq(config, NODE_ID, key)
 
-        why: dict[str, list[str]] = {}
-        carry: dict[str, str] = {}
-        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq):
-            tid = t.run_against.removeprefix("task/")
-            if tid not in asked:
-                continue
-            if t.name == SPLIT_REQUEST_TRIAGE or (
-                t.name.startswith(FAIL_TRIAGE) and t.produced_by == ENGINEERING_NODE_ID
-            ):
-                why.setdefault(tid, []).append(t.explanation[:800])
-            elif t.name == CARRY_TRIAGE and t.produced_by == ENGINEERING_NODE_ID:
-                carry[tid] = t.explanation
+        fails = _ticket_notes(state, FAIL_TRIAGE)
+        requests = {
+            t.run_against.removeprefix("task/"): t
+            for t in state.get("gate_triage") or ()
+            if t.name == SPLIT_REQUEST_TRIAGE
+        }
+        why = {
+            tid: [
+                t.explanation[:800]
+                for t in (
+                    *([requests[tid]] if tid in requests else ()),
+                    *sorted(fails.get(tid, ()), key=lambda t: t.seq),
+                )
+            ]
+            for tid in asked
+        }
+        carry = parent_carries(state, asked)
         gates = _prior_failures(state)[:30]
         prior = _prior_plan(state, rt) or _prior_plan(state, rt, inline=True)
         tickets_seq = seq("artifact:tickets")
@@ -1355,18 +1358,18 @@ def make_planner_node(
                     seq=seq(f"split:{tid}"),
                 )
             )
-            if done and tid in carry:
+            if done:
                 notes.extend(
                     GateTriage(
-                        name=SPLIT_CARRY_TRIAGE,
+                        name=SPLIT_CHILD_TRIAGE,
                         run_against=f"task/{child}",
-                        explanation=carry[tid],
+                        explanation=carry.get(tid, ""),
                         produced_by=NODE_ID,
-                        seq=seq(f"{SPLIT_CARRY_TRIAGE}:{child}"),
+                        seq=seq(f"{SPLIT_CHILD_TRIAGE}:{child}"),
                     )
                     for child in split[tid]
                 )
-        summary = " ".join(n.explanation for n in notes if n.name != SPLIT_CARRY_TRIAGE)
+        summary = " ".join(n.explanation for n in notes if n.name != SPLIT_CHILD_TRIAGE)
         if fit is None or prior is None:
             return {
                 "gate_triage": notes,

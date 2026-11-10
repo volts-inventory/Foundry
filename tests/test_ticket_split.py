@@ -19,22 +19,31 @@ from langgraph.checkpoint.memory import MemorySaver
 from foundry.agents import AgentRuntime
 from foundry.agents.implementation.tickets import pending_splits, read_tickets
 from foundry.agents.implementation.tickets.constants import (
+    CARRY_TRIAGE,
+    FAIL_TRIAGE,
+    INTERFACE_REVISED_TRIAGE,
     PLANNER_NODE_ID,
+    SPLIT_CHILD_TRIAGE,
     SPLIT_DECLINED_TRIAGE,
     SPLIT_REQUEST_TRIAGE,
     SPLIT_TRIAGE,
 )
 from foundry.agents.implementation.tickets.split import (
     may_split,
+    parent_carries,
     split_after_restart,
+    split_view,
     splittable,
 )
 from foundry.agents.planner.split import SPLIT_SOP, split_items
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapters.stub import StubAdapter
+from foundry.execution.adapters.tiered import ESCALATE_DECLINED_TRIAGE, ESCALATED_TRIAGE
 from foundry.gates import DevGateWriteVerifier, ZoneBSigner
+from foundry.graph.gate_wiring.best import keep_splits_if_fixing
 from foundry.graph.gate_wiring.ledger import RESTARTED_TRIAGE
 from foundry.graph.gate_wiring.restarts import FailureCluster, unbuilt_restart
+from foundry.graph.gate_wiring.routing import ADVANCE, FIX, HALT
 from foundry.graph.gate_wiring.wave_check import WaveBuildCheck
 from foundry.graph.supervisor import build_supervisor_graph
 from foundry.proxy import ModelProviderProxy
@@ -237,9 +246,11 @@ def _state(*tickets: Ticket, notes: tuple[GateTriage, ...] = ()) -> tuple[Factor
     return {"artifacts": handles, "gate_triage": list(notes)}, lambda h: by_uri[h.uri]
 
 
-def _note(name: str, tid: str, by: str = "engineering") -> GateTriage:
+def _note(
+    name: str, tid: str, by: str = "engineering", *, seq: Seq = _SEQ, why: str = ""
+) -> GateTriage:
     return GateTriage(
-        name=name, run_against=f"task/{tid}", explanation="", produced_by=by, seq=_SEQ
+        name=name, run_against=f"task/{tid}", explanation=why, produced_by=by, seq=seq
     )
 
 
@@ -250,31 +261,34 @@ def test_only_a_ticket_with_two_scenarios_or_work_files_is_splittable() -> None:
     assert splittable(_ticket("A", files=("app.py",), scenario_ids=("AC-1", "AC-2")))
     assert splittable(_ticket("A", files=("app.py", "store.py")))
     assert not splittable(_ticket("contracts", files=("a.py", "b.py")))
+    # One module and its templates: files in all count, not work files alone.
+    pages = tuple(f"templates/p{i}.html" for i in range(18))
+    assert splittable(_ticket("A", files=("web.py", *pages), scenario_ids=("AC-1",)))
 
 
 def test_a_failure_a_dependency_owns_asks_for_no_split() -> None:
     dep = _ticket("A", files=("a.py",))
     mine = _ticket("B", files=("b.py", "c.py"), depends_on=("A",))
     state, resolve = _state(dep, mine)
-    assert may_split(state, resolve, "B", set())
-    assert may_split(state, resolve, "B", {"B"})
-    assert not may_split(state, resolve, "B", {"A"})
+    assert may_split(split_view(state, resolve), "B", set())
+    assert may_split(split_view(state, resolve), "B", {"B"})
+    assert not may_split(split_view(state, resolve), "B", {"A"})
     top = _ticket("C", files=("d.py", "e.py"), depends_on=("B",))
     state, resolve = _state(dep, mine, top)
-    assert not may_split(state, resolve, "C", {"A"})  # transitively
+    assert not may_split(split_view(state, resolve), "C", {"A"})  # transitively
 
 
 def test_a_split_is_asked_for_once_per_ticket() -> None:
     mine = _ticket("B", files=("b.py", "c.py"))
     state, resolve = _state(mine, notes=(_note(SPLIT_REQUEST_TRIAGE, "B"),))
     assert pending_splits(state) == ("B",)
-    assert not may_split(state, resolve, "B", set())
+    assert not may_split(split_view(state, resolve), "B", set())
     answered: FactoryState = {
         **state,
         "gate_triage": [*state["gate_triage"], _note(SPLIT_DECLINED_TRIAGE, "B", PLANNER_NODE_ID)],
     }
     assert pending_splits(answered) == ()
-    assert not may_split(answered, resolve, "B", set())
+    assert not may_split(split_view(answered, resolve), "B", set())
 
 
 def _pass(n: int, fix: str | None, outcome: str, restart: tuple[str, ...] = ()) -> FixPass:
@@ -418,3 +432,115 @@ def test_children_own_exactly_the_parents_work_and_take_over_its_dependents() ->
     ]
     for r in bad:
         assert split_items(items, "B", r, set())[0] is None
+
+
+def test_a_child_of_a_split_is_never_split_again() -> None:
+    child = _ticket("B-1", files=("b.py", "c.py"))
+    state, resolve = _state(child)
+    assert may_split(split_view(state, resolve), "B-1", set())
+    state, resolve = _state(child, notes=(_note(SPLIT_CHILD_TRIAGE, "B-1", PLANNER_NODE_ID),))
+    assert not may_split(split_view(state, resolve), "B-1", set())
+
+
+def test_after_reads_only_integers_never_a_bool() -> None:
+    items = [_item("B", files=["b.py", "c.py"], scenarios=[{"id": "AC-1", "text": "x"}])]
+    kid = {"title": "t", "description": "", "implements": [], "consumes": []}
+    reply = {
+        "children": [
+            {**kid, "scenario_ids": ["AC-1"], "files": ["b.py"], "after": []},
+            {**kid, "scenario_ids": [], "files": ["c.py"], "after": [True]},
+        ],
+        "rationale": "r",
+    }
+    merged, ids, why = split_items(items, "B", reply, set())
+    assert why == "" and merged is not None
+    assert {i["id"]: i for i in merged}[ids[1]]["depends_on"] == []
+
+
+def _eseq(epoch: int) -> Seq:
+    return Seq("run", epoch, 0, "engineering", 0)
+
+
+def test_children_carry_only_the_failed_attempt_that_is_the_parents_newest() -> None:
+    mine = _ticket("B", files=("b.py", "c.py"))
+    failed = (
+        _note(f"{FAIL_TRIAGE}:2", "B", seq=_eseq(3)),
+        _note(CARRY_TRIAGE, "B", seq=_eseq(3), why="blob://attempt-2"),
+    )
+    asked = _note(SPLIT_REQUEST_TRIAGE, "B", seq=_eseq(3))
+    state, _ = _state(mine, notes=(*failed, asked))
+    assert parent_carries(state, ["B"]) == {"B": "blob://attempt-2"}
+    # A fix loop's split: the parent integrated a later attempt, its children start
+    # from the integrated tree.
+    by_fix = _note(SPLIT_REQUEST_TRIAGE, "B", "fix_pass", seq=_eseq(3))
+    state, _ = _state(mine, notes=(*failed, by_fix))
+    assert parent_carries(state, ["B"]) == {}
+    # An attempt after the carried one failed without carrying: the carry is stale.
+    later = _note(f"{FAIL_TRIAGE}:3", "B", seq=_eseq(4))
+    state, _ = _state(mine, notes=(*failed, later, asked))
+    assert parent_carries(state, ["B"]) == {}
+    # The parent integrated a build: never overlay a failed attempt over it.
+    state, _ = _state(mine, notes=(*failed, asked))
+    diff = Artifact(
+        kind="feature_diff", uri="cas://d", produced_by="engineering", seq=_SEQ, task_id="B"
+    )
+    state = {**state, "artifacts": [*state["artifacts"], diff]}
+    assert parent_carries(state, ["B"]) == {}
+    # An interface revision supersedes the attempts before it.
+    revised = _note(INTERFACE_REVISED_TRIAGE, "B", PLANNER_NODE_ID, seq=_eseq(5))
+    state, _ = _state(mine, notes=(*failed, asked, revised))
+    assert parent_carries(state, ["B"]) == {}
+
+
+class _Hybrid:
+    """A tiered adapter's escalation surface: every tier is local, T1 the target."""
+
+    escalation_tier = "T1"
+
+    @staticmethod
+    def is_local(tier: str | None) -> bool:
+        return True
+
+
+def test_a_local_ticket_splits_after_its_escalation_or_where_none_can_run() -> None:
+    mine = _ticket("B", files=("b.py", "c.py"))
+    cluster = FailureCluster(key="ticket:B", stage=1, items=("test:x",), tickets=("B",))
+    rt = AgentRuntime(proxy=None, adapter=_Hybrid())  # type: ignore[arg-type]
+    passes = [
+        _pass(0, None, "initial"),
+        _pass(1, "fix-1", "no-change", restart=("B",)),
+        _pass(2, "restart-B", "no-change"),
+        _pass(3, "fix-3", "no-change"),
+    ]
+    diff = Artifact(
+        kind="feature_diff", uri="cas://d", produced_by="engineering", seq=_SEQ, task_id="B"
+    )
+    restarted = _note(RESTARTED_TRIAGE, "B", "fix_pass")
+
+    def ask(*notes: GateTriage, escalates: bool) -> tuple[str, ...]:
+        state, resolve = _state(mine, notes=(restarted, *notes))
+        state = {**state, "artifacts": [*state["artifacts"], diff]}
+        return split_after_restart(
+            state, resolve, rt, (cluster,), "ticket:B", passes, escalates=escalates
+        )
+
+    # A wave check could still escalate B (the newest built wave): that comes first.
+    assert ask(escalates=True) == ()
+    assert ask(_note(ESCALATED_TRIAGE, "B"), escalates=True) == ("B",)
+    assert ask(_note(ESCALATE_DECLINED_TRIAGE, "B"), escalates=True) == ("B",)
+    # The final gates never escalate: nothing to wait for.
+    assert ask(escalates=False) == ("B",)
+
+
+def test_only_a_loop_that_goes_on_hands_a_split_to_the_planner() -> None:
+    keep = _note("other", "B")
+
+    def check(decision: str) -> list[GateTriage]:
+        out: dict[str, Any] = {"gate_triage": [_note(SPLIT_REQUEST_TRIAGE, "B"), keep]}
+        keep_splits_if_fixing({}, out, lambda post: decision)
+        return list(out["gate_triage"])
+
+    assert len(check(FIX)) == 2
+    # A spent budget or a dead-end stop halts as it would: no split rides along.
+    assert check(HALT) == [keep]
+    assert check(ADVANCE) == [keep]

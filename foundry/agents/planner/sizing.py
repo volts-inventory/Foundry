@@ -78,8 +78,8 @@ _TEST_DIRS = frozenset({"tests", "test", "spec", "specs", "__tests__"})
 
 _TEST_NAME = re.compile(r"^(test_.*|.*_test\.\w+|.*\.(test|spec)\.\w+|conftest\.py)$")
 
-# Server-side templates and static assets: markup and media, not logic.
-_ASSET_DIRS = frozenset({"templates", "static"})
+# Templates and static assets by extension: markup, styles and media, not logic. A
+# script or module is work wherever it lives (static/game.js, templates/macros.py).
 _ASSET_EXT = frozenset(
     {
         ".html",
@@ -110,12 +110,9 @@ _ASSET_EXT = frozenset(
 
 
 def is_asset(path: str) -> bool:
-    """A template or static asset: under a templates/ or static/ dir, or markup,
-    a stylesheet, an image, a font or audio by its extension."""
-    return (
-        any(p in _ASSET_DIRS for p in path.split("/")[:-1])
-        or posixpath.splitext(path)[1].lower() in _ASSET_EXT
-    )
+    """A template or static asset by its extension: markup, a stylesheet, an image,
+    a font or audio."""
+    return posixpath.splitext(path)[1].lower() in _ASSET_EXT
 
 
 def ticket_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
@@ -173,9 +170,10 @@ def size_text(ceilings: Ceilings) -> str:
         "\n\nTICKET SIZE (this run; checked: a ticket over it FAILS the Spec gate): "
         + rows
         + ". The entrypoint ticket is exempt. Work files are source code: templates "
-        "and static assets (HTML/Jinja templates, templates/ and static/ dirs, CSS, "
-        "images, fonts) count only toward files in all, and neither counts tests, "
-        "package markers (__init__.py), stack-command files or manifests/config. It "
+        "and static assets (HTML/Jinja templates, CSS, images, fonts, audio; a script "
+        "or module is work wherever it lives) count only toward files in all, and "
+        "neither counts tests, package markers (__init__.py), stack-command files "
+        "or manifests/config. It "
         "is a ceiling, not a target: one ticket per layer or concern of an epic, split "
         "only when a ticket would exceed the ceiling; a web layer whose routes and "
         "templates fit stays ONE ticket, never one per page. Every feature ticket "

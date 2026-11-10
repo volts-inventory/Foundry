@@ -16,13 +16,13 @@ backends use.
 Sampling: the proxy's per-model local profile arrives as ``local_sampling``;
 OpenAI fields go as such, the rest as extra body fields (see ``_OPENAI_SAMPLING``).
 
-Thinking: the proxy's ``local_thinking`` flag picks ``reasoning_effort`` — ``xhigh``
-(Qwen3.8's level for agentic loops; ``local_effort`` overrides it, e.g. ``medium``
-for agent turns; Ollama maps any effort to plain "on" for a
-model with only on/off) or ``none``. The reasoning comes back in the message's
-``reasoning`` field (or inline ``<think>``), never in the parsed text, and is
-replayed as the ``reasoning`` of that assistant turn on the session's next call —
-how Ollama's /v1 carries Qwen's "preserve thinking": it maps an assistant
+Thinking: the proxy's ``local_thinking`` flag picks ``reasoning_effort`` — the
+request's ``local_effort`` (``low`` / ``medium`` / ``xhigh``, Qwen3.8's levels on
+Ollama), else ``xhigh`` (Ollama maps any effort to plain "on" for a model with only
+on/off, and does not reject a level the model lacks) — or ``none``. The reasoning
+comes back in the message's ``reasoning`` field (or inline ``<think>``), never in
+the parsed text, and is replayed as the ``reasoning`` of that assistant turn on
+the session's next call — how Ollama's /v1 carries Qwen's "preserve thinking": it maps an assistant
 message's ``reasoning`` onto the turn's thinking, which the Qwen3.8 renderer
 always renders (and the Qwen3.5/3.6 one renders for turns after the last user
 query).

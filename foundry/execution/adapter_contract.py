@@ -35,6 +35,7 @@ from pydantic import Field
 from foundry.execution.sandbox import Sandbox
 from foundry.schemas.base import FrozenModel
 from foundry.schemas.gates import GateTriage
+from foundry.schemas.implementation import EFFORT_LEVELS, Effort
 
 __all__ = [
     "AdapterResult",
@@ -42,6 +43,7 @@ __all__ = [
     "TaskPacket",
     "WorkerAdapter",
     "assemble_prompt",
+    "current_packet_effort",
     "current_packet_tier",
     "packet_tier_scope",
 ]
@@ -50,22 +52,33 @@ __all__ = [
 # right now, for completion closures that only see the prompt (raw-react,
 # proxy-agent). A ContextVar so concurrent pool workers each see their own packet.
 _PACKET_TIER: ContextVar[str | None] = ContextVar("packet_tier", default=None)
+_PACKET_EFFORT: ContextVar[Effort | None] = ContextVar("packet_effort", default=None)
 
 
 @contextmanager
 def packet_tier_scope(packet: TaskPacket) -> Iterator[None]:
-    """Expose ``packet``'s tier to :func:`current_packet_tier` for the duration."""
+    """Expose ``packet``'s tier and thinking level to :func:`current_packet_tier`
+    and :func:`current_packet_effort` for the duration."""
     tier = packet.task.get("tier")
+    effort = packet.task.get("effort")
     token = _PACKET_TIER.set(str(tier) if tier else None)
+    effort_token = _PACKET_EFFORT.set(effort if effort in EFFORT_LEVELS else None)
     try:
         yield
     finally:
+        _PACKET_EFFORT.reset(effort_token)
         _PACKET_TIER.reset(token)
 
 
 def current_packet_tier() -> str | None:
     """The tier of the packet being run on this thread, or None (no tier set)."""
     return _PACKET_TIER.get()
+
+
+def current_packet_effort() -> Effort | None:
+    """The local thinking level of the packet being run on this thread, or None
+    (the proxy's default for an agent turn)."""
+    return _PACKET_EFFORT.get()
 
 
 class AdapterUnavailableError(RuntimeError):

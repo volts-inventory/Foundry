@@ -38,6 +38,7 @@ from foundry.schemas.implementation import (
     Ticket,
     feature_path,
     scenario_ref,
+    ticket_effort,
 )
 from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.seq import Seq
@@ -327,6 +328,7 @@ def _ticket_packet(
             "description": ticket.description,
             "specialty": ticket.specialty.value,
             "difficulty": ticket.difficulty.value,
+            "effort": ticket_effort(ticket.difficulty),
             "tier": task.tier,
             "spec_uri": task.spec_uri,
             "branch": task.branch,

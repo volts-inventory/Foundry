@@ -41,6 +41,8 @@ STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
 RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
 HINT_COUNTS = "hint_counts.json"
+# The proxy's per-call thinking-level counts ride in the hint counts (EFFORT_COUNT_PREFIX).
+EFFORT_PREFIX = "effort."
 
 
 def run_case(
@@ -130,6 +132,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
         else []
     )
     code = meta.get("exit_code")
+    counts = meta.get("hint_counts") or {}
     return {
         "wall_s": meta.get("wall_s"),
         "exit_code": code,
@@ -145,7 +148,12 @@ def summarize_case(root: Path) -> dict[str, Any]:
         "out_files": len(files),
         "verdict": VERDICTS.get(code) if code is not None else None,
         "released": bool(files) and code == 0,
-        "hint_counts": meta.get("hint_counts") or {},
+        "calls_by_effort": {
+            k.removeprefix(EFFORT_PREFIX): v
+            for k, v in counts.items()
+            if k.startswith(EFFORT_PREFIX)
+        },
+        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(EFFORT_PREFIX)},
     }
 
 
@@ -168,6 +176,8 @@ def render(summary: dict[str, dict[str, Any]]) -> str:
         counts = s.get("hint_counts") or {}
         fired = ", ".join(f"{k}={v}" for k, v in counts.items()) or "none"
         rows.append(f"{case} hints: {fired}")
+        if efforts := s.get("calls_by_effort"):
+            rows.append(f"{case} effort: " + ", ".join(f"{k}={v}" for k, v in efforts.items()))
     return "\n".join(rows)
 
 

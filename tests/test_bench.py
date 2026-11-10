@@ -61,6 +61,17 @@ def test_summarize_case(tmp_path: Path) -> None:
     assert s["released"] is False
 
 
+def test_summarize_case_splits_calls_by_effort_out_of_the_hint_counts(tmp_path: Path) -> None:
+    root = _case(tmp_path, 0, True)
+    counts = {"effort.low": 2, "effort.xhigh": 1, "gate.reuse.build": 3}
+    meta = {"wall_s": 1.0, "exit_code": 0, "hint_counts": counts}
+    (root / "run.json").write_text(json.dumps(meta))
+    s = bench.summarize_case(root)
+    assert s["calls_by_effort"] == {"low": 2, "xhigh": 1}
+    assert s["hint_counts"] == {"gate.reuse.build": 3}
+    assert "dice effort: low=2, xhigh=1" in bench.render({"dice": s})
+
+
 def test_released_requires_files_and_exit_zero(tmp_path: Path) -> None:
     assert bench.summarize_case(_case(tmp_path, 0, True))["released"] is True
 

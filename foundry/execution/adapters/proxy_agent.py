@@ -55,7 +55,11 @@ from foundry.execution.adapter_contract import (
     current_packet_tier,
     packet_tier_scope,
 )
-from foundry.execution.adapters.claude_code import changed_files, walk_worktree
+from foundry.execution.adapters.claude_code import (
+    TreeTooLargeError,
+    changed_files,
+    walk_worktree,
+)
 from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE, STOPPED_DIGEST
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
@@ -694,6 +698,7 @@ class ProxyAgentAdapter:
                 return None
             st.reads[rel] = (n, stamp)
         read: _Read | None = None
+        guard = _fence_snapshot(st) if action == "run" else None
         try:
             if action == "read_file":
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
@@ -705,6 +710,8 @@ class ProxyAgentAdapter:
                 observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
+        if guard is not None:
+            observation += _revert_fenced_out(st, guard)
         if action == "run":
             observation += _install_notes(st, str(act.get("cmd", "")), observation)
             st.last_check = f"{_summarize(act)}: {_head(observation)}"
@@ -889,6 +896,92 @@ def _fenced(st: _Loop, act: dict[str, Any]) -> str | None:
         + f". If the failure really needs {rel} changed, repeat the call with a "
         "`reason` saying why."
     )
+
+
+# What a fenced session's `run` guard reads per run (before and after): past it the
+# run goes unguarded, and the observation says so.
+_FENCE_GUARD_MAX = 32 << 20
+
+
+def _fence_snapshot(st: _Loop) -> dict[str, bytes] | str | None:
+    """A fenced session's files outside its target before a ``run`` (a note when the
+    tree is too large to guard), else None: unfenced."""
+    if st.fence is None:
+        return None
+    try:
+        tree = walk_worktree(st.worktree, max_total=_FENCE_GUARD_MAX)
+    except TreeTooLargeError:
+        return "\nNOTE: the tree is too large to guard this run's edits outside the target."
+    return _fenced_out(st, tree)
+
+
+def _fenced_out(st: _Loop, tree: dict[str, bytes]) -> dict[str, bytes]:
+    from foundry.agents.implementation.tickets import in_write_scope
+
+    fence = st.fence or ()
+    return {rel: data for rel, data in tree.items() if not in_write_scope(rel, fence)}
+
+
+def _revert_fenced_out(st: _Loop, before: dict[str, bytes] | str) -> str:
+    """Undo what a fenced session's ``run`` did outside its target — ``sed -i``, a
+    heredoc, ``rm`` — and say so. A shell command is never parsed: the tree is
+    compared before and after, so the fence holds however the edit was spelled, and
+    a deliberate cross-file edit goes through ``write_file`` with its ``reason``."""
+    if isinstance(before, str):
+        return before
+    try:
+        after = _fenced_out(st, walk_worktree(st.worktree, max_total=_FENCE_GUARD_MAX))
+    except TreeTooLargeError:
+        return "\nNOTE: the tree grew too large to guard this run's edits outside the target."
+    changed = sorted(
+        rel for rel in before.keys() | after.keys() if before.get(rel) != after.get(rel)
+    )
+    if not changed:
+        return ""
+    reverted: list[str] = []
+    for rel in changed:
+        try:
+            _restore(st.worktree, rel, before.get(rel))
+            reverted.append(rel)
+        except OSError as exc:
+            reverted.append(f"{rel} (NOT reverted: {exc.strerror or exc})")
+    return (
+        "\nREVERTED: this run changed files outside this fix pass's target, and those "
+        "changes were undone: "
+        + ", ".join(reverted)
+        + ". Edit only: "
+        + ", ".join(st.fence or ())
+        + ". If the failure really needs another file changed, use write_file (or "
+        "delete_file) with a `reason` saying why — not a shell command."
+    )
+
+
+def _restore(worktree: Path, rel: str, data: bytes | None) -> None:
+    """Put ``rel`` back to ``data`` (None: the run created it — remove it). The run
+    may have left a link at any component, so nothing is written through one."""
+    root = worktree.resolve()
+    path = root / rel
+    if not path.parent.resolve().is_relative_to(root):
+        raise OSError(f"{rel}: its directory now leads out of the worktree")
+    if data is None:
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        return
+    try:
+        # In place, so the file keeps its mode (a script stays executable).
+        fd = os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    except OSError:
+        # A link or directory in its place: removed, then the file written fresh.
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
 
 
 def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:

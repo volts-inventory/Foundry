@@ -38,6 +38,11 @@ _POLL_S = 0.5
 # What one check reads from the live tree: a session can't make the host buffer more.
 MAX_FILE = 8 << 20
 MAX_TREE = 64 << 20
+# Claude Code's longest Bash timeout. The script gives up a minute short of it, so the
+# session sees its "run it again" line, never a killed command; the rerun is answered
+# from cache once the check it asked for lands.
+BASH_TIMEOUT_MS = 600_000
+SCRIPT_WAIT_MAX_S = BASH_TIMEOUT_MS // 1000 - 60
 
 _SCRIPT_BODY = """#!/bin/sh
 # Foundry's gate check: asks the host to run the gates on this tree; prints the report.
@@ -48,7 +53,7 @@ i=0
 while [ ! -f "$d/$id.out" ]; do
   i=$((i + 1))
   if [ "$i" -gt {wait_s} ]; then
-    echo "foundry-check: no answer after {wait_s}s; run it again (cached if unchanged)"
+    echo "foundry-check: no answer yet after {wait_s}s; run it again (cached once ready)"
     exit 2
   fi
   sleep 1
@@ -84,13 +89,14 @@ def open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
 def check_note(opening: str) -> str:
     """The prompt's paragraph for a session with ``foundry-check``."""
     return (
-        f"GATE CHECK: `{CHECK_COMMAND}` (run it with Bash, timeout 600000) runs the gates "
-        "themselves — the build and this task's acceptance scenarios — on a gate-shaped "
+        f"GATE CHECK: `{CHECK_COMMAND}` (run it with Bash, timeout {BASH_TIMEOUT_MS}) runs "
+        "the gates themselves — the build and this task's acceptance scenarios — on a gate-shaped "
         "copy of this tree, as the wave check will judge it once integrated. Below and in "
         "its reports, `check` means that command. It prints what is YOURS to fix and what "
         "was PRE-EXISTING, and exits 1 while anything is yours. Run it after your edits "
         "and finish when it reports nothing as yours. An unchanged tree answers from "
-        "cache, free; if the command times out, run it again. Never edit .claude/foundry."
+        "cache, free; if it says there is no answer yet, run it again unchanged — the "
+        "answer comes from cache once ready. Never edit .claude/foundry."
         f"\n\n{opening}"
     )
 
@@ -113,8 +119,13 @@ class CheckRelay:
         self._lock = threading.Lock()
         self._served = False
         self._orphaned = False
+        # How long one answer can take (its gates' timeouts), for the join at exit.
         self._wait_s = int(3 * checker.spec.base.settings.timeout_s) + 120
         self.answered = 0
+
+    @property
+    def script_wait_s(self) -> int:
+        return min(self._wait_s, SCRIPT_WAIT_MAX_S)
 
     def __enter__(self) -> CheckRelay:
         """Raises ``OSError`` when the relay dir can't be made (a link in its place)."""
@@ -129,7 +140,7 @@ class CheckRelay:
                     pass
                 self._fds.append(os.open(name, flags, dir_fd=self._fds[-1]))
             self._fd = self._fds[-1]
-            self._write(SCRIPT, _SCRIPT_BODY.format(wait_s=self._wait_s))
+            self._write(SCRIPT, _SCRIPT_BODY.format(wait_s=self.script_wait_s))
         except OSError:
             self._close()
             raise

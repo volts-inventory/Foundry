@@ -1626,6 +1626,47 @@ def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) 
     )
 
 
+def test_a_fenced_fixers_run_cannot_edit_outside_its_target(tmp_path: Path) -> None:
+    # `sed -i` / a redirect in a `run` would slip past the write_file fence.
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "admin.py").write_text("A = 1\n")
+    (src / "routes.py").write_text("R = 1\n")
+    (src / "app.py").write_text("Z = 0\n")
+    (src / "tests" / "test_b.py").write_text("B = 1\n")
+    seen: list[dict[str, Any]] = []
+    shell = (
+        "sed -i.orig 's/1/2/' admin.py tests/test_b.py && rm admin.py.orig tests/test_b.py.orig"
+        " && rm routes.py && echo 'N = 1' > new.py && echo 'Z = 3' > app.py"
+    )
+    actions = iter(
+        [
+            {"action": "write_file", "path": "app.py", "content": "Z = 1\n", "reason": "needed"},
+            {"action": "run", "cmd": shell},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+        wt = sb.worktree
+        assert (wt / "admin.py").read_text() == "A = 1\n"
+        assert (wt / "routes.py").read_text() == "R = 1\n"
+        assert not (wt / "new.py").exists()
+    observation = str(seen[2]["content"])
+    assert "REVERTED:" in observation
+    assert "admin.py, new.py, routes.py." in observation
+    assert "`reason`" in observation
+    # In the target, or admitted by an earlier reason: the run's edit stands.
+    assert body["files"] == {"tests/test_b.py": "B = 2\n", "app.py": "Z = 3\n"}
+
+
 def test_native_tools_offer_the_reason_only_to_a_fenced_session(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

@@ -497,7 +497,7 @@ def test_an_error_envelope_keeps_its_subtype_and_turns_in_the_triage(
 # ---- foundry-check: the in-session gate check, relayed into the cage ----------
 
 
-def _check_spec(tmp_path: Path, mode: str | None = None) -> Any:
+def _check_spec(tmp_path: Path, mode: str | None = None, timeout_s: float = 10) -> Any:
     from foundry.gates.pydeps import PythonEnvCache
     from foundry.gates.sandbox import ToolchainCache
     from foundry.gates.self_check import CheckBase, CheckSpec, SelfCheckSettings
@@ -512,7 +512,7 @@ def _check_spec(tmp_path: Path, mode: str | None = None) -> Any:
         resolve=lambda a: None,
         resolve_blob=lambda u: b"",
         rt=_Rt(),  # type: ignore[arg-type]
-        settings=SelfCheckSettings(budget=3, timeout_s=10, mode=mode),
+        settings=SelfCheckSettings(budget=3, timeout_s=timeout_s, mode=mode),
     )
     return CheckSpec(base=base, scope=frozenset(), own_refs=frozenset(), own_files=("app.py",))
 
@@ -756,3 +756,26 @@ def test_a_relay_that_cannot_write_its_script_leaks_nothing(
         assert sorted(p.name for p in (sb.worktree / ".claude" / "foundry").iterdir()) == [
             "foundry-check"
         ]
+
+
+@pytest.mark.parametrize(("timeout_s", "wait_s"), [(10, 150), (300, 540)])
+def test_the_relay_script_gives_up_before_the_bash_timeout_it_advises(
+    source_dir: Path, tmp_path: Path, timeout_s: float, wait_s: int
+) -> None:
+    from foundry.execution.adapters.claude_check import (
+        BASH_TIMEOUT_MS,
+        RELAY_DIR,
+        CheckRelay,
+        check_note,
+    )
+    from foundry.gates.self_check import SessionCheck
+
+    assert f"timeout {BASH_TIMEOUT_MS})" in check_note("")
+    with Sandbox(source_dir) as sb:
+        relay = CheckRelay(
+            SessionCheck(_check_spec(tmp_path, timeout_s=timeout_s)), sb.worktree, {}
+        )
+        with relay:
+            script = (sb.worktree / RELAY_DIR / "foundry-check").read_text()
+    assert f'"$i" -gt {wait_s} ]' in script
+    assert wait_s * 1000 < BASH_TIMEOUT_MS

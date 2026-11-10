@@ -198,7 +198,8 @@ def _quoted_only(source: str, name: str, line: int) -> bool:
 
 def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
     """The last lines of a command's output (stdout then stderr), sanitized, bounded,
-    with the workdir path normalized to ``.``."""
+    with the workdir path normalized to ``.``. mypy's diagnostics, when present, are
+    regrouped (``_mypy_excerpt``) and close the excerpt, under the same bounds."""
     text = "\n".join(t for t in (stdout, stderr) if t.strip())
     root = str(Path(workdir).resolve())
     text = text.replace(root + "/", "./").replace(root, ".")
@@ -208,14 +209,93 @@ def output_tail(stdout: str, stderr: str, workdir: Path) -> tuple[str, ...]:
         for ln in text.splitlines()
         if ln.strip() and not _MYPY_UNCHECKED_NOTE.search(ln)
     ]
+    mypy = _mypy_excerpt(lines)
+    if mypy:
+        lines = [ln for ln in lines if not _MYPY_LINE.match(ln) and not _MYPY_FOUND.match(ln)]
+    lines_left = _EXCERPT_LINES - len(mypy)
+    used = sum(len(ln) for ln in mypy)
     tail: list[str] = []
-    used = 0
-    for ln in reversed(lines[-_EXCERPT_LINES:]):
+    for ln in reversed(lines[-lines_left:] if lines_left > 0 else []):
         if used + len(ln) > _EXCERPT_CHARS:
             break
         tail.append(ln)
         used += len(ln)
-    return tuple(reversed(tail))
+    return (*reversed(tail), *mypy)
+
+
+_MYPY_LINE = re.compile(
+    r"^(?P<path>[^\s:][^:]*?\.pyi?):(?P<line>\d+)(?::\d+){0,3}: "
+    r"(?P<kind>error|note): (?P<msg>.*)$"
+)
+_MYPY_PER_FILE = 5
+_MYPY_ERRORS = 15
+_MYPY_NOTES_PER_ERROR = 2
+
+
+def _mypy_excerpt(lines: list[str]) -> list[str]:
+    """mypy's diagnostics for a fixer: the errors grouped by file (files in first-seen
+    order), an error repeated with the same message in one file shown once with its
+    other lines, at most ``_MYPY_PER_FILE`` per file and ``_MYPY_ERRORS`` in all, each
+    followed only by the notes mypy attached to it (same file:line, right after it);
+    then how many errors were left out, then mypy's own ``Found N errors`` line.
+    Empty when the output holds no mypy error."""
+    files: dict[str, dict[str, list[str]]] = {}  # path -> message -> [line, *notes]
+    extra: dict[tuple[str, str], list[str]] = {}  # (path, message) -> other line numbers
+    owner: tuple[str, str, str] | None = None  # (path, line, message) notes attach to
+    found = ""
+    for ln in lines:
+        if _MYPY_FOUND.match(ln):
+            found = ln
+            continue
+        m = _MYPY_LINE.match(ln)
+        if m is None:
+            owner = None
+            continue
+        path, num, msg = m.group("path"), m.group("line"), m.group("msg")
+        if m.group("kind") == "error":
+            by_msg = files.setdefault(path, {})
+            if msg in by_msg:
+                extra.setdefault((path, msg), []).append(num)
+                owner = None
+            else:
+                by_msg[msg] = [ln]
+                owner = (path, num, msg)
+        elif owner is not None and owner[:2] == (path, num):
+            entry = files[path][owner[2]]
+            if len(entry) <= _MYPY_NOTES_PER_ERROR and ln not in entry:
+                entry.append(ln)
+    if not files:
+        return []
+    out: list[str] = []
+    shown = 0
+    hidden: dict[str, int] = {}
+    used = 0
+    for path, by_msg in files.items():
+        for i, (msg, entry) in enumerate(by_msg.items()):
+            again = extra.get((path, msg))
+            head = entry[0] + (f" (also at line {', '.join(again)})" if again else "")
+            block = [head[:_LINE_CHARS], *entry[1:]]
+            size = sum(len(b) for b in block)
+            if (
+                i >= _MYPY_PER_FILE
+                or shown >= _MYPY_ERRORS
+                or used + size > _EXCERPT_CHARS - 2 * _LINE_CHARS
+                or len(out) + len(block) > _EXCERPT_LINES - 2
+            ):
+                hidden[path] = hidden.get(path, 0) + 1
+                continue
+            out.extend(block)
+            shown += 1
+            used += size
+    if hidden:
+        n = sum(hidden.values())
+        out.append(
+            f"... {n} more error{'s' if n != 1 else ''} in {len(hidden)} "
+            f"file{'s' if len(hidden) != 1 else ''} not shown"
+        )
+    if found:
+        out.append(found)
+    return out
 
 
 # ---- the run's JS installs, reused by builds with the same install inputs ---------

@@ -676,6 +676,93 @@ _ID_SHAPED = re.compile(r"^(?:FAILED|ERROR|BDD criterion)\b")
 _DETAIL_FLOOR = 8
 
 
+def _quoted(s: str) -> str:
+    return f"| {s}"[:300] if _ID_SHAPED.match(s.strip()) else s[:300]
+
+
+def _detail_line(st: str) -> bool:
+    return (
+        st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____", "BDD criterion"))
+        or "assert" in st
+        or "Error" in st
+        or st.startswith("def test")
+    )
+
+
+# A failure block's header (``____ test_x ____``, ``____ ERROR collecting x.py ____``;
+# never the ``_ _ _`` line between long-traceback frames), that separator, and the
+# ``---- Captured stdout call ----`` sections after the traceback.
+_BLOCK_HEADER = re.compile(r"^_{3,} (.+?) _{3,}$")
+_COLLECTING = re.compile(r"^_{3,} ERROR collecting (\S+) _{3,}$")
+_FRAME_SEPARATOR = re.compile(r"^(?:_ ){3,}_?$")
+_CAPTURED = re.compile(r"^-{3,} .+ -{3,}$")
+# A frame's location: ``path:12: in func`` opens a --tb=short frame (its source line
+# follows); ``path:12:`` / ``path:12: AssertionError`` closes a --tb=long one.
+_FRAME_OPEN = re.compile(r"^(\S+?):\d+: in \S+$")
+_FRAME_CLOSE = re.compile(r"^(\S+?\.pyi?):\d+:(?: [\w.]+)?$")
+_CARETS = re.compile(r"^\s*[\^~]+\s*$")
+_EXC_LINE = re.compile(r"^E\s+((?:[A-Za-z_]\w*\.)*[A-Z]\w*(?:Error|Exception|Exit)\b.*)$")
+_FOREIGN_PARTS = frozenset(
+    {"site-packages", "dist-packages", ".venv", "venv", "_pytest", "pluggy", "pytest_bdd", ".."}
+)
+_TB_FRAMES = 3
+
+
+def _tree_frame(path: str) -> bool:
+    """A frame in the tree's own code: a relative path (pytest prints the files under
+    its rootdir relative) outside any installed package or pytest's internals."""
+    return not path.startswith(("/", "<")) and not _FOREIGN_PARTS & set(path.split("/"))
+
+
+def _failure_block(header: str, body: list[str]) -> list[str]:
+    """One failing test's detail: its header, then the exception (``E``) lines, then
+    the last ``_TB_FRAMES`` frames of the tree's own code (location + source line) —
+    frames in installed packages, the stdlib and pytest drop out. A collection error
+    leads with its module and exception. Lines in no frame (captured output) keep the
+    generic filter."""
+    errors: list[str] = []
+    frames: list[list[str]] = []  # [path, location / source lines...]
+    loose: list[str] = []
+    pending: list[str] = []
+    current: list[str] | None = None
+    captured = False
+    for s in body:
+        st = s.strip()
+        if st == "E" or st.startswith(("E ", "E\t")):
+            errors.append(s)
+        elif captured:
+            loose.append(s)
+        elif _CAPTURED.match(st) or _FRAME_SEPARATOR.match(st):
+            captured = _CAPTURED.match(st) is not None
+            loose.extend(pending)
+            pending, current = [], None
+        elif (m := _FRAME_OPEN.match(st)) is not None:
+            loose.extend(pending)
+            pending, current = [], [m.group(1), s]
+            frames.append(current)
+        elif current is None and (m := _FRAME_CLOSE.match(st)) is not None:
+            frames.append([m.group(1), *(p for p in pending if p.lstrip().startswith(">")), s])
+            pending = []
+        elif current is not None:
+            if not _CARETS.match(s):
+                current.append(s)
+        else:
+            pending.append(s)
+    loose.extend(pending)
+    out = [header]
+    collecting = _COLLECTING.match(header.strip())
+    if collecting is not None:
+        excs = [m.group(1) for e in errors if (m := _EXC_LINE.match(e.strip()))]
+        if excs:
+            out.append(f"{collecting.group(1)}: {excs[-1]}")
+            loose = [s for s in loose if not s.startswith("ImportError while importing")]
+    out.extend(errors)
+    for frame in [f for f in frames if _tree_frame(f[0])][-_TB_FRAMES:]:
+        out.extend(frame[1:])
+    out.extend(s for s in loose if _detail_line(s.strip()))
+    return out
+
+
 def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) -> tuple[str, ...]:
     """Human-readable failure lines from pytest output — the failing tests + the
     assertion (expected vs got) — so the fix loop can target the SPECIFIC failure
@@ -684,7 +771,9 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     The ``FAILED``/``ERROR`` summary lines come last but name every failing test, so
     they keep their room under ``limit``; the detail lines (each kept once) fill what
     is left, but never fewer than ``_DETAIL_FLOOR``, the exception (``E``) lines
-    first when they do not all fit. Only
+    first when they do not all fit. Each failing test's detail block leads with its
+    exception lines, then a short tail of the tree's own frames (``_failure_block``).
+    Only
     the lines of pytest's LAST short-summary section count as summary lines (a test
     can print a header of its own, never after pytest's): an id-shaped line anywhere
     else — a test's captured output — is quoted (``| ``), so a test cannot choose
@@ -698,20 +787,29 @@ def failure_findings(stdout: str, *, limit: int = 50, summary_ids: bool = True) 
     )
     keep: list[str] = []
     summary: list[str] = []
+    block: tuple[str, list[str]] | None = None
     for i, raw in enumerate(lines):
         s = raw.rstrip()
         st = s.strip()
         if not st:
             continue
+        opens = _BLOCK_HEADER.match(st) is not None
+        ends = opens or st.startswith("=")
+        if start is not None and i > start and st.startswith(("FAILED ", "ERROR ")):
+            ends = True
+        if ends and block is not None:
+            keep.extend(_quoted(ln) for ln in _failure_block(*block))
+            block = None
         if start is not None and i > start and st.startswith(("FAILED ", "ERROR ")):
             summary.append(s[:300])
-        elif (
-            st.startswith(("E ", "E\t", ">", "FAILED", "ERROR", "_____", "BDD criterion"))
-            or "assert" in st
-            or "Error" in st
-            or st.startswith("def test")
-        ):
-            keep.append(f"| {s}"[:300] if _ID_SHAPED.match(st) else s[:300])
+        elif opens:
+            block = (s, [])
+        elif block is not None:
+            block[1].append(s)
+        elif _detail_line(st):
+            keep.append(_quoted(s))
+    if block is not None:
+        keep.extend(_quoted(ln) for ln in _failure_block(*block))
     summary = summary[:limit]
     detail = list(dict.fromkeys(keep))
     room = max(limit - len(summary), _DETAIL_FLOOR)

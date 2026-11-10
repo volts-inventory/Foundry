@@ -339,6 +339,54 @@ def test_a_mass_failure_keeps_its_exception_message() -> None:
     assert len(failing_ids(findings)) == 50
 
 
+_SITE = "/venv/lib/python3.12/site-packages"
+_PYTEST_SHORT = f"""\
+=================================== FAILURES ===================================
+__________________________________ test_parse __________________________________
+{_SITE}/pytest_bdd/scenario.py:190: in _execute_step_function
+    return_value = call_fixture_func(fixturefunc, request, kwargs)
+tests/test_a.py:13: in then_parsed
+    parse("nope")
+app.py:9: in parse
+    return json.loads(s)
+           ^^^^^^^^^^^^^
+/usr/lib/python3.12/json/decoder.py:356: in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+E   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+_______________________ ERROR collecting tests/test_b.py _______________________
+ImportError while importing test module '/w/tests/test_b.py'.
+Traceback:
+{_SITE}/_pytest/python.py:507: in importtestmodule
+    mod = import_path(
+tests/test_b.py:1: in <module>
+    from app import missing
+E   ImportError: cannot import name 'missing' from 'app' (/w/app.py)
+=========================== short test summary info ============================
+FAILED tests/test_a.py::test_parse - json.decoder.JSONDecodeError: Expecting ...
+ERROR tests/test_b.py
+"""
+
+
+def test_a_failure_excerpt_leads_with_the_exception_and_drops_foreign_frames() -> None:
+    findings = failure_findings(_PYTEST_SHORT)
+    assert findings == (
+        "__________________________________ test_parse __________________________________",
+        "E   json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+        "tests/test_a.py:13: in then_parsed",
+        '    parse("nope")',
+        "app.py:9: in parse",
+        "    return json.loads(s)",
+        "_______________________ ERROR collecting tests/test_b.py _______________________",
+        "tests/test_b.py: ImportError: cannot import name 'missing' from 'app' (/w/app.py)",
+        "E   ImportError: cannot import name 'missing' from 'app' (/w/app.py)",
+        "tests/test_b.py:1: in <module>",
+        "    from app import missing",
+        "FAILED tests/test_a.py::test_parse - json.decoder.JSONDecodeError: Expecting ...",
+        "ERROR tests/test_b.py",
+    )
+    assert failing_ids(findings) == ("tests/test_a.py::test_parse", "tests/test_b.py")
+
+
 _PIP = (
     "pip install command exited 1 (the project's declared dependencies cannot be "
     "installed — FAIL: fix requirements.txt / pyproject.toml); last 2 output line(s):",

@@ -722,3 +722,37 @@ def test_mypy_unchecked_notes_do_not_crowd_the_errors_out_of_a_build_tail(
     findings = build_findings(1, out, "", tmp_path)
     assert error in findings
     assert not any("annotation-unchecked" in f for f in findings)
+
+
+def test_mypy_errors_lead_the_build_tail_grouped_by_file_within_the_cap(
+    tmp_path: Path,
+) -> None:
+    note = "app/{f}.py:{n}: note: See https://mypy.rtfd.io/en/stable/_refs.html#code-misc"
+    lines = ["Success: compileall"]
+    for f in ("a", "b", "c", "d", "e"):
+        for n in range(8):
+            lines.append(f'app/{f}.py:{n}: error: Name "x{n}" is not defined  [name-defined]')
+            lines.append(note.format(f=f, n=n))
+        lines.append(f"app/{f}.py:3: note: By default the bodies of untyped functions are not")
+    lines += [
+        'app/a.py:90: error: Name "x0" is not defined  [name-defined]',
+        "app/b.py:99: note: an orphan note",
+        "Found 41 errors in 5 files (checked 9 source files)",
+    ]
+    findings = build_findings(1, "\n".join(lines), "", tmp_path)
+    body = findings[1:]
+    errors = [f for f in body if ": error: " in f]
+    assert len(errors) == 15
+    files = [e.split(":", 1)[0] for e in errors]
+    assert files == sorted(files) and files.count("app/a.py") == 5
+    assert errors[0] == (
+        'app/a.py:0: error: Name "x0" is not defined  [name-defined] (also at line 90)'
+    )
+    # Only a note mypy attached to a shown error survives, right after it.
+    assert body[body.index(errors[0]) + 1] == note.format(f="a", n=0)
+    assert not any("orphan" in f or "untyped functions" in f for f in body)
+    assert body[-2:] == (
+        "... 25 more errors in 5 files not shown",
+        "Found 41 errors in 5 files (checked 9 source files)",
+    )
+    assert body[0] == "Success: compileall"

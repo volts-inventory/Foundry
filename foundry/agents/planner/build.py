@@ -115,6 +115,26 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
     return out
 
 
+_SLUG_SKIP = frozenset({"a", "an", "the", "and", "of", "for", "to", "with", "in", "on"})
+
+
+def _default_ticket_id(item: dict[str, Any], numbered: str, items: Sequence[Any]) -> str:
+    """The id of a ticket the plan gave none: a slug of its title (the gate names
+    its feature file and step module after it), else ``numbered``, also when
+    another of ``items`` already has (or slugs to) that id: a duplicate would win
+    over the earlier ticket."""
+
+    def name(o: dict[str, Any]) -> str:
+        if given := _str(o.get("id")).strip():
+            return given
+        words = re.findall(r"[a-z0-9]+", _str(o.get("title")).lower())
+        return "-".join([w for w in words if w not in _SLUG_SKIP][:3])
+
+    slug = name(item)
+    taken = [name(o) for o in items if o is not item and isinstance(o, dict)]
+    return slug if slug and slug not in taken else numbered
+
+
 # Tags an epic call's ticket item with its epic for _link_epics; never emitted.
 _EPIC_KEY = "__epic__"
 
@@ -257,7 +277,11 @@ def _epic_items(
         out.append(
             {
                 **item,
-                "id": _ns(epic.id, _str(item.get("id")).strip() or f"T{i + 1:02d}"),
+                "id": _ns(
+                    epic.id,
+                    _str(item.get("id")).strip()
+                    or _default_ticket_id(item, f"T{i + 1:02d}", items),
+                ),
                 "depends_on": [_ns(epic.id, d) for d in _steps(item.get("depends_on"))],
                 "scenarios": scenarios,
                 _EPIC_KEY: epic.id,
@@ -524,8 +548,9 @@ def _build_tickets(
     concerns: list[str] = []
     raw_items: dict[str, dict[str, Any]] = {}
     dropped: list[tuple[str, dict[str, Any]]] = []
-    for i, item in enumerate(_objs(raw)):
-        tid = _str(item.get("id")).strip() or f"T-{i + 1:03d}"
+    objs = _objs(raw)
+    for i, item in enumerate(objs):
+        tid = _str(item.get("id")).strip() or _default_ticket_id(item, f"T-{i + 1:03d}", objs)
         if item.get(_DROPPED_KEY):
             dropped.append((tid, item))
             continue

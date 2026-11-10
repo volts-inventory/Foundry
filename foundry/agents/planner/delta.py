@@ -139,7 +139,7 @@ def _delta_text(
         + (as_text(index) if index else "(none)")
         + (
             f"\n\nEPICS: {', '.join(sorted(epic_ids))}. Every ticket id keeps its epic "
-            "prefix (E1-T01); a new ticket's id starts with the prefix of its epic, and "
+            "prefix (E1-catalog); a new ticket's id starts with the prefix of its epic, and "
             "its depends_on names only tickets of that epic."
             if epic_ids
             else ""

@@ -58,7 +58,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -185,6 +185,7 @@ from foundry.agents.planner.schema import (
     TIER,
     _plan_schema,
 )
+from foundry.agents.planner.sizing import size_text, ticket_ceilings
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
 from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
 from foundry.schemas.architecture import SystemDesign
@@ -314,6 +315,7 @@ def make_planner_node(
     rt: AgentRuntime,
     index: SymbolIndex | None = None,
     toolchains: Sequence[Toolchain] | None = None,
+    ticket_tiers: Mapping[Any, str] | None = None,
 ) -> NodeFn:
     """Build the Planner node (T1). Call 1 writes the plan and its epics; a small
     plan carries its tickets inline (one call), a larger one gets one ticket call
@@ -328,7 +330,12 @@ def make_planner_node(
 
     ``index`` is the context retriever probed for existing code spans (``None``
     is greenfield — empty retrieval). ``toolchains`` are the languages offered
-    for the stack (``None`` probes this host once)."""
+    for the stack (``None`` probes this host once). ``ticket_tiers`` is the run's
+    difficulty -> tier table: with the proxy's local tiers it sets each ticket's
+    size ceiling (local or cloud), stated in every planning prompt and checked."""
+
+    ceilings = ticket_ceilings(rt.proxy.local_tiers, ticket_tiers)
+    sizing = size_text(ceilings)
 
     def _call(
         sop: str, schema: dict[str, Any], content: str, effort: Effort = None
@@ -483,7 +490,7 @@ def make_planner_node(
                 DELTA_SOP,
                 DELTA_SCHEMA,
                 _delta_text(
-                    str(state.get("request", "")),
+                    str(state.get("request", "")) + sizing,
                     findings,
                     items,
                     shown,
@@ -573,7 +580,7 @@ def make_planner_node(
                     f"{len(epics)} epics, each planned in its own call."
                 )
             inputs = (
-                _intake_text(state),
+                _intake_text(state) + sizing,
                 _plan_brief(payload, brief),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
@@ -653,6 +660,7 @@ def make_planner_node(
             criteria_seq=seqs["criteria"],
             base=base,
             stack_findings=_stack_command_findings(decided),
+            ceilings=ceilings,
         )
         return _Draft(
             payload=payload,
@@ -821,7 +829,7 @@ def make_planner_node(
         languages = {t.language for t in tools}
         pinned = state.get("stack")
         schema = _plan_schema(languages | ({pinned.language} if pinned else set()))
-        content = _user_content(state, rt, spans, tools)
+        content = _user_content(state, rt, spans, tools) + sizing
         store = rt.cas
 
         def seq(key: str) -> Seq:
@@ -844,7 +852,7 @@ def make_planner_node(
                 _call(
                     SOP,
                     schema,
-                    _user_content(state, rt, spans, tools, _prior_plan_text(earlier)),
+                    _user_content(state, rt, spans, tools, _prior_plan_text(earlier)) + sizing,
                     _REPAIR_EFFORT,
                 ),
                 seqs,
@@ -1071,7 +1079,11 @@ def make_planner_node(
             return rt.seq(config, NODE_ID, key)
 
         chosen = [e for e in prior.epics if e.id in targets]
-        inputs = (_intake_text(state), prior.brief, _interfaces_text(prior.interfaces))
+        inputs = (
+            _intake_text(state) + sizing,
+            prior.brief,
+            _interfaces_text(prior.interfaces),
+        )
         contents = [
             _epic_content(
                 inputs[0],
@@ -1183,6 +1195,7 @@ def make_planner_node(
             tickets_seq=tickets_seq,
             criteria_seq=criteria_seq,
             base=base,
+            ceilings=ceilings,
         )
 
     def _patch_replan(

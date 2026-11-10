@@ -337,7 +337,7 @@ def build_supervisor_graph(
     # Each builder returns an UNCOMPILED StateGraph (SG4); we ``.compile()`` each
     # so it can be added as a single node of the supervisor (its internal
     # channel writes fold through FactoryState's reducers on the parent run).
-    planner = build_planner_subgraph(rt, index).compile()
+    planner = build_planner_subgraph(rt, index, ticket_tiers).compile()
     implementation = build_implementation_subgraph(
         rt,
         source_dir=source_dir,

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from foundry.agents.implementation.tickets.tasks import tier_for
-from foundry.schemas.implementation import Difficulty, Ticket
+from foundry.schemas.implementation import FEATURE_DIR, Difficulty, Ticket
 
 
 @dataclass(frozen=True)
@@ -68,14 +68,16 @@ _CONFIG_FILES = frozenset(
     }
 )
 
-_TEST_DIRS = frozenset({"spec", "specs", "__tests__", "features"})
+_TEST_DIRS = frozenset({"tests", "test", "spec", "specs", "__tests__"})
 
 _TEST_NAME = re.compile(r"^(test_.*|.*_test\.\w+|.*\.(test|spec)\.\w+|conftest\.py)$")
 
 
 def work_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
     """The files of ``files`` that are the ticket's own work: never a test or step
-    module, a package marker, a ``protected`` stack-command file or a manifest."""
+    module, a package marker, a ``protected`` stack-command file or a manifest.
+    BDD material is the plan's top-level feature dir (feature files, cucumber step
+    definitions) and ``.feature`` files: a ``src/features/`` source tree is work."""
     out: list[str] = []
     for f in files:
         name = posixpath.basename(f)
@@ -85,7 +87,9 @@ def work_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[s
             or name in _CONFIG_FILES
             or name == "__init__.py"
             or _TEST_NAME.match(name)
-            or any(p.startswith("test") or p in _TEST_DIRS for p in parts)
+            or name.endswith(".feature")
+            or parts[:1] == [FEATURE_DIR]
+            or any(p in _TEST_DIRS for p in parts)
         ):
             continue
         out.append(f)
@@ -115,6 +119,6 @@ def size_text(ceilings: Ceilings) -> str:
     return (
         "\n\nTICKET SIZE (this run; checked: a ticket over it FAILS the Spec gate): "
         + rows
-        + ". Files count without tests, package markers (__init__.py), stack-command "
-        "files and manifests/config."
+        + ". The entrypoint ticket is exempt. Files count without tests, package markers "
+        "(__init__.py), stack-command files and manifests/config."
     )

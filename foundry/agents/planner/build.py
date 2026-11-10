@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextvars
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -118,21 +119,27 @@ def _safe_ticket_ids(ids: list[str], reserved: frozenset[str] = frozenset()) -> 
 _SLUG_SKIP = frozenset({"a", "an", "the", "and", "of", "for", "to", "with", "in", "on"})
 
 
-def _default_ticket_id(item: dict[str, Any], numbered: str, items: Sequence[Any]) -> str:
-    """The id of a ticket the plan gave none: a slug of its title (the gate names
-    its feature file and step module after it), else ``numbered``, also when
-    another of ``items`` already has (or slugs to) that id: a duplicate would win
-    over the earlier ticket."""
+def _default_ticket_ids(
+    items: Sequence[dict[str, Any]],
+    numbered: Callable[[int], str],
+    ns: Callable[[str], str] = lambda tid: tid,
+) -> list[str]:
+    """Each of ``items``' id, as given, else a slug of its title (the gate names
+    its feature file and step module after it), else ``numbered(i)``, also when
+    another item already has (or slugs to) that id once namespaced by ``ns``: a
+    duplicate would win over the earlier ticket."""
 
-    def name(o: dict[str, Any]) -> str:
-        if given := _str(o.get("id")).strip():
-            return given
+    def slug(o: dict[str, Any]) -> str:
         words = re.findall(r"[a-z0-9]+", _str(o.get("title")).lower())
         return "-".join([w for w in words if w not in _SLUG_SKIP][:3])
 
-    slug = name(item)
-    taken = [name(o) for o in items if o is not item and isinstance(o, dict)]
-    return slug if slug and slug not in taken else numbered
+    given = [_str(o.get("id")).strip() for o in items]
+    names = [g or slug(o) for g, o in zip(given, items, strict=True)]
+    counts = Counter(ns(n) for n in names if n)
+    return [
+        g or (n if n and counts[ns(n)] == 1 else numbered(i))
+        for i, (g, n) in enumerate(zip(given, names, strict=True))
+    ]
 
 
 # Tags an epic call's ticket item with its epic for _link_epics; never emitted.
@@ -268,6 +275,7 @@ def _epic_items(
             )
     out: list[dict[str, Any]] = []
     n = 0
+    ids = _default_ticket_ids(items, lambda i: f"T{i + 1:02d}", lambda tid: _ns(epic.id, tid))
     for i, item in enumerate(items):
         scenarios: list[dict[str, Any]] = []
         for scenario in _objs(item.get("scenarios")):
@@ -277,11 +285,7 @@ def _epic_items(
         out.append(
             {
                 **item,
-                "id": _ns(
-                    epic.id,
-                    _str(item.get("id")).strip()
-                    or _default_ticket_id(item, f"T{i + 1:02d}", items),
-                ),
+                "id": _ns(epic.id, ids[i]),
                 "depends_on": [_ns(epic.id, d) for d in _steps(item.get("depends_on"))],
                 "scenarios": scenarios,
                 _EPIC_KEY: epic.id,
@@ -549,8 +553,7 @@ def _build_tickets(
     raw_items: dict[str, dict[str, Any]] = {}
     dropped: list[tuple[str, dict[str, Any]]] = []
     objs = _objs(raw)
-    for i, item in enumerate(objs):
-        tid = _str(item.get("id")).strip() or _default_ticket_id(item, f"T-{i + 1:03d}", objs)
+    for item, tid in zip(objs, _default_ticket_ids(objs, lambda i: f"T-{i + 1:03d}"), strict=True):
         if item.get(_DROPPED_KEY):
             dropped.append((tid, item))
             continue

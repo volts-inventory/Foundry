@@ -64,6 +64,7 @@ class _Frame:
     base: BaseView | None = None  # a change build's base tree
     stack_findings: tuple[str, ...] = ()  # of a stack chosen this pass
     ceilings: Ceilings = field(default_factory=lambda: ALL_CLOUD)  # per-ticket size, by tier
+    keep: frozenset[str] = frozenset()  # ids an earlier plan or built work owns: never folded
 
 
 @dataclass(frozen=True)
@@ -134,7 +135,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     # ticket's real dependents; before the step-module folds, so the merged ticket
     # binds every scenario it now carries from ONE module.
     tickets, criteria, more = _merge_sole_dependents(
-        tickets, criteria, frame.stack, frame.ceilings, wired
+        tickets, criteria, frame.stack, frame.ceilings, wired, frame.keep
     )
     concerns += fold(_merge_sole_dependents.__name__, more)
     for bind in (_own_scenario_bindings, _one_step_module_per_ticket):

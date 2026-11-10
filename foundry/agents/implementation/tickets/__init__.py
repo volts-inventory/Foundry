@@ -659,12 +659,7 @@ def make_engineering_node(
                     # A rebuild of a failed attempt (carried, re-planned) or a fix-loop
                     # restart thinks one level harder than the ticket's first attempt.
                     packet = packet.model_copy(
-                        update={
-                            "task": {
-                                **packet.task,
-                                "effort": ticket_effort(ticket.difficulty, retry=True),
-                            }
-                        }
+                        update={"effort": ticket_effort(ticket.difficulty, retry=True)}
                     )
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)

@@ -413,10 +413,12 @@ def _size_findings(
     tickets: Sequence[Ticket], ceilings: Ceilings, protected: Collection[str] = ()
 ) -> tuple[str, ...]:
     """A ticket over the size ceiling of the tier its difficulty runs on: one
-    session builds it, and a weaker (local) model loses the thread of a big one."""
+    session builds it, and a weaker (local) model loses the thread of a big one.
+    The entrypoint is exempt: the wiring and templates must live there, and no
+    split or fold can shrink it."""
     out: list[str] = []
     for t in tickets:
-        if t.id in _GENERATED_TICKETS:
+        if t.id in _GENERATED_TICKETS or t.entrypoint:
             continue
         ceiling = ceilings[t.difficulty]
         size = over_ceiling(t, ceiling, protected)

@@ -259,8 +259,8 @@ def _escalated_packet(
                 **packet.task,
                 "tier": target,
                 "escalated": True,
-                "effort": ticket_effort(packet.task["difficulty"], retry=True),
             },
+            "effort": ticket_effort(packet.task["difficulty"], retry=True),
             "prior_failures": context,
             "turn_budget": turn_budget,
         }

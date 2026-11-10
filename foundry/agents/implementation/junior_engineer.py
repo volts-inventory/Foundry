@@ -683,14 +683,13 @@ def _build_packet(
         body["fix_files"] = list(fix_files)
     if diagnosis:
         body["diagnosis"] = dict(diagnosis)
-    if effort:
-        body["effort"] = effort
     return TaskPacket(
         task=body,
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=retrieved_spans,  # spec grounding (empty == unchanged prompt)
         prior_failures=prior_failures,
+        effort=effort,
         worktree_path=str(sandbox.worktree),
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,

@@ -416,7 +416,8 @@ _AGENT_NODE_IDS = frozenset({"junior_engineer"})
 # can think for 20K+ tokens first, so xhigh gets what a 128K context leaves after
 # the prompt. Low keeps medium's floor: the answer (a whole file) still needs room.
 _LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, "xhigh": 98304}
-# Run fire count of each local call sent (not replayed), by thinking level or "off".
+# Run fire count of each local attempt sent (not replayed), by the thinking level it
+# was sent at (a retry may lower it) or "off".
 EFFORT_COUNT_PREFIX = "effort."
 # A prompt the server saw as under this share of our estimate was cut to fit its
 # context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
@@ -1252,8 +1253,6 @@ class ModelProviderProxy:
                 remember(response)  # so the next turn still replays this turn's reasoning
         else:
             progress.log(f"start {label}")
-            if local:
-                telemetry.count(f"{EFFORT_COUNT_PREFIX}{request.get('local_effort') or 'off'}")
             started = time.monotonic()
             response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
             progress.finished(label, started, response.usage, self.token_meter)
@@ -1584,6 +1583,9 @@ class ModelProviderProxy:
             # and its retries must not carry a run far past its caps.
             if meter is not None:
                 meter.check()
+            if local:
+                level = sent.get("local_effort") if sent.get("local_thinking") is True else None
+                telemetry.count(f"{EFFORT_COUNT_PREFIX}{level or 'off'}")
             try:
                 with self._local_lock if local else nullcontext(), self._limiter.slot():
                     response = transport.send(sent)

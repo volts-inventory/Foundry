@@ -15,13 +15,14 @@ from typing import Any
 from foundry import telemetry
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import EPIC_SOP, SOP, make_planner_node
-from foundry.agents.planner.build import _build_tickets
+from foundry.agents.planner.build import _build_tickets, _Epic, _epic_items
 from foundry.agents.planner.checks import _size_findings
 from foundry.agents.planner.folds import (
     _merge_sole_dependents,
     _one_step_module_per_ticket,
     _own_scenario_bindings,
 )
+from foundry.agents.planner.prior import _kept_ids
 from foundry.agents.planner.sizing import (
     ALL_CLOUD,
     CLOUD_CEILING,
@@ -34,6 +35,7 @@ from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
+from foundry.schemas.base import Artifact
 from foundry.schemas.implementation import (
     Difficulty,
     Specialty,
@@ -239,6 +241,35 @@ def test_a_merged_ticket_binds_its_scenarios_from_one_step_module() -> None:
     assert "dropped test module(s) tests/test_store.py" in concerns[0]
 
 
+def test_a_repeated_dependency_counts_as_one_dependent() -> None:
+    tickets = [_t("db", ("db.py",), ("A1",)), _t("api", ("api.py",), ("A2",), ("db", "db"))]
+    merged, _, _ = _merge_sole_dependents(tickets, [], _PY, ALL_CLOUD)
+    assert [t.id for t in merged] == ["api"]
+
+
+def test_a_ticket_an_earlier_plan_or_built_work_owns_is_never_folded() -> None:
+    tickets = [_t("store", ("store.py",), ("A1",)), _t("api", ("api.py",), ("A2",), ("store",))]
+    for kept in ({"store"}, {"api"}):
+        out, _, _ = _merge_sole_dependents(tickets, [], _PY, ALL_CLOUD, keep=frozenset(kept))
+        assert out == tickets
+    assert len(_merge_sole_dependents(tickets, [], _PY, ALL_CLOUD)[0]) == 1
+
+
+def test_a_replan_keeps_the_earlier_plans_tickets_and_the_built_ones() -> None:
+    rt, _, _ = _runtime(PLAN)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    built = Artifact(
+        kind="feature_diff",
+        uri="cas://d/1",
+        produced_by="junior_engineer",
+        task_id="T-009",
+        seq=_SEQ,
+    )
+    state: Any = {"artifacts": [*writes["artifacts"], built]}
+    assert _kept_ids(state, rt) == {"T-001", "T-002", "T-003", "T-009"}
+    assert _kept_ids({"artifacts": []}, rt) == frozenset()
+
+
 def _runtime(*payloads: dict[str, Any], local: frozenset[str] = frozenset()) -> Any:
     tx = MockTransport(
         completions=[json.dumps(p) for p in payloads], default_text=json.dumps(payloads[-1])
@@ -316,6 +347,29 @@ def test_a_ticket_over_its_tiers_ceiling_is_a_finding_to_split_it() -> None:
     assert len(_size_findings([_t("cli", ("cli.py",), scenarios)], ALL_CLOUD)) == 1
 
 
+def test_the_entrypoint_is_exempt_from_the_ceiling() -> None:
+    pages = tuple(f"shop/templates/{n}.html" for n in ("index", "cart", "login", "orders"))
+    entry = _t("web", ("shop/app.py", *pages), ("A1",), entry=True)
+    assert _size_findings([entry], _LOCAL) == ()
+    assert len(_size_findings([entry.model_copy(update={"entrypoint": False})], _LOCAL)) == 1
+
+
+def test_work_files_count_source_trees_named_like_tests_or_features() -> None:
+    files = (
+        "src/features/cart/Cart.tsx",
+        "testimonials/quotes.py",
+        "features/cart.feature",
+        "features/step_definitions/cart.js",
+        "features/support/world.js",
+        "test/app.test.js",
+        "spec/cart_spec.rb",
+        "web/__tests__/cart.tsx",
+        "pkg/tests/helpers.py",
+        "bdd/cart_steps_test.go",
+    )
+    assert work_files(files) == ("src/features/cart/Cart.tsx", "testimonials/quotes.py")
+
+
 def test_the_ceiling_follows_where_each_difficultys_tier_runs() -> None:
     assert ticket_ceilings(()) == ALL_CLOUD  # cloud mode builds no level table
     hybrid = ticket_ceilings({"T2", "T3"})
@@ -384,3 +438,22 @@ def test_a_ticket_without_an_id_is_named_for_its_title() -> None:
     # "The CLI" would take the id another ticket has: it keeps the numbered default.
     assert ids == ["summary-statistics", "T-002", "cli", "T-004"]
     assert feature_path(ids[0]) == "features/summary-statistics.feature"
+
+
+def test_an_epic_tickets_title_slug_is_checked_against_its_namespaced_siblings() -> None:
+    epic = _Epic(
+        id="E1",
+        title="Shop",
+        summary="",
+        specialty_mix=(),
+        depends_on=(),
+        provides=(),
+        consumes=(),
+    )
+    raw = [
+        {"id": "E1-catalog", "title": "Browse", "files": ["c.py"]},
+        {"title": "Catalog", "files": ["d.py"]},
+        {"title": "Cart", "files": ["e.py"]},
+    ]
+    items, _ = _epic_items(epic, raw)
+    assert [i["id"] for i in items] == ["E1-catalog", "E1-T02", "E1-cart"]

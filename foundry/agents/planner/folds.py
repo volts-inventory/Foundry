@@ -289,6 +289,7 @@ def _merge_sole_dependents(
     stack: StackDecision | None,
     ceilings: Ceilings,
     wired: frozenset[tuple[str, str]] = frozenset(),
+    keep: frozenset[str] = frozenset(),
 ) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
     """Fold a ticket into the ONE ticket that depends on it when both are feature
     tickets of the same epic and the merge stays within the ceiling of both
@@ -302,7 +303,9 @@ def _merge_sole_dependents(
     ``wired`` edges (ticket, dependency) :func:`_wire_entrypoint` added do not
     count as dependents; an edge left pointing at a folded ticket moves to the
     ticket it folded into. Test tickets and file-less acceptance-only tickets
-    (which build nothing to hand off) take no part either."""
+    (which build nothing to hand off) take no part either, nor do ``keep`` ids
+    (an earlier plan's tickets, built work): their diffs, notes and restart memos
+    are keyed by id, and a fold would orphan them."""
     protected = set(stack_files(stack)) if stack is not None else set()
     out = list(tickets)
     moved: dict[str, str] = {}
@@ -315,22 +318,25 @@ def _merge_sole_dependents(
 
     def foldable(t: Ticket) -> bool:
         return (
-            t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST and bool(t.files)
+            t.id not in _GENERATED_TICKETS
+            and t.id not in keep
+            and t.specialty is not Specialty.TEST
+            and bool(t.files)
         )
 
     while True:
-        dependents: dict[str, list[str]] = {}
+        dependents: dict[str, set[str]] = {}
         for t in out:
             for d in t.depends_on:
                 if (t.id, d) not in ignored:
-                    dependents.setdefault(d, []).append(t.id)
+                    dependents.setdefault(d, set()).add(t.id)
         by_id = {t.id: t for t in out}
         pick: tuple[Ticket, Ticket] | None = None
         for a in out:
-            ds = dependents.get(a.id, [])
+            ds = dependents.get(a.id, set())
             if len(ds) != 1 or not foldable(a) or a.entrypoint:
                 continue
-            b = by_id[ds[0]]
+            b = by_id[next(iter(ds))]
             if not foldable(b) or b.entrypoint or epic(a.id) != epic(b.id):
                 continue
             merged = _merged(a, b)

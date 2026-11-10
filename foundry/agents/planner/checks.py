@@ -424,10 +424,11 @@ def _size_findings(
         size = over_ceiling(t, ceiling, protected)
         if size is not None:
             out.append(
-                f"Ticket {t.id} is over its size ceiling: {size[0]} files and {size[1]} "
-                f"scenarios, where a {t.difficulty.value} ticket (built on a {ceiling.where} "
-                f"model) takes at most {ceiling.files} files and {ceiling.scenarios} "
-                "scenarios: split it into tickets each within the ceiling."
+                f"Ticket {t.id} is over its size ceiling: {size[0]} work files, {size[1]} "
+                f"files in all and {size[2]} scenarios, where a {t.difficulty.value} ticket "
+                f"(built on a {ceiling.where} model) takes at most {ceiling.files} work "
+                f"files, {ceiling.total} in all and {ceiling.scenarios} scenarios: split it "
+                "into tickets each within the ceiling."
             )
     return tuple(out)
 

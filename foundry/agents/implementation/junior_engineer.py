@@ -651,6 +651,7 @@ def _build_packet(
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
     fix_files: tuple[str, ...] = (),
+    diagnosis: Mapping[str, Any] | None = None,
 ) -> TaskPacket:
     """Assemble the immutable packet: pinned constraints VERBATIM + FIRST.
 
@@ -673,6 +674,8 @@ def _build_packet(
         body["verify"] = dict(verify)
     if fix_files:
         body["fix_files"] = list(fix_files)
+    if diagnosis:
+        body["diagnosis"] = dict(diagnosis)
     return TaskPacket(
         task=body,
         persona=persona,  # area-expert role preamble (empty == unchanged prompt)
@@ -731,6 +734,7 @@ def _run_one_task(
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
     check: CheckSpec | None = None,
     fix_files: tuple[str, ...] = (),
+    diagnosis: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the adapter for ONE task in a fresh sandbox; return its channel writes.
     A non-empty ``scope`` cuts the diff back to those paths (a noted trim);
@@ -762,6 +766,7 @@ def _run_one_task(
             rules=rules,
             verify=verify,
             fix_files=fix_files,
+            diagnosis=diagnosis,
         )
         from foundry.gates.self_check import check_scope
 
@@ -1102,6 +1107,19 @@ def make_fixer_node(
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
+
+        focus = _fix_focus(state, resolve)
+        contracts = contract_paths(state, resolve)
+        fix_files = _fix_files(state, resolve, overlay)
+        # Numbered by the fixes so far, not the attempt counter: that resets per wave
+        # and on a resume, and a reused id would collide with the earlier fix's notes.
+        fixes = {
+            a.task_id
+            for a in _of_kind(state, FEATURE_DIFF_KIND)
+            if a.task_id and a.task_id.startswith("fix-")
+        }
+        task_id = f"fix-{len(fixes) + 1}"
         from foundry.agents.implementation.diagnosis import diagnose, diagnosis_tier
 
         diagnosis = None
@@ -1109,18 +1127,12 @@ def make_fixer_node(
             diagnosis = diagnose(
                 rt,
                 cloud,
-                label=f"fix attempt {attempt}",
+                label=f"{task_id} (fix attempt {attempt})",
                 summary=failures,
-                files=_named_files(_failed_gates(state), overlay),
+                files=(*_named_files(_failed_gates(state), overlay), *fix_files, *contracts),
                 tree=overlay,
+                allowed=fix_files,
             )
-            if diagnosis is not None:
-                failures = (*diagnosis.packet_lines(), *failures)
-        from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
-
-        focus = _fix_focus(state, resolve)
-        contracts = contract_paths(state, resolve)
-        fix_files = _fix_files(state, resolve, overlay)
         rules = (
             *_FIXER_RULES[:2],
             _binding_rule(_cluster_gates(state, resolve)[0], _failed_gates(state), contracts),
@@ -1141,14 +1153,6 @@ def make_fixer_node(
                 + "): change them only when the failure is "
                 "in the contract itself; each change is recorded for review."
             )
-        # Numbered by the fixes so far, not the attempt counter: that resets per wave
-        # and on a resume, and a reused id would collide with the earlier fix's notes.
-        fixes = {
-            a.task_id
-            for a in _of_kind(state, FEATURE_DIFF_KIND)
-            if a.task_id and a.task_id.startswith("fix-")
-        }
-        task_id = f"fix-{len(fixes) + 1}"
         task = Task(
             id=task_id,
             spec_uri=f"fix://{attempt}",
@@ -1189,6 +1193,7 @@ def make_fixer_node(
                 ),
                 check=_fix_check(base, state, resolve) if base is not None else None,
                 fix_files=fix_files,
+                diagnosis=diagnosis.packet_field(fix_files) if diagnosis is not None else None,
             )
         # Integration applies it on top of the diffs it repairs (none yet when every
         # ticket failed).

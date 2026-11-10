@@ -9,21 +9,27 @@ stronger model beats self-feedback by a wide margin (Olausson et al., arXiv
 caps, the meter and attestation apply.
 
 Advisory only: a failed or unavailable call leaves the attempt as it was, and
-the diagnosis never touches a gate. ``FOUNDRY_HYBRID_DIAGNOSE=0`` turns it off.
+the diagnosis never touches a gate or widens a fix pass's write fence (files it
+names outside ``fix_files`` are flagged as needing a reason).
+``FOUNDRY_HYBRID_DIAGNOSE=0`` turns it off.
 """
 
 from __future__ import annotations
 
 import os
+import threading
+import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from foundry import progress
+from foundry.telemetry import count
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping, Sequence
 
     from foundry.agents._runtime import AgentRuntime
+    from foundry.proxy.model_provider_proxy import ModelProviderProxy
 
 __all__ = ["DIAGNOSE_ENV", "Diagnosis", "diagnose", "diagnosis_tier"]
 
@@ -33,6 +39,18 @@ _FILE_CHARS = 20_000
 _SUMMARY_CHARS = 30_000
 _MAX_EDITS = 6
 _MAX_DO_NOT = 3
+_ADVISORY = (
+    "Advisory: a stronger model read the failures and the files and suggests this. "
+    "It is not a verdict: check it against the failure output and `verify`, and "
+    "drop any part the evidence contradicts."
+)
+_OUTSIDE = (
+    "Named by the diagnosis but outside `fix_files`: change one only if this "
+    "failure needs it, and give the reason."
+)
+# Proxies (one per run) that already logged a failed diagnosis: one line per run.
+_WARNED: weakref.WeakSet[ModelProviderProxy] = weakref.WeakSet()
+_WARNED_LOCK = threading.Lock()
 
 _SOP = (
     "You are a senior engineer diagnosing a failed build for a junior engineer who "
@@ -73,20 +91,36 @@ _SCHEMA: dict[str, Any] = {
 class Diagnosis:
     root_cause: str
     files_to_edit: tuple[str, ...]
-    edits: tuple[str, ...]
+    edits: tuple[tuple[str, str], ...]  # (file, rendered edit)
     do_not: tuple[str, ...]
 
     def packet_lines(self) -> tuple[str, ...]:
         """The head of the local attempt's failure context."""
         return (
-            "DIAGNOSIS FROM A REVIEWER (a stronger model read the failure and the "
-            "files; apply it — make these edits first, then re-run `verify`):",
+            f"DIAGNOSIS FROM A REVIEWER ({_ADVISORY})",
             f"root cause: {self.root_cause}",
             *((f"files to edit: {', '.join(self.files_to_edit)}",) if self.files_to_edit else ()),
-            *(f"edit {i}: {e}" for i, e in enumerate(self.edits, 1)),
+            *(f"edit {i}: {e}" for i, (_, e) in enumerate(self.edits, 1)),
             *(f"do not: {d}" for d in self.do_not),
             "[end of diagnosis]",
         )
+
+    def packet_field(self, fence: Collection[str]) -> dict[str, Any]:
+        """A fix packet's ``diagnosis``. With a fence (``fix_files``), the files it
+        names outside it are split off as needing a reason, never added to it."""
+        named = dict.fromkeys((*self.files_to_edit, *(f for f, _ in self.edits)))
+        outside = [f for f in named if fence and f not in fence]
+        out: dict[str, Any] = {
+            "advisory": _ADVISORY,
+            "cause": self.root_cause,
+            "files": [f for f in self.files_to_edit if f not in outside],
+            "change": [e for _, e in self.edits],
+        }
+        if self.do_not:
+            out["do_not"] = list(self.do_not)
+        if outside:
+            out["outside_fix_files"] = {"files": outside, "note": _OUTSIDE}
+        return out
 
     def summary(self) -> str:
         return (
@@ -147,14 +181,14 @@ def _parse(
     files = tuple(
         dict.fromkeys(p for f in raw.get("files_to_edit") or () if (p := real(f)) is not None)
     )
-    edits: list[str] = []
+    edits: list[tuple[str, str]] = []
     for e in raw.get("edits") or ():
         if not isinstance(e, dict) or (path := real(e.get("file"))) is None:
             continue
         change = _clean(e.get("change"), 500)
         if change:
             symbol = _clean(e.get("symbol"), 120)
-            edits.append(f"{path}" + (f" `{symbol}`" if symbol else "") + f": {change}")
+            edits.append((path, path + (f" `{symbol}`" if symbol else "") + f": {change}"))
     root = _clean(raw.get("root_cause"), 800)
     if not root and not edits:
         return None
@@ -176,10 +210,14 @@ def diagnose(
     tree: Mapping[str, str | None],
     allowed: Collection[str] = (),
 ) -> Diagnosis | None:
-    """One structured cloud call on ``tier``; None (logged) when it fails or comes
-    back with nothing usable, so the attempt proceeds without it."""
+    """One structured cloud call on ``tier``; None when it fails or comes back with
+    nothing usable (logged once per run), so the attempt proceeds without it.
+    ``label`` names the attempt in the prompt, so two passes over an unchanged
+    failure are distinct requests to the run's call cache."""
     text = "\n".join(summary)[:_SUMMARY_CHARS]
-    content = "\n\n".join(["FAILURE SUMMARY:", text, *_files_block(files, tree, summary)])
+    content = "\n\n".join(
+        [f"ATTEMPT: {label}", "FAILURE SUMMARY:", text, *_files_block(files, tree, summary)]
+    )
     try:
         completion = rt.proxy.complete(
             NODE_ID,
@@ -191,13 +229,23 @@ def diagnose(
         )
         got = _parse(completion.parsed or {}, tree, allowed)
     except Exception as exc:  # advisory: a spent cap is re-hit by the next cloud call
-        progress.log(
-            f"diagnosis for {label} unavailable, proceeding without it: "
-            f"{type(exc).__name__}: {str(exc)[:200]}"
-        )
+        _failed(rt, label, f"unavailable: {type(exc).__name__}: {str(exc)[:200]}")
         return None
     if got is None:
-        progress.log(f"diagnosis for {label} came back empty, proceeding without it")
+        _failed(rt, label, "came back empty")
         return None
+    count("fix.diagnosis.used")
     progress.log(f"diagnosis for {label} ({tier}): {got.summary()}")
     return got
+
+
+def _failed(rt: AgentRuntime, label: str, why: str) -> None:
+    count("fix.diagnosis.failed")
+    with _WARNED_LOCK:
+        if rt.proxy in _WARNED:
+            return
+        _WARNED.add(rt.proxy)
+    progress.log(
+        f"diagnosis for {label} {why}; proceeding without it "
+        "(later failures this run are counted, not logged)"
+    )

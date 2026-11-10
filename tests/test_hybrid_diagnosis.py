@@ -12,7 +12,9 @@ from typing import Any
 import pytest
 
 import tests.test_ticket_scheduler as sched
+from foundry import telemetry
 from foundry.agents import AgentRuntime
+from foundry.agents.implementation import diagnosis
 from foundry.agents.implementation.diagnosis import DIAGNOSE_ENV
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapters.tiered import TieredAdapter
@@ -95,15 +97,23 @@ def test_a_local_fix_pass_in_hybrid_gets_the_cloud_diagnosis(
 ) -> None:
     calls = _Calls(monkeypatch)
     rec = _HybridLocalFixer(writes=_BROKEN)
-    out, _, _ = _wave_run(tmp_path, rec)
-    lines = rec.packets["fix-1"].prior_failures
-    assert lines[0].startswith(_HEAD)
-    assert "root cause: app.py has a syntax error in broken()." in lines
-    assert "files to edit: app.py" in lines  # nope.py and /etc/passwd are not in the tree
-    assert "edit 1: app.py `broken`: close the parameter list" in lines
-    assert not any("nope.py" in line for line in lines[: lines.index("[end of diagnosis]")])
-    assert "do not: rewrite the module" in lines
+    with telemetry.counting() as counts:
+        out, _, _ = _wave_run(tmp_path, rec)
+    got = rec.packets["fix-1"].task["diagnosis"]
+    assert got["advisory"].startswith("Advisory:")
+    assert got["cause"] == "app.py has a syntax error in broken()."
+    assert got["files"] == ["app.py"]  # nope.py and /etc/passwd are not in the tree
+    assert got["change"] == ["app.py `broken`: close the parameter list"]
+    assert got["do_not"] == ["rewrite the module"]
+    assert "nope.py" not in json.dumps(got)
+    assert "outside_fix_files" not in got  # no planned cluster: no fence to stay inside
+    assert not any(line.startswith(_HEAD) for line in rec.packets["fix-1"].prior_failures)
+    assert counts.snapshot().get("fix.diagnosis.used", 0) >= 1
+    assert "fix.diagnosis.failed" not in counts.snapshot()
     sent = calls.diagnoses()
+    prompts = [json.dumps(r["messages"]) for r in sent]
+    assert "ATTEMPT: fix-1 (fix attempt 1)" in prompts[0]
+    assert len(set(prompts)) == len(prompts)  # each pass is its own cache key
     assert (
         sent
         and sent[0]["model"]
@@ -121,9 +131,50 @@ def test_an_unavailable_cloud_leaves_the_fix_pass_as_it_was(
 ) -> None:
     _Calls(monkeypatch, fail=True)
     rec = _HybridLocalFixer(writes=_BROKEN)
-    _wave_run(tmp_path, rec)
+    with telemetry.counting() as counts:
+        _wave_run(tmp_path, rec)
     assert "fix-1" in rec.packets
+    assert all("diagnosis" not in p.task for p in rec.packets.values())
     assert not any(line.startswith(_HEAD) for line in rec.packets["fix-1"].prior_failures)
+    assert counts.snapshot().get("fix.diagnosis.failed") == 1
+    assert "fix.diagnosis.used" not in counts.snapshot()
+
+
+def test_a_failing_cloud_is_logged_once_per_run_and_counted_each_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proxy = ModelProviderProxy(MockTransport.scripted({}), signer=ZoneBSigner(b"k" * 16, "kid"))
+
+    def down(*_a: Any, **_k: Any) -> Any:
+        raise ProxyUnavailable("cloud down")
+
+    proxy.complete = down  # type: ignore[method-assign]
+    rt = AgentRuntime(proxy=proxy)
+    logged: list[str] = []
+    monkeypatch.setattr(diagnosis.progress, "log", lambda msg, **_k: logged.append(msg))
+    with telemetry.counting() as counts:
+        for n in (1, 2):
+            assert (
+                diagnosis.diagnose(rt, "T1", label=f"fix-{n}", summary=("x",), files=(), tree={})
+                is None
+            )
+    assert counts.snapshot() == {"fix.diagnosis.failed": 2}
+    assert len(logged) == 1 and "fix-1" in logged[0]
+
+
+def test_files_outside_the_fence_are_flagged_not_added() -> None:
+    found = diagnosis.Diagnosis(
+        root_cause="the route returns 500",
+        files_to_edit=("app.py", "admin.py"),
+        edits=(("app.py", "app.py: fix it"), ("models.py", "models.py: add a field")),
+        do_not=(),
+    )
+    got = found.packet_field(("app.py", "tests/test_app.py"))
+    assert got["files"] == ["app.py"]
+    assert got["change"] == ["app.py: fix it", "models.py: add a field"]
+    assert got["outside_fix_files"]["files"] == ["admin.py", "models.py"]
+    assert "reason" in got["outside_fix_files"]["note"]
+    assert "outside_fix_files" not in found.packet_field(())
 
 
 def test_the_env_switch_turns_it_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +183,7 @@ def test_the_env_switch_turns_it_off(tmp_path: Path, monkeypatch: pytest.MonkeyP
     rec = _HybridLocalFixer(writes=_BROKEN)
     _wave_run(tmp_path, rec)
     assert not calls.diagnoses()
-    assert not any(line.startswith(_HEAD) for line in rec.packets["fix-1"].prior_failures)
+    assert "diagnosis" not in rec.packets["fix-1"].task
 
 
 @pytest.mark.parametrize(
@@ -150,6 +201,7 @@ def test_no_diagnosis_without_a_local_attempt_in_hybrid(
     _wave_run(tmp_path, rec)
     assert "fix-1" in rec.packets
     assert not calls.diagnoses()
+    assert "diagnosis" not in rec.packets["fix-1"].task
 
 
 def test_a_local_ticket_retry_in_hybrid_gets_the_diagnosis(

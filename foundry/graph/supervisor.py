@@ -89,6 +89,7 @@ from foundry.graph.gate_wiring import (
     run_spec_gate,
     settle_fix_attempts,
 )
+from foundry.graph.gate_wiring.best import keep_splits_if_fixing
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
@@ -477,6 +478,19 @@ def build_supervisor_graph(
         )
         out["phase"] = _BUILD_TEST_GATE
         _bump_on_non_advance(state, config, out, boundary=bt_boundary)
+        keep_splits_if_fixing(
+            state,
+            out,
+            lambda post: route_after_gates(
+                post,
+                config,
+                boundary=bt_boundary,
+                records=runner.records,
+                max_fix_attempts=max_fix_attempts,
+                total_cap=fix_cap(post, resolve, max_fix_attempts),
+                fix_policy=policy,
+            ),
+        )
         return out
 
     # -- bounded re-verification (fix) nodes ----------------------------------
@@ -551,10 +565,6 @@ def build_supervisor_graph(
             total_cap=fix_cap(state, resolve, max_fix_attempts),
             fix_policy=policy,
         )
-        # A split asked for after a restart: the implementation layer hands it to the
-        # planner, whose children then build in place of the ticket.
-        if decision != ADVANCE and pending_splits(state):
-            return "fix"
         # The gates passed on a tree a fix pass made after the review was skipped
         # (_route_implementation): review it now, once.
         if decision == ADVANCE and policy.until_cap and _review_skipped(state):

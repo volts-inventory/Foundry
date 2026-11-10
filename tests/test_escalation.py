@@ -22,6 +22,7 @@ from foundry.agents.implementation.tickets import (
     stopped_tickets,
     task_from_ticket,
 )
+from foundry.agents.implementation.tickets.constants import SPLIT_REQUEST_TRIAGE
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
 from foundry.execution.adapters.tiered import (
@@ -852,3 +853,62 @@ def test_a_later_finished_session_retires_a_stopped_early_note() -> None:
     assert first(diff("restart-T-001", 3)) == ({}, ())
     # Another ticket's newer diff leaves T-001's stop standing.
     assert first(diff("T-002", 3)) == ({"T-001": TURN_CAP}, ("T-001",))
+
+
+# ---- escalation before a split ------------------------------------------------------
+
+
+def _split_asked(out: FactoryState) -> set[str]:
+    return {
+        t.run_against.removeprefix("task/")
+        for t in out.get("gate_triage") or ()
+        if t.name == SPLIT_REQUEST_TRIAGE
+    }
+
+
+def test_a_local_ticket_escalates_before_it_is_split(tmp_path: Path) -> None:
+    # Both local attempts crash after writing: the last one escalates first, and only
+    # the escalation's failure asks the planner for a split.
+    two = [_ticket("T-001", 0, files=("a.py", "b.py"))]
+    local = _Session(fail_on={"T-001": 9})
+    cloud = _Session(fail_on={"T-001": 9})
+    out = _build(tmp_path, _tiered(cloud, local), two)
+    assert local.calls == ["T-001!", "T-001!"]
+    assert cloud.calls == ["T-001!"]
+    assert "task/T-001" in _escalated(out)
+    assert _split_asked(out) == {"T-001"}
+    # The escalation builds it: nothing to split.
+    local, cloud = _Session(fail_on={"T-001": 9}), _Session()
+    out = _build(tmp_path, _tiered(cloud, local), two)
+    assert cloud.calls == ["T-001"] and set(_diffs(out)) == {"T-001"}
+    assert _split_asked(out) == set()
+    # A ticket with nothing to split along keeps the plain retry ladder.
+    local, cloud = _Session(fail_on={"T-001": 9}), _Session()
+    out = _build(tmp_path, _tiered(cloud, local), [_ticket("T-001", 0, files=("a.py",))])
+    assert cloud.calls == [] and _split_asked(out) == set()
+
+
+def test_a_split_reads_this_waves_failures_not_an_earlier_checks(tmp_path: Path) -> None:
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.graph.gate_wiring.restarts import failure_clusters
+
+    tickets = [
+        _ticket("T-001", 0, files=("a.py",)),
+        _ticket("T-002", 1, files=("b.py", "c.py"), deps=("T-001",)),
+    ]
+    stale = _verdict("t0", 1, GateStatus.FAIL).model_copy(
+        update={"findings": ("a.py:3: error: Name 'x' is not defined",)}
+    )
+    store = ArtifactStore()
+    state = _state(store, tickets, gates=[stale])
+    # The earlier check's verdict blames T-001, T-002's dependency ...
+    blamed = failure_clusters([stale], read_tickets(state, store.resolve), {"T-001"})
+    assert any("T-001" in c.tickets for c in blamed)
+    # ... yet T-002's own failure, this wave's, is T-002's to split.
+    out = (
+        _graph(_runtime(_Session(fail_on={"T-002": 9}), store), store, tmp_path)
+        .compile()
+        .invoke(state, _config())
+    )
+    assert set(_diffs(out)) == {"T-001"}
+    assert _split_asked(out) == {"T-002"}

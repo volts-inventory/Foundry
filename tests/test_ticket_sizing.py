@@ -337,7 +337,6 @@ def test_templates_and_static_assets_are_not_work_files() -> None:
         "shop/web.py",
         "shop/templates/base.html",
         "templates/partials/nav.jinja2",
-        "static/app.js",
         "shop/static/css/site.css",
         "public/logo.svg",
         "public/favicon.ico",
@@ -347,7 +346,14 @@ def test_templates_and_static_assets_are_not_work_files() -> None:
     )
     assert work_files(files) == ("shop/web.py", "src/main.js", "src/game.ts")
     assert len(ticket_files(files)) == len(files)
-    assert not is_asset("src/templates.py") and is_asset("app/templates/macros.py")
+
+
+def test_a_script_or_module_is_a_work_file_wherever_it_lives() -> None:
+    # Assets go by extension: templates/ and static/ dirs hold logic too.
+    files = ("static/game.js", "static/app.ts", "templates/macros.py", "static/img/logo.png")
+    assert work_files(files) == ("static/game.js", "static/app.ts", "templates/macros.py")
+    assert not is_asset("src/templates.py") and not is_asset("app/templates/macros.py")
+    assert is_asset("app/templates/base.html") and is_asset("static/site.css")
 
 
 def test_a_web_layer_of_many_pages_fits_one_local_ticket() -> None:

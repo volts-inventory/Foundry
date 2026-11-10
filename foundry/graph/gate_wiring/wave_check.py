@@ -174,6 +174,7 @@ class WaveBuildCheck:
             policy=self._policy,
             unbuilt_waves=unbuilt,
             carried=frozenset(base.failing) if base else frozenset(),
+            escalates=True,
         )
         settle_fix_attempts(
             state,
@@ -211,8 +212,14 @@ class WaveBuildCheck:
         from foundry.agents.implementation.tickets.constants import SPLIT_REQUEST_TRIAGE
 
         # keep_best asked the planner to split a ticket: route() hands it over, so
-        # no escalation or budget reset rides along.
+        # no escalation or budget reset rides along. Only a loop that goes on (FIX)
+        # hands it over; a spent or stopped one halts or advances as it would.
         splitting = any(t.name == SPLIT_REQUEST_TRIAGE for t in out.get("gate_triage") or ())
+        if splitting and decision != FIX:
+            from foundry.agents.implementation.tickets.split import withdraw_splits
+
+            withdraw_splits(out)
+            splitting = False
         if not splitting and self._advances(post, decision, window, unbuilt):
             # No escalation either: its rebuild and re-check would open a new window
             # with a new share, the overrun the share exists to prevent. A boundary

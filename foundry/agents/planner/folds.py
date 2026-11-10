@@ -288,19 +288,26 @@ def _merge_sole_dependents(
     criteria: Sequence[AcceptanceCriterion],
     stack: StackDecision | None,
     ceilings: Ceilings,
+    wired: frozenset[tuple[str, str]] = frozenset(),
 ) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
     """Fold a ticket into the ONE ticket that depends on it when both are feature
     tickets of the same epic and the merge stays within the ceiling of both
-    tickets' tiers: work only one ticket uses is a hand-off that costs a session,
-    a contract and a wave check, and cross-ticket hand-offs are where builds fail.
-    Its scenarios move with it (their records re-pointed, so each keeps exactly
-    one owner) and nothing else depended on it. Repeats until no pair fits, in
-    plan order. The entrypoint is never folded away, and test tickets and file-less
-    acceptance-only tickets (which build nothing to hand off) take no part."""
+    tickets' tiers: work only one other ticket uses is a private hand-off that
+    costs a session, a contract and a wave check, and cross-ticket hand-offs are
+    where builds fail. Its scenarios move with it (their records re-pointed, so
+    each keeps exactly one owner). Repeats until no pair fits, in plan order.
+
+    The entrypoint takes part neither way: wiring every feature in is its job, not
+    a hand-off, and folding into it would collapse a plan into one ticket. So the
+    ``wired`` edges (ticket, dependency) :func:`_wire_entrypoint` added do not
+    count as dependents; an edge left pointing at a folded ticket moves to the
+    ticket it folded into. Test tickets and file-less acceptance-only tickets
+    (which build nothing to hand off) take no part either."""
     protected = set(stack_files(stack)) if stack is not None else set()
     out = list(tickets)
     moved: dict[str, str] = {}
     concerns: list[str] = []
+    ignored = set(wired)
 
     def epic(tid: str) -> str | None:
         m = _EPIC_OF_TICKET.match(tid)
@@ -315,7 +322,8 @@ def _merge_sole_dependents(
         dependents: dict[str, list[str]] = {}
         for t in out:
             for d in t.depends_on:
-                dependents.setdefault(d, []).append(t.id)
+                if (t.id, d) not in ignored:
+                    dependents.setdefault(d, []).append(t.id)
         by_id = {t.id: t for t in out}
         pick: tuple[Ticket, Ticket] | None = None
         for a in out:
@@ -323,7 +331,7 @@ def _merge_sole_dependents(
             if len(ds) != 1 or not foldable(a) or a.entrypoint:
                 continue
             b = by_id[ds[0]]
-            if not foldable(b) or epic(a.id) != epic(b.id):
+            if not foldable(b) or b.entrypoint or epic(a.id) != epic(b.id):
                 continue
             merged = _merged(a, b)
             if any(
@@ -336,7 +344,22 @@ def _merge_sole_dependents(
         if pick is None:
             break
         a, merged = pick
-        out = [merged if t.id == merged.id else t for t in out if t.id != a.id]
+        rewired: list[Ticket] = []
+        for t in out:
+            if t.id == a.id:
+                continue
+            if t.id == merged.id:
+                rewired.append(merged)
+            elif a.id in t.depends_on:
+                # Only an ignored (wired) edge can still point at a.
+                ignored.discard((t.id, a.id))
+                if merged.id not in t.depends_on:
+                    ignored.add((t.id, merged.id))
+                deps = _uniq(merged.id if d == a.id else d for d in t.depends_on)
+                rewired.append(t.model_copy(update={"depends_on": deps}))
+            else:
+                rewired.append(t)
+        out = rewired
         moved = {k: merged.id if v == a.id else v for k, v in moved.items()}
         moved[a.id] = merged.id
         concerns.append(

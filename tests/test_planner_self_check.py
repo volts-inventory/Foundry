@@ -83,18 +83,6 @@ def _critique(cas: ArtifactStore, writes: dict[str, Any]) -> CriteriaCritique:
 # ---- the in-node revision -----------------------------------------------------------
 
 
-def _unfolded(plan: dict[str, Any], *ids: str) -> dict[str, Any]:
-    """``plan`` with the fixtures ticket T-003 following ``ids`` too (T-001 no longer
-    after it): with a second dependent, none of them folds into T-002."""
-    plan = _copy(plan)
-    for t in plan["tickets"]:
-        if t["id"] == "T-001":
-            t["depends_on"] = []
-        if t["id"] == "T-003":
-            t["depends_on"] = list(ids)
-    return plan
-
-
 def _uncovered() -> dict[str, Any]:
     plan = _copy(PLAN)
     plan["tickets"][1]["scenarios"][0]["covers"] = ["SC-1"]  # MH-1 left uncovered
@@ -424,9 +412,8 @@ def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
 
 def _two_implementers() -> dict[str, Any]:
     """The local-model mistakes the delta exists for: a scenario-less ticket that
-    also implements a contract another ticket implements (unfolded: a merge into T-002
-    would hide them)."""
-    plan = _unfolded(PLAN, "T-001", "contracts-1")
+    also implements a contract another ticket implements."""
+    plan = _copy(PLAN)
     plan["tickets"].append(
         {
             "id": "contracts-1",
@@ -490,10 +477,10 @@ def test_a_failed_plan_check_is_fixed_by_one_delta_call(
 
 
 def test_an_upsert_merges_into_a_shown_ticket_by_id() -> None:
-    t1, *_, contracts_1 = _two_implementers()["tickets"]
+    contracts_1 = _two_implementers()["tickets"][-1]
     fix = _delta(
         tickets=[
-            {**t1, "implements": ["TodoStore.list"], "scenarios": []},
+            {**PLAN["tickets"][0], "implements": ["TodoStore.list"], "scenarios": []},
             {
                 **contracts_1,
                 "scenarios": [
@@ -555,8 +542,7 @@ def test_a_small_plan_lets_the_delta_fix_a_ticket_no_finding_names() -> None:
             }
         ]
     )
-    # Unfolded: the delta rewrites T-002 as it was planned, without T-001 merged in.
-    rt, tx = runtime_for(_unfolded(_uncovered(), "T-001"), fix, PLAN)
+    rt, tx = runtime_for(_uncovered(), fix, PLAN)
     make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 2 and _is_delta(tx.requests[1])
 
@@ -1027,7 +1013,7 @@ def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_recei
 
 
 def _wired_plan(app_signature: str) -> dict[str, Any]:
-    plan = _unfolded(PLAN, "T-001")  # the store stays its own ticket
+    plan = _copy(PLAN)
     plan["interfaces"] = [
         {"name": "TodoStore", "kind": "class", "signature": _STORE.signature},
         {"name": "TodoApp", "kind": "class", "signature": app_signature},
@@ -1254,7 +1240,7 @@ def test_an_unused_contract_is_a_concern_not_a_finding() -> None:
         }
     )
     cas = ArtifactStore()
-    rt, _ = runtime_for(_unfolded(plan, "T-001", "T-009"), cas=cas)
+    rt, _ = runtime_for(plan, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     critique = _critique(cas, writes)
     assert not any("Unused" in f for f in critique.contract_findings)

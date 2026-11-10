@@ -120,9 +120,12 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
     concerns += fold(_own_stack_files.__name__, more)
-    for repair in (_add_read_deps, _wire_entrypoint):
-        tickets, more = repair(tickets)
-        concerns += fold(repair.__name__, more)
+    tickets, more = _add_read_deps(tickets)
+    concerns += fold(_add_read_deps.__name__, more)
+    planned = {(t.id, d) for t in tickets for d in t.depends_on}
+    tickets, more = _wire_entrypoint(tickets)
+    concerns += fold(_wire_entrypoint.__name__, more)
+    wired = frozenset((t.id, d) for t in tickets for d in t.depends_on) - planned
     # After the order repairs: the fold reads the final order to judge a scenario
     # no earlier than before.
     tickets, more = _fold_test_bindings(tickets, frame.stack)
@@ -130,7 +133,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     # After the binding fold, which drops paired test tickets and so leaves a feature
     # ticket's real dependents; before the step-module folds, so the merged ticket
     # binds every scenario it now carries from ONE module.
-    tickets, criteria, more = _merge_sole_dependents(tickets, criteria, frame.stack, frame.ceilings)
+    tickets, criteria, more = _merge_sole_dependents(
+        tickets, criteria, frame.stack, frame.ceilings, wired
+    )
     concerns += fold(_merge_sole_dependents.__name__, more)
     for bind in (_own_scenario_bindings, _one_step_module_per_ticket):
         tickets, more = bind(tickets, frame.stack)

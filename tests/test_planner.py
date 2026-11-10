@@ -289,8 +289,7 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
     assert all(a.produced_by == NODE_ID for a in artifacts)
     assert all(a.uri.startswith("cas://") for a in artifacts)
     assert sum(a.kind == "acceptance_criterion" for a in artifacts) == 3
-    # T-001 folds into T-002, the only ticket that depends on it.
-    assert sum(a.kind == "ticket" for a in artifacts) == 2
+    assert sum(a.kind == "ticket" for a in artifacts) == 3
     assert sum(a.kind == "adr" for a in artifacts) == 2
     assert sum(a.kind == "interface_contract" for a in artifacts) == 2
     # Distinct ADRs get distinct handles (content_identity, not body digest).
@@ -325,25 +324,24 @@ def test_bodies_resolve_back_and_ownership_carries_unit_criteria() -> None:
     by_kind = {a.kind: a for a in writes["artifacts"]}
     ownership = cas.resolve(by_kind["ownership_map"])
     assert isinstance(ownership, OwnershipMap)
-    # T-001 folds into T-002, its only dependent, which binds every scenario from
-    # its own step module (T-001's is dropped).
     assert ownership.owners == {
-        "todo/__init__.py": "backend-T-002",
-        "todo/store.py": "backend-T-002",
+        "todo/__init__.py": "data-T-001",
+        "todo/store.py": "data-T-001",
         "todo/api.py": "backend-T-002",
+        "tests/test_store.py": "data-T-001",
         "tests/test_api.py": "backend-T-002",
         "tests/conftest.py": "test-T-003",
     }
-    every = ("AC-001", "AC-002", "AC-003")
     assert ownership.unit_criteria == {
-        "todo/__init__.py": every,
-        "todo/store.py": every,
-        "todo/api.py": every,
-        "tests/test_api.py": every,
+        "todo/__init__.py": ("AC-003",),
+        "todo/store.py": ("AC-003",),
+        "tests/test_store.py": ("AC-003",),
+        "todo/api.py": ("AC-001", "AC-002"),
+        "tests/test_api.py": ("AC-001", "AC-002"),
     }
     # The current scheduler's lanes still follow the specialty; test files -> backend.
     lanes = {o: lane_of_area(ownership.area_of(o)) for o in ownership.leads()}
-    assert lanes == {"backend-T-002": "backend", "test-T-003": "backend"}
+    assert lanes == {"data-T-001": "data", "backend-T-002": "backend", "test-T-003": "backend"}
     prd = cas.resolve(by_kind["prd"])
     assert set(prd.criterion_ids) == {"AC-001", "AC-002", "AC-003"}
     criteria = [cas.resolve(a) for a in writes["artifacts"] if a.kind == "acceptance_criterion"]
@@ -362,14 +360,8 @@ def test_one_journal_entry_as_the_planner() -> None:
     assert note.node_id == "planner"
     assert note.role == "Planner"
     assert "3 acceptance criteria" in note.summary
-    assert "2 tickets" in note.summary
-    # A clean DAG with every feature ticket tested: only the merge fold fired.
-    assert note.concerns == (
-        "Ticket T-001: merged into T-002, the only ticket that depends on it (the merge "
-        "stays within its size ceiling).",
-        "Ticket T-002: dropped test module(s) tests/test_store.py: tests/test_api.py binds "
-        "its scenarios, and every further module would bind and run them again.",
-    )
+    assert "3 tickets" in note.summary
+    assert note.concerns == ()  # a clean DAG with every feature ticket tested
 
 
 def test_builders_skip_non_object_items() -> None:
@@ -772,18 +764,15 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
     rt, _ = runtime_for(PLAN, cas=cas)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     tickets = {t.id: t for t in (cas.resolve(a) for a in writes["artifacts"] if a.kind == "ticket")}
-    # T-001 folded into T-002, its only dependent: T-002 inherits its dependency,
-    # contracts and scenario, and no longer consumes what it now implements.
-    assert set(tickets) == {"T-002", "T-003"}
+    assert set(tickets) == {"T-001", "T-002", "T-003"}
     t2 = tickets["T-002"]
     assert isinstance(t2, Ticket)
     assert (t2.specialty, t2.difficulty, t2.depends_on) == (
         Specialty.BACKEND,
         Difficulty.COMPLEX,
-        ("T-003",),
+        ("T-001",),
     )
-    assert t2.implements == ("TodoStore.add", "TodoStore.list") and t2.consumes == ()
-    assert t2.scenario_ids == ("AC-001", "AC-002", "AC-003")
+    assert t2.consumes == ("TodoStore.add",) and t2.scenario_ids == ("AC-001", "AC-002")
     # Each feature ticket binds its own scenarios; the fixtures ticket binds none.
     assert tickets["T-003"].scenario_ids == ()
     criteria = {
@@ -794,8 +783,6 @@ def test_emitted_tickets_and_criteria_resolve_with_their_fields() -> None:
     assert ac1.ticket_id == "T-002" and ac1.then == ("it appears", "the count is 1")
     assert ac1.text == "Given a user When they add a todo Then it appears and the count is 1"
     assert ac1.oracle_hint == "features/T-002.feature::AC-001"
-    ac3 = criteria["AC-003"]
-    assert (ac3.ticket_id, ac3.oracle_hint) == ("T-002", "features/T-002.feature::AC-003")
 
 
 def _emitted(plan: dict[str, Any]) -> tuple[dict[str, Ticket], OwnershipMap]:
@@ -857,18 +844,12 @@ def test_one_to_one_test_tickets_fold_into_their_features_end_to_end() -> None:
         ],
     }
     tickets, ownership = _emitted(plan)
-    # With the test tickets gone T-002 is T-001's only dependent, so T-001 folds into
-    # it too, and T-002 binds all three scenarios from the one module it is given.
-    assert set(tickets) == {"T-002"}
-    assert tickets["T-002"].depends_on == ()
-    assert tickets["T-002"].files == (
-        "todo/api.py",
-        "todo/__init__.py",
-        "todo/store.py",
-        "tests/test_t_002.py",
-    )
-    assert ownership.owners["tests/test_t_002.py"] == "backend-T-002"
-    assert ownership.unit_criteria["tests/test_t_002.py"] == ("AC-001", "AC-002", "AC-003")
+    assert set(tickets) == {"T-001", "T-002"}
+    assert tickets["T-002"].depends_on == ("T-001",)
+    assert tickets["T-001"].files == ("todo/__init__.py", "todo/store.py", "tests/test_t_001.py")
+    assert ownership.owners["tests/test_t_001.py"] == "data-T-001"
+    assert ownership.unit_criteria["tests/test_t_001.py"] == ("AC-003",)
+    assert ownership.unit_criteria["tests/test_t_002.py"] == ("AC-001", "AC-002")
     assert not any(o.startswith("test-") for o in ownership.owners.values())
 
 
@@ -976,8 +957,7 @@ def test_replan_retires_tickets_it_no_longer_emits() -> None:
     }
     second = node(state, config_for("r", step=5))
     after: FactoryState = {**state, "artifacts": [*first["artifacts"], *second["artifacts"]]}
-    # T-001 folds into T-002 on both passes.
-    assert [t.id for t in read_tickets(after, cas.resolve)] == ["T-002"]
+    assert [t.id for t in read_tickets(after, cas.resolve)] == ["T-001", "T-002"]
     assert "retired ticket(s) T-003" in " ".join(second["agent_journal"][0].concerns)
 
 
@@ -1051,7 +1031,7 @@ def test_single_epic_with_inline_tickets_is_one_call() -> None:
     rt, tx = runtime_for(_plan(epics=[epic]))
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert len(tx.requests) == 1
-    assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 2  # T-001 folds into T-002
+    assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 3
 
 
 def test_multi_epic_plan_makes_one_ticket_call_per_epic_with_namespaced_ids() -> None:

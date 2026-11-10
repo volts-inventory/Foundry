@@ -110,23 +110,22 @@ def test_a_ticket_folds_into_its_only_dependent() -> None:
         difficulty=Difficulty.COMPLEX,
         implements=("summarize",),
     )
-    cli = _t(
-        "cli",
-        ("csvstats/cli.py", "smoke.py", "tests/test_cli.py"),
+    report = _t(
+        "report",
+        ("csvstats/report.py", "tests/test_report.py"),
         ("AC3",),
         ("contracts", "stats"),
-        entry=True,
         consumes=("summarize", "parse"),
     )
-    criteria = [_ac("AC1", "stats"), _ac("AC2", "stats"), _ac("AC3", "cli")]
-    tickets, crit, concerns = _merge_sole_dependents([stats, cli], criteria, _PY, ALL_CLOUD)
+    cli = _t("cli", ("csvstats/cli.py",), ("AC4",), ("report",), entry=True)
+    criteria = [_ac("AC1", "stats"), _ac("AC2", "stats"), _ac("AC3", "report"), _ac("AC4", "cli")]
+    tickets, crit, concerns = _merge_sole_dependents([stats, report, cli], criteria, _PY, ALL_CLOUD)
 
-    [merged] = tickets
-    assert merged.id == "cli" and merged.entrypoint
+    merged, entry = tickets
+    assert merged.id == "report" and entry == cli.model_copy(update={"seq": entry.seq})
     assert merged.files == (
-        "csvstats/cli.py",
-        "smoke.py",
-        "tests/test_cli.py",
+        "csvstats/report.py",
+        "tests/test_report.py",
         "csvstats/stats.py",
         "tests/test_stats.py",
     )
@@ -135,10 +134,16 @@ def test_a_ticket_folds_into_its_only_dependent() -> None:
     assert merged.implements == ("summarize",) and merged.consumes == ("parse",)
     assert merged.difficulty is Difficulty.COMPLEX  # the harder one: its tier builds it
     assert "Also build what stats (stats title) planned: stats work." in merged.description
-    assert _owners(tickets, crit) == {"AC1": "cli", "AC2": "cli", "AC3": "cli"}
-    assert {c.oracle_hint for c in crit if c.id == "AC1"} == {"features/cli.feature::AC1"}
+    assert _owners(tickets, crit) == {
+        "AC1": "report",
+        "AC2": "report",
+        "AC3": "report",
+        "AC4": "cli",
+    }
+    assert {c.oracle_hint for c in crit if c.id == "AC1"} == {"features/report.feature::AC1"}
+    assert [t.seq.local for t in tickets] == [0, 1]
     assert concerns == [
-        "Ticket stats: merged into cli, the only ticket that depends on it (the merge "
+        "Ticket stats: merged into report, the only ticket that depends on it (the merge "
         "stays within its size ceiling)."
     ]
 
@@ -147,14 +152,35 @@ def test_a_chain_folds_to_a_fixpoint_and_every_scenario_keeps_one_owner() -> Non
     tickets = [
         _t("parse", ("p.py",), ("A1",)),
         _t("stats", ("s.py",), ("A2",), ("parse",)),
-        _t("report", ("r.py",), ("A3",)),
-        _t("cli", ("c.py",), ("A4",), ("stats", "report"), entry=True),
+        _t("report", ("r.py",), ("A3",), ("stats",)),
+        _t("cli", ("c.py",), ("A4",), ("report",), entry=True),
     ]
     criteria = [_ac("A1", "parse"), _ac("A2", "stats"), _ac("A3", "report"), _ac("A4", "cli")]
     out, crit, _ = _merge_sole_dependents(tickets, criteria, _PY, ALL_CLOUD)
-    assert [t.id for t in out] == ["cli"]
-    assert _owners(out, crit) == {"A1": "cli", "A2": "cli", "A3": "cli", "A4": "cli"}
-    assert [t.seq.local for t in out] == [0]
+    assert [t.id for t in out] == ["report", "cli"]
+    assert _owners(out, crit) == {"A1": "report", "A2": "report", "A3": "report", "A4": "cli"}
+
+
+def test_the_entrypoint_is_never_a_merge_target_and_its_wired_edges_do_not_count() -> None:
+    # Features only the entrypoint uses stay separate: wiring them in is its job.
+    tickets = [
+        _t("stats", ("s.py",), ("A1",)),
+        _t("report", ("r.py",), ("A2",)),
+        _t("cli", ("c.py",), ("A3",), ("stats", "report"), entry=True),
+    ]
+    assert _merge_sole_dependents(tickets, [], _PY, ALL_CLOUD)[0] == tickets
+    # parse is used only by stats; _wire_entrypoint also made cli depend on it.
+    # That edge is no dependent, and it follows parse into stats.
+    wired = [
+        _t("parse", ("p.py",), ("A0",)),
+        _t("stats", ("s.py",), ("A1",), ("parse",)),
+        _t("cli", ("c.py",), ("A3",), ("stats", "parse"), entry=True),
+    ]
+    out, _, _ = _merge_sole_dependents(wired, [], _PY, ALL_CLOUD, frozenset({("cli", "parse")}))
+    assert [t.id for t in out] == ["stats", "cli"]
+    assert out[1].depends_on == ("stats",)
+    # Counted as a real edge, cli is a second dependent: nothing folds.
+    assert _merge_sole_dependents(wired, [], _PY, ALL_CLOUD)[0] == wired
 
 
 def test_no_fold_with_two_dependents_across_epics_or_over_the_ceiling() -> None:
@@ -194,7 +220,7 @@ def test_the_entrypoint_test_and_acceptance_only_tickets_are_never_folded() -> N
     feature = _t("store", ("store.py",), ("A1",))
     steps = _t("steps", ("tests/test_steps.py",), (), ("store",), specialty=Specialty.TEST)
     assert _merge_sole_dependents([feature, steps], [], _PY, ALL_CLOUD)[0] == [feature, steps]
-    spec = _t("spec", (), ("A2",), ("store",), entry=True)  # acceptance-only
+    spec = _t("spec", (), ("A2",), ("store",))  # acceptance-only
     assert _merge_sole_dependents([feature, spec], [], _PY, ALL_CLOUD)[0] == [feature, spec]
 
 
@@ -203,7 +229,7 @@ def test_a_merged_ticket_binds_its_scenarios_from_one_step_module() -> None:
     # tickets' modules, keeps its own and drops the other.
     tickets = [
         _t("store", ("store.py", "tests/test_store.py"), ("A1",)),
-        _t("api", ("api.py", "tests/test_api.py"), ("A2",), ("store",), entry=True),
+        _t("api", ("api.py", "tests/test_api.py"), ("A2",), ("store",)),
     ]
     merged, _, _ = _merge_sole_dependents(tickets, [], _PY, ALL_CLOUD)
     bound, _ = _own_scenario_bindings(merged, _PY)
@@ -222,12 +248,35 @@ def _runtime(*payloads: dict[str, Any], local: frozenset[str] = frozenset()) -> 
     return AgentRuntime(proxy=proxy, cas=cas), tx, cas
 
 
-def test_the_planner_counts_the_merge_fold() -> None:
+def test_the_planner_folds_only_a_private_hand_off() -> None:
+    # PLAN's store is used only by the entrypoint: it stays its own ticket.
     rt, _, cas = _runtime(PLAN)
     with telemetry.counting() as counts:
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert "planner.fold.merge_sole_dependents" not in counts.snapshot()
+    assert {t.id for t in _bodies(cas, writes, "ticket")} == {"T-001", "T-002", "T-003"}
+    # A validation ticket only the store uses folds into it, and is counted.
+    plan = json.loads(json.dumps(PLAN))
+    store = plan["tickets"][0]
+    store["depends_on"] = [*store["depends_on"], "T-004"]
+    plan["tickets"].append(
+        {
+            **store,
+            "id": "T-004",
+            "title": "Validate todos",
+            "depends_on": [],
+            "files": ["todo/validate.py"],
+            "implements": [],
+            "scenarios": [{**store["scenarios"][0], "id": "AC-004"}],
+        }
+    )
+    rt, _, cas = _runtime(plan)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert counts.snapshot()["planner.fold.merge_sole_dependents"] == 1
-    assert {t.id for t in _bodies(cas, writes, "ticket")} == {"T-002", "T-003"}
+    tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert set(tickets) == {"T-001", "T-002", "T-003"}
+    assert tickets["T-001"].scenario_ids == ("AC-003", "AC-004")
 
 
 # ---- the ceiling ----------------------------------------------------------------------

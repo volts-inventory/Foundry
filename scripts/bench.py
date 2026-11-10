@@ -13,6 +13,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from foundry.proxy.model_provider_proxy import EFFORT_COUNT_PREFIX
+
 CASES = {
     "dice": "a Python command-line tool that rolls dice given notation like 2d6+3",
     "todo": "a small Python REST API for a todo list with create, list, complete and delete",
@@ -41,8 +43,6 @@ STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
 RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
 HINT_COUNTS = "hint_counts.json"
-# The proxy's per-call thinking-level counts ride in the hint counts (EFFORT_COUNT_PREFIX).
-EFFORT_PREFIX = "effort."
 
 
 def run_case(
@@ -149,11 +149,11 @@ def summarize_case(root: Path) -> dict[str, Any]:
         "verdict": VERDICTS.get(code) if code is not None else None,
         "released": bool(files) and code == 0,
         "calls_by_effort": {
-            k.removeprefix(EFFORT_PREFIX): v
+            k.removeprefix(EFFORT_COUNT_PREFIX): v
             for k, v in counts.items()
-            if k.startswith(EFFORT_PREFIX)
+            if k.startswith(EFFORT_COUNT_PREFIX)
         },
-        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(EFFORT_PREFIX)},
+        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(EFFORT_COUNT_PREFIX)},
     }
 
 

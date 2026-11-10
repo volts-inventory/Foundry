@@ -426,6 +426,18 @@ def _retired_tickets(
     ]
 
 
+def _kept_ids(state: FactoryState, rt: AgentRuntime) -> frozenset[str]:
+    """Ticket ids a re-plan must not fold away: every live ticket of this node's
+    earlier plan and every ticket with a built diff."""
+    planned = {
+        t.id for t in _newest_by_id(state, rt, TICKET_KIND, Ticket).values() if t.supersedes != t.id
+    }
+    built = {
+        a.task_id for a in state.get("artifacts") or () if a.kind == "feature_diff" and a.task_id
+    }
+    return frozenset(planned | built)
+
+
 @dataclass(frozen=True)
 class _Draft:
     """One call-1 plan turned into checked tickets, before anything is emitted."""

@@ -70,6 +70,9 @@ def test_summarize_case_splits_calls_by_effort_out_of_the_hint_counts(tmp_path: 
     assert s["calls_by_effort"] == {"low": 2, "xhigh": 1}
     assert s["hint_counts"] == {"gate.reuse.build": 3}
     assert "dice effort: low=2, xhigh=1" in bench.render({"dice": s})
+    from foundry.proxy.model_provider_proxy import EFFORT_COUNT_PREFIX
+
+    assert bench.EFFORT_COUNT_PREFIX is EFFORT_COUNT_PREFIX
 
 
 def test_released_requires_files_and_exit_zero(tmp_path: Path) -> None:

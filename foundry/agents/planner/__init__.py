@@ -133,6 +133,7 @@ from foundry.agents.planner.prior import (
     _Draft,
     _draft_prior,
     _epic_revision_text,
+    _kept_ids,
     _match_prior_epics,
     _named_epics,
     _not_of,
@@ -661,6 +662,7 @@ def make_planner_node(
             base=base,
             stack_findings=_stack_command_findings(decided),
             ceilings=ceilings,
+            keep=_kept_ids(state, rt),
         )
         return _Draft(
             payload=payload,
@@ -1196,6 +1198,7 @@ def make_planner_node(
             criteria_seq=criteria_seq,
             base=base,
             ceilings=ceilings,
+            keep=_kept_ids(state, rt),
         )
 
     def _patch_replan(

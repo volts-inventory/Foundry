@@ -328,7 +328,6 @@ def _ticket_packet(
             "description": ticket.description,
             "specialty": ticket.specialty.value,
             "difficulty": ticket.difficulty.value,
-            "effort": ticket_effort(ticket.difficulty),
             "tier": task.tier,
             "spec_uri": task.spec_uri,
             "branch": task.branch,
@@ -347,6 +346,7 @@ def _ticket_packet(
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
         retrieved_spans=spans,
         prior_failures=prior_failures,
+        effort=ticket_effort(ticket.difficulty),
         worktree_path=task.branch,  # placeholder; adapters use sandbox.worktree
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,

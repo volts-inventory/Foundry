@@ -60,7 +60,7 @@ def packet_tier_scope(packet: TaskPacket) -> Iterator[None]:
     """Expose ``packet``'s tier and thinking level to :func:`current_packet_tier`
     and :func:`current_packet_effort` for the duration."""
     tier = packet.task.get("tier")
-    effort = packet.task.get("effort")
+    effort = packet.effort
     token = _PACKET_TIER.set(str(tier) if tier else None)
     effort_token = _PACKET_EFFORT.set(effort if effort in EFFORT_LEVELS else None)
     try:
@@ -117,6 +117,9 @@ class TaskPacket(FrozenModel):
             "first attempt."
         ),
     )
+    # The local thinking level the session runs at; never in the prompt (a cloud
+    # model, or the session itself, has nothing to do with it).
+    effort: Effort | None = None
     worktree_path: str
     turn_budget: int
     cost_budget_microusd: int  # integer micro-USD, never floats (arch §8)

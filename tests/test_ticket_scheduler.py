@@ -610,7 +610,7 @@ def test_a_tickets_thinking_level_follows_its_difficulty_and_a_retry_steps_it_up
     _graph(_runtime(rec, store), store, tmp_path).compile().invoke(
         _state(store, tickets), _config()
     )
-    assert [p.task["effort"] for p in rec.history] == efforts
+    assert [p.effort for p in rec.history] == efforts
 
 
 def test_a_ticket_with_a_diff_is_not_rebuilt(tmp_path: Path) -> None:
@@ -1300,7 +1300,7 @@ def test_proxy_closures_pass_the_packets_thinking_level(tmp_path: Path) -> None:
             )()
 
     proxy: Any = _Proxy()
-    low = _packet("T3").model_copy(update={"task": {"id": "T-1", "tier": "T3", "effort": "low"}})
+    low = _packet("T3").model_copy(update={"task": {"id": "T-1", "tier": "T3"}, "effort": "low"})
     src = tmp_path / "src"
     src.mkdir()
     sandbox = Sandbox(str(src))

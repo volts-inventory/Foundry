@@ -860,6 +860,51 @@ def test_local_calls_are_counted_by_thinking_level() -> None:
     assert counts.snapshot() == {"effort.low": 1, "effort.medium": 2, "effort.xhigh": 1}
 
 
+def test_each_local_attempt_is_counted_at_the_level_it_was_sent() -> None:
+    from foundry import telemetry
+
+    class CutOnce(RecordingTransport):
+        def send(self, request: dict[str, Any]) -> ProviderResponse:
+            self.requests.append(request)
+            first = len(self.requests) == 1
+            return ProviderResponse(
+                served_model=request["model"],
+                request_id="r",
+                text='{"a": ' if first else '{"a": 1}',
+                usage=dict(USAGE),
+                stop_reason="length" if first else "stop",
+            )
+
+    local = CutOnce()
+    proxy = _local_proxy(local)
+    proxy._retry.sleeper = lambda _s: None
+    msgs = [{"role": "user", "content": "x"}]
+    with telemetry.counting() as counts:
+        proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", schema={"type": "object"})
+    assert [r["local_effort"] for r in local.requests] == ["xhigh", "medium"]
+    assert counts.snapshot() == {"effort.xhigh": 1, "effort.medium": 1}
+
+
+def test_a_packets_effort_reaches_the_proxy_closures_but_not_the_prompt() -> None:
+    from foundry.execution.adapter_contract import (
+        assemble_prompt,
+        current_packet_effort,
+        packet_tier_scope,
+    )
+
+    packet = TaskPacket(
+        task={"id": "T-1", "tier": "T2"},
+        effort="low",
+        worktree_path=".",
+        turn_budget=1,
+        cost_budget_microusd=0,
+    )
+    with packet_tier_scope(packet):
+        assert current_packet_effort() == "low"
+    assert current_packet_effort() is None
+    assert "effort" not in assemble_prompt(packet)
+
+
 def test_ticket_and_fixer_thinking_levels() -> None:
     assert [ticket_effort(d) for d in Difficulty] == ["low", "medium", "xhigh"]
     assert [ticket_effort(d, retry=True) for d in Difficulty] == ["medium", "xhigh", "xhigh"]

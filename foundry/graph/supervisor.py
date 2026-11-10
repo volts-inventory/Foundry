@@ -70,6 +70,7 @@ from langgraph.graph import END, START, StateGraph
 from foundry.agents.implementation.tickets import (
     cap_stopped,
     pending_interface_replans,
+    pending_splits,
     pending_wave,
 )
 from foundry.governance.budget_controller import BudgetCaps, BudgetController
@@ -507,7 +508,8 @@ def build_supervisor_graph(
         # The stub-signature guard left a ticket to a re-plan: the planner revises its
         # interface (once per ticket), the Spec gate re-checks the plan, and this
         # layer builds the ticket again.
-        if pending_interface_replans(state):
+        # A ticket that failed after its retry was asked to be split (once per ticket).
+        if pending_interface_replans(state) or pending_splits(state):
             return _PLANNER
         # Waves left unbuilt: the per-wave check spent the fix budget (halt in order).
         if pending_wave(state, resolve):
@@ -549,6 +551,10 @@ def build_supervisor_graph(
             total_cap=fix_cap(state, resolve, max_fix_attempts),
             fix_policy=policy,
         )
+        # A split asked for after a restart: the implementation layer hands it to the
+        # planner, whose children then build in place of the ticket.
+        if decision != ADVANCE and pending_splits(state):
+            return "fix"
         # The gates passed on a tree a fix pass made after the review was skipped
         # (_route_implementation): review it now, once.
         if decision == ADVANCE and policy.until_cap and _review_skipped(state):

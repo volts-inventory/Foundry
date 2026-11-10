@@ -175,6 +175,24 @@ def keep_best(
         )
         if restart and dead_end:
             stop = None
+        if not restart:
+            # The targeted cluster's tickets spent their restart (and escalation):
+            # ask the planner to split them instead (once per ticket).
+            from foundry.agents.implementation.tickets.split import (
+                split_after_restart,
+                split_request,
+            )
+
+            for tid in split_after_restart(state, resolve, rt, clusters, target, passes):
+                out.setdefault("gate_triage", []).append(
+                    split_request(
+                        rt,
+                        config,
+                        _FIX_PASS_NODE,
+                        tid,
+                        f"the fix loop's checks still fail on {target} after {tid}'s restart",
+                    )
+                )
         newest = newest.model_copy(
             update={"target": target, "restart_tickets": () if stop else restart}
         )

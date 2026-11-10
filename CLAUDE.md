@@ -254,3 +254,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - A LaunchDaemon's env (e.g. Ollama's `OLLAMA_CONTEXT_LENGTH`) changes only on `launchctl bootout` + `bootstrap`; `kickstart -k` restarts it with the old values — check `ollama ps` CONTEXT after.
 - `scripts/bench.py` defaults to `--cases dice,todo,csv --scope demo`: a real bench round needs `--cases dice,todo,csv,notes,shop --scope standard`.
 - `rt.seq(config, NODE_ID, key)` mints equal Seqs for different keys within one node pass (same superstep, `local=0`): ordering two notes written in the same pass needs `<=`, not `<`.
+- With `tests/test_supervisor`'s synthetic `_BDD_PASSING_DIFF`, a wave check's scenario-scoped Test gate reports a built ticket's scenario "not executed" while the final gates pass it: a multi-wave supervisor e2e test patches `WaveBuildCheck._scenarios` to build-only (see `tests/test_ticket_split.py`).

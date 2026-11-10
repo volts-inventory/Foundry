@@ -84,11 +84,12 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from foundry import progress
+from foundry import progress, telemetry
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy.lineage import LineageMap
 from foundry.proxy.token_meter import TokenMeter
 from foundry.schemas.gates import GateResult, GateStatus, JudgmentProvenance, VerdictClass
+from foundry.schemas.implementation import Effort
 from foundry.state.seq import Seq
 
 # Tier map (plan §4): capability levels WITHIN the single Anthropic lineage —
@@ -410,11 +411,13 @@ LOCAL_THINKING_ENV = "FOUNDRY_LOCAL_THINKING"
 LocalThinking = Literal["off", "on", "agent"]
 _LOCAL_THINKING_MODES: tuple[LocalThinking, ...] = ("off", "on", "agent")
 _AGENT_NODE_IDS = frozenset({"junior_engineer"})
-# A thinking turn spends its reasoning out of the answer's budget: at xhigh a hard
-# ticket, a verdict or the planner's plan JSON can think for 20K+ tokens first.
-_LOCAL_THINKING_MAX_TOKENS = 40960
-# One-shot xhigh calls (plan, verdict): what a 128K context leaves after the prompt.
-_LOCAL_DEEP_THINKING_MAX_TOKENS = 98304
+# The output-token floor per thinking level: a thinking turn spends its reasoning
+# out of the answer's budget, and at xhigh a hard ticket or the planner's plan JSON
+# can think for 20K+ tokens first, so xhigh gets what a 128K context leaves after
+# the prompt. Low keeps medium's floor: the answer (a whole file) still needs room.
+_LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, "xhigh": 98304}
+# Run fire count of each local call sent (not replayed), by thinking level or "off".
+EFFORT_COUNT_PREFIX = "effort."
 # A prompt the server saw as under this share of our estimate was cut to fit its
 # context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
 # so a healthy call reads at or above 1.
@@ -604,8 +607,8 @@ _MISS_TAIL_CHARS = 2000
 
 
 def _lower_effort(request: dict[str, Any]) -> dict[str, Any]:
-    """``request`` one local thinking level lower (xhigh -> medium -> off) when it
-    thinks, its local seed re-derived from the new request."""
+    """``request`` one local thinking level lower (xhigh -> medium -> off; low ->
+    off) when it thinks, its local seed re-derived from the new request."""
     lowered = dict(request)
     if lowered.get("local_thinking") is True:
         if lowered.get("local_effort") == "xhigh":
@@ -1184,7 +1187,7 @@ class ModelProviderProxy:
         purpose: Purpose,
         schema: dict[str, Any] | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
-        effort: Literal["medium", "xhigh"] | None = None,
+        effort: Effort | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
@@ -1192,8 +1195,9 @@ class ModelProviderProxy:
         ``tools`` (Anthropic shape: name/description/input_schema) offers native
         tool calls, returned on ``CompletionResult.tool_calls``; a backend without
         a tool channel raises :class:`ToolsUnsupported`. ``effort`` overrides the
-        local thinking level (agent turns medium, one-shot calls xhigh) for a
-        call that edits rather than invents, e.g. a plan repair."""
+        local thinking level (agent turns and verdicts medium, other one-shot calls
+        xhigh): a ticket's session thinks at its difficulty's level, a plan repair
+        (an edit, not an invention) at medium."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1212,14 +1216,14 @@ class ModelProviderProxy:
             request["local_thinking"] = thinking
         if thinking:
             # Qwen3.8 guidance: xhigh for planning and hard one-shot calls, medium in
-            # agent loops (one turn of many). xhigh on the plan JSON thought past a 40K
-            # cap without answering, so one-shot calls get the room the context leaves.
+            # agent loops (one turn of many). A verdict is advisory: at xhigh a local
+            # review took 9-10 minutes a case instead of 2.5 with no better findings.
             agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
-            level = effort or ("medium" if agent_turn else "xhigh")
+            level: Effort = effort or ("medium" if agent_turn or purpose == "judgment" else "xhigh")
             request["local_effort"] = level
-            deep = level == "xhigh"
-            cap = _LOCAL_DEEP_THINKING_MAX_TOKENS if deep else _LOCAL_THINKING_MAX_TOKENS
-            request["max_tokens"] = max(int(request["max_tokens"]), cap)
+            request["max_tokens"] = max(
+                int(request["max_tokens"]), _LOCAL_THINKING_MAX_TOKENS[level]
+            )
         elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
@@ -1248,6 +1252,8 @@ class ModelProviderProxy:
                 remember(response)  # so the next turn still replays this turn's reasoning
         else:
             progress.log(f"start {label}")
+            if local:
+                telemetry.count(f"{EFFORT_COUNT_PREFIX}{request.get('local_effort') or 'off'}")
             started = time.monotonic()
             response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
             progress.finished(label, started, response.usage, self.token_meter)
@@ -1342,7 +1348,7 @@ class ModelProviderProxy:
         gate_name: str = "review",
         failing_gates: Iterable[str] = (),
         failing_tests: Iterable[str] = (),
-        effort: Literal["medium", "xhigh"] | None = None,
+        effort: Effort | None = None,
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 

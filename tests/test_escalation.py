@@ -336,6 +336,12 @@ def test_a_wave_check_that_fails_twice_reruns_its_local_ticket_on_the_cloud(
     )
     assert set(_escalated(out)) == {"task/T-001"}
     assert cloud.seen["T-001"]["app.py"] == "def broken(:\n"  # built on the restart
+    # A standard ticket thinks at medium; its restart and escalation one level up;
+    # the fix loop's first fixer pass at medium.
+    assert local.packets["T-002"].task["effort"] == "medium"
+    assert local.packets["T-001"].task["effort"] == "xhigh"
+    assert cloud.packets["T-001"].task["effort"] == "xhigh"
+    assert cloud.packets["fix-1"].task["effort"] == "medium"
 
 
 def test_a_wave_check_escalation_happens_once(tmp_path: Path) -> None:

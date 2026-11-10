@@ -187,6 +187,7 @@ from foundry.schemas.implementation import (
     FeatureDiff,
     Task,
     Ticket,
+    ticket_effort,
 )
 from foundry.schemas.product import AcceptanceCriterion
 
@@ -654,6 +655,17 @@ def make_engineering_node(
                     )
                 if tid in restart_memo:
                     packet = packet.model_copy(update={"prior_failures": restart_memo[tid]})
+                if own or tid in restart_memo:
+                    # A rebuild of a failed attempt (carried, re-planned) or a fix-loop
+                    # restart thinks one level harder than the ticket's first attempt.
+                    packet = packet.model_copy(
+                        update={
+                            "task": {
+                                **packet.task,
+                                "effort": ticket_effort(ticket.difficulty, retry=True),
+                            }
+                        }
+                    )
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)
                 elif target and tid in already and _is_local(rt, tasks[tid].tier):

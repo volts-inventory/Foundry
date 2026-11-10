@@ -609,3 +609,150 @@ def test_the_relay_never_follows_a_link_the_session_planted(
             assert not (sb.worktree / RELAY_DIR / "r1.out").is_symlink()
         assert not (sb.worktree / ".claude").exists()
     assert outside.read_text() == "host\n"
+
+
+def _swap_after_lstat(monkeypatch: pytest.MonkeyPatch, name: str, swap: Any) -> None:
+    """The session's race, made deterministic: ``swap()`` runs right after the walk's
+    last check of ``name`` (that it is a plain file or directory), before it opens it."""
+    import os
+
+    real = os.stat
+    done: list[bool] = []
+
+    def _stat(path: Any, *a: Any, **kw: Any) -> Any:
+        out = real(path, *a, **kw)
+        last = "dir_fd" in kw or kw.get("follow_symlinks", True)  # not a lone lstat
+        if not isinstance(path, int) and os.path.basename(path) == name and last and not done:
+            done.append(True)
+            swap()
+        return out
+
+    monkeypatch.setattr(os, "stat", _stat)
+
+
+def test_the_walk_never_follows_a_directory_swapped_for_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "host"
+    secret.mkdir()
+    (secret / "a.py").write_text("PRIVATE\n")
+    tree = tmp_path / "tree"
+    (tree / "src" / "d").mkdir(parents=True)
+    (tree / "src" / "d" / "a.py").write_text("A = 1\n")
+
+    def swap() -> None:
+        (tree / "src" / "d").rename(tree / "src" / "d.bak")
+        (tree / "src" / "d").symlink_to(secret)
+
+    # The swap lands once the walk is inside src/d, between its check and its read
+    # of a.py: a path-based read would now go through the link.
+    _swap_after_lstat(monkeypatch, "a.py", swap)
+    files = walk_worktree(tree)
+    assert files["src/d/a.py"] == b"A = 1\n"
+    (tree / "src" / "d").unlink()
+    (tree / "src" / "d").symlink_to(secret)  # and one planted before the walk
+    files.update(walk_worktree(tree))
+    assert not any(b"PRIVATE" in v for v in files.values())
+
+
+def test_the_walk_never_reads_a_file_swapped_for_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "host-secret"
+    secret.write_text("PRIVATE\n")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "app.py").write_text("x = 1\n")
+
+    def swap() -> None:
+        (tree / "app.py").unlink()
+        (tree / "app.py").symlink_to(secret)
+
+    _swap_after_lstat(monkeypatch, "app.py", swap)
+    assert walk_worktree(tree) == {}
+
+
+def test_the_walk_skips_a_fifo_without_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import threading
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "app.py").write_text("x = 1\n")
+    (tree / "pipe.py").write_text("y = 1\n")
+
+    def swap() -> None:
+        (tree / "pipe.py").unlink()
+        os.mkfifo(tree / "pipe.py")
+
+    _swap_after_lstat(monkeypatch, "pipe.py", swap)
+    out: list[dict[str, bytes]] = []
+    t = threading.Thread(target=lambda: out.append(walk_worktree(tree)), daemon=True)
+    t.start()
+    t.join(10)
+    assert out == [{"app.py": b"x = 1\n"}]
+
+
+def test_a_capped_walk_refuses_an_oversized_file_or_tree(tmp_path: Path) -> None:
+    from foundry.execution.adapters.claude_code import TreeTooLargeError
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "a.txt").write_bytes(b"x" * 100)
+    (tree / "b.txt").write_bytes(b"x" * 100)
+    assert len(walk_worktree(tree, max_file=100, max_total=200)) == 2
+    with pytest.raises(TreeTooLargeError):
+        walk_worktree(tree, max_file=99)
+    with pytest.raises(TreeTooLargeError):
+        walk_worktree(tree, max_total=199)
+
+
+def test_the_relay_runs_the_gates_once_for_a_burst_of_requests(
+    source_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time
+
+    from foundry.execution.adapters.claude_check import RELAY_DIR, CheckRelay
+    from foundry.gates.self_check import SessionCheck
+
+    calls: list[dict[str, str]] = []
+    _fake_gates(monkeypatch, calls)
+    with Sandbox(source_dir) as sb:
+        relay_dir = sb.worktree / RELAY_DIR
+        relay_dir.mkdir(parents=True)
+        for i in range(3):
+            (relay_dir / f"r{i}.req").touch()
+            os.utime(relay_dir / f"r{i}.req", (1000 + i, 1000 + i))
+        with CheckRelay(SessionCheck(_check_spec(tmp_path)), sb.worktree, {}):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not all(
+                (relay_dir / f"r{i}.out").exists() for i in range(3)
+            ):
+                time.sleep(0.05)
+            outs = [(relay_dir / f"r{i}.out").read_text() for i in range(3)]
+            rcs = [(relay_dir / f"r{i}.rc").read_text() for i in range(3)]
+    assert len(calls) == 1
+    assert "superseded" in outs[0] and "superseded" in outs[1] and rcs[:2] == ["2", "2"]
+    assert "CHECK FAILED" in outs[2] and rcs[2] == "1"
+
+
+def test_a_relay_that_cannot_write_its_script_leaks_nothing(
+    source_dir: Path, tmp_path: Path
+) -> None:
+    import os
+
+    from foundry.execution.adapters.claude_check import CheckRelay
+    from foundry.gates.self_check import SessionCheck
+
+    with Sandbox(source_dir) as sb:
+        (sb.worktree / ".claude" / "foundry" / "foundry-check").mkdir(parents=True)
+        fds = len(os.listdir("/dev/fd"))
+        with pytest.raises(OSError):
+            CheckRelay(SessionCheck(_check_spec(tmp_path)), sb.worktree, {}).__enter__()
+        assert len(os.listdir("/dev/fd")) == fds
+        assert sorted(p.name for p in (sb.worktree / ".claude" / "foundry").iterdir()) == [
+            "foundry-check"
+        ]

@@ -35,6 +35,9 @@ CHECK_COMMAND = f"sh {RELAY_DIR}/{SCRIPT}"
 _RED, _UNAVAILABLE = 1, 2
 _REQUEST = re.compile(r"^([A-Za-z0-9_-]{1,64})\.req$")
 _POLL_S = 0.5
+# What one check reads from the live tree: a session can't make the host buffer more.
+MAX_FILE = 8 << 20
+MAX_TREE = 64 << 20
 
 _SCRIPT_BODY = """#!/bin/sh
 # Foundry's gate check: asks the host to run the gates on this tree; prints the report.
@@ -107,6 +110,10 @@ class CheckRelay:
         self._fds: list[int] = []
         self._fd = -1
         self._made: list[str] = []
+        self._lock = threading.Lock()
+        self._served = False
+        self._orphaned = False
+        self._wait_s = int(3 * checker.spec.base.settings.timeout_s) + 120
         self.answered = 0
 
     def __enter__(self) -> CheckRelay:
@@ -121,12 +128,11 @@ class CheckRelay:
                 except FileExistsError:
                     pass
                 self._fds.append(os.open(name, flags, dir_fd=self._fds[-1]))
+            self._fd = self._fds[-1]
+            self._write(SCRIPT, _SCRIPT_BODY.format(wait_s=self._wait_s))
         except OSError:
             self._close()
             raise
-        self._fd = self._fds[-1]
-        wait_s = int(3 * self._checker.spec.base.settings.timeout_s) + 120
-        self._write(SCRIPT, _SCRIPT_BODY.format(wait_s=wait_s))
         self._thread = threading.Thread(target=self._serve, name="foundry-check", daemon=True)
         self._thread.start()
         return self
@@ -134,7 +140,18 @@ class CheckRelay:
     def __exit__(self, *exc: object) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()  # an answer in flight finishes before the base goes
+            # An answer in flight finishes before the base goes, within its gates'
+            # timeouts; one that overruns cleans up after itself (the descriptors
+            # stay open for it, never closed under it).
+            self._thread.join(self._wait_s)
+            with self._lock:
+                if not self._served:
+                    self._orphaned = True
+                    progress.log("claude-code: foundry-check still answering at session end")
+                    return
+        self._cleanup()
+
+    def _cleanup(self) -> None:
         for name in os.listdir(self._fd):
             with contextlib.suppress(OSError):
                 os.unlink(name, dir_fd=self._fd)
@@ -158,34 +175,70 @@ class CheckRelay:
         fd = os.open(
             tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=self._fd
         )
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, name, src_dir_fd=self._fd, dst_dir_fd=self._fd)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, name, src_dir_fd=self._fd, dst_dir_fd=self._fd)
+        except OSError:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp, dir_fd=self._fd)
+            raise
 
     def _serve(self) -> None:
-        while not self._stop.is_set():
-            for name in sorted(os.listdir(self._fd)):
-                if (m := _REQUEST.match(name)) is None:
-                    continue
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(name, dir_fd=self._fd)
-                report, rc = self.answer()
-                rid = m.group(1)
-                try:
-                    self._write(f"{rid}.rc", str(rc))
-                    self._write(f"{rid}.out", report + "\n")
-                except OSError as exc:
-                    progress.log(f"claude-code: foundry-check answer lost: {exc}")
-                self.answered += 1
-            self._stop.wait(_POLL_S)
+        try:
+            while not self._stop.is_set():
+                self._answer_newest()
+                self._stop.wait(_POLL_S)
+        finally:
+            with self._lock:
+                self._served = True
+                orphaned = self._orphaned
+            if orphaned:
+                self._cleanup()
+
+    def _answer_newest(self) -> None:
+        """Answer the newest pending request with a gate run; any older one is told
+        it was superseded (one run per poll, however many the session queued)."""
+        pending: list[tuple[float, str, str]] = []
+        for name in os.listdir(self._fd):
+            if (m := _REQUEST.match(name)) is None:
+                continue
+            with contextlib.suppress(OSError):
+                st = os.stat(name, dir_fd=self._fd, follow_symlinks=False)
+                pending.append((st.st_mtime, name, m.group(1)))
+        if not pending:
+            return
+        pending.sort()
+        for _, name, _rid in pending:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=self._fd)
+        for _, _name, rid in pending[:-1]:
+            self._reply(rid, "ERROR: superseded by a newer foundry-check run", _UNAVAILABLE)
+        self._reply(pending[-1][2], *self.answer())
+        self.answered += 1
+
+    def _reply(self, rid: str, report: str, rc: int) -> None:
+        try:
+            self._write(f"{rid}.rc", str(rc))
+            self._write(f"{rid}.out", report + "\n")
+        except OSError as exc:
+            progress.log(f"claude-code: foundry-check answer lost: {exc}")
 
     def answer(self) -> tuple[str, int]:
         """The report for the tree as it is now, and the script's exit code."""
-        from foundry.execution.adapters.claude_code import changed_files, walk_worktree
+        from foundry.execution.adapters.claude_code import (
+            TreeTooLargeError,
+            changed_files,
+            walk_worktree,
+        )
         from foundry.gates.self_check import render
 
         c = self._checker
-        files, deleted, _ = changed_files(self._origin, walk_worktree(self._worktree))
+        try:
+            tree = walk_worktree(self._worktree, max_file=MAX_FILE, max_total=MAX_TREE)
+        except TreeTooLargeError as exc:
+            return f"ERROR: the check could not run: {exc}", _UNAVAILABLE
+        files, deleted, _ = changed_files(self._origin, tree)
         if (cached := c.cached(files, deleted)) is not None:
             return render(cached, left=c.left, cached=True), _RED if cached.red else 0
         if c.left <= 0:

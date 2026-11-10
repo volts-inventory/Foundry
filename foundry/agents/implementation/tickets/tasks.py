@@ -133,15 +133,15 @@ def interface_revisions(state: FactoryState) -> dict[str, int]:
 
 
 def pending_interface_replans(state: FactoryState) -> tuple[str, ...]:
-    """Tickets left to a re-plan the planner has not answered yet (it answers each
-    once per run)."""
+    """Unbuilt tickets left to a re-plan the planner has not answered yet (it answers
+    each once per run). A built one keeps its build: a revision would rebuild nothing."""
     answered = {
         t.run_against.removeprefix("task/")
         for t in state.get("gate_triage") or ()
         if t.name in (INTERFACE_REVISED_TRIAGE, INTERFACE_DECLINED_TRIAGE)
         and t.produced_by == PLANNER_NODE_ID
     }
-    return tuple(sorted(replan_task_ids(state) - answered))
+    return tuple(sorted(replan_task_ids(state) - answered - built_task_ids(state)))
 
 
 def _ticket_notes(state: FactoryState, prefix: str) -> dict[str, list[GateTriage]]:

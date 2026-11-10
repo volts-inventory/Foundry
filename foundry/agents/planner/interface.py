@@ -129,7 +129,7 @@ def revise_interfaces(
         what = (
             "revised " + ", ".join(c.name for c in revised) + f": {reason}"
             if revised
-            else f"left as planned ({reason}); the fix loop takes it from here"
+            else f"left as planned ({reason}); the ticket stays unbuilt and unrestarted"
         )
         notes.append(
             GateTriage(
@@ -213,8 +213,14 @@ def _revised(
                 ast.parse(_py_normalize(signature))
             except SyntaxError:
                 continue
+        # The planned prose (inputs, outputs, errors) stands unless the reply restates it.
+        planned = _prose(rt, old.spec_uri).partition("\n")[2]
         text = _contract_text(
-            {"kind": old.kind, "signature": signature, "description": item.get("description")}
+            {
+                "kind": old.kind,
+                "signature": signature,
+                "description": _str(item.get("description")).strip() or planned,
+            }
         )
         out.append(
             old.model_copy(

@@ -15,9 +15,12 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from foundry.agents import AgentRuntime
 from foundry.agents.implementation.stubs import python_skeleton
+from foundry.agents.implementation.tickets import pending_interface_replans
+from foundry.agents.implementation.tickets.constants import PLANNER_NODE_ID
 from foundry.agents.implementation.tickets.contracts import SignatureChangeError
 from foundry.agents.implementation.tickets.skeleton import revised_stubs
 from foundry.agents.planner.interface import INTERFACE_SOP
+from foundry.agents.planner.schema import NODE_ID as PLANNER_ID
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, ZoneBSigner
@@ -26,7 +29,7 @@ from foundry.proxy import ModelProviderProxy
 from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, FrozenModel
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.gates import GateStatus, GateTriage
 from foundry.schemas.implementation import Specialty, Ticket
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
@@ -204,3 +207,29 @@ def test_a_revised_ticket_is_stubbed_from_its_revised_contract() -> None:
     after = revised_stubs([ticket], {"add_todo": revised}, texts)
     assert "due: str" not in before
     assert "def add_todo(title: str, due: str) -> Todo" in after["todo.py"]
+
+
+def test_only_an_unbuilt_ticket_waits_on_the_planner() -> None:
+    assert PLANNER_NODE_ID == PLANNER_ID  # the notes filter on it
+
+    def note(name: str, by: str, epoch: int) -> GateTriage:
+        seq = Seq("run", epoch, 0, by, 0)
+        return GateTriage(
+            name=name, run_against="task/T-001", explanation="", produced_by=by, seq=seq
+        )
+
+    left: FactoryState = {"gate_triage": [note("ticket-replan", "engineering", 1)]}
+    assert pending_interface_replans(left) == ("T-001",)
+    answered: FactoryState = {
+        "gate_triage": [*left["gate_triage"], note("interface-declined", PLANNER_ID, 2)]
+    }
+    assert pending_interface_replans(answered) == ()
+    diff = Artifact(
+        kind="feature_diff",
+        uri="cas://d",
+        produced_by="engineering",
+        task_id="T-001",
+        seq=Seq("run", 1, 0, "engineering", 0),
+    )
+    # A built ticket keeps its build: revising its interface would rebuild nothing.
+    assert pending_interface_replans({**left, "artifacts": [diff]}) == ()

@@ -379,11 +379,17 @@ def make_engineering_node(
         contract_files = contract_paths(state, resolve)
         built_contracts = {f: c for f in contract_files if isinstance(c := overlay.get(f), str)}
         skeleton = skeleton_files(state, resolve, blobs)
+        # A ticket rebuilt after the planner revised its interface (never built since)
+        # starts from stubs of the revised contracts, carried into its diff, and the
+        # guard holds it to them.
         revised = interface_revisions(state)
-        if skeleton and (again := [t for t in wave if task_id_for_ticket(t.id) in revised]):
-            # Its sandbox starts from the revised stubs and the guard holds it to them.
-            for rel, text in revised_stubs(again, contracts, built_contracts).items():
-                skeleton[rel] = overlay[rel] = text
+        restubbed: dict[str, dict[str, str]] = {}
+        for t in wave:
+            tid = task_id_for_ticket(t.id)
+            if skeleton and tid in revised and tid not in done and not requested and not restarts:
+                fresh = revised_stubs([t], contracts, built_contracts)
+                restubbed[tid] = {p: s for p, s in fresh.items() if p in skeleton}
+                skeleton.update(restubbed[tid])
         # A retry after a named violation starts from its failed attempt's files.
         carried: dict[str, dict[str, str]] = {}
         in_wave = {task_id_for_ticket(t.id) for t in wave}
@@ -403,6 +409,9 @@ def make_engineering_node(
                 progress.log(
                     f"{tid}: its failed attempt's files are unreadable, not carried: {exc}"
                 )
+        for tid, files in restubbed.items():
+            carried.setdefault(tid, {}).update(files)
+        resigned = {p for files in restubbed.values() for p in files}
 
         # The run's envelope, split across specialties by ticket count; spend of
         # tickets built in earlier waves stays committed so the cap spans the run.
@@ -517,7 +526,9 @@ def make_engineering_node(
             # Judged against the stub as the ticket finds it (a wave-0 fixer may have
             # re-signed it to satisfy the type checker), unless that is no longer a stub.
             stubbed = {
-                p: cur if isinstance(cur := overlay.get(p), str) and is_stub(cur) else text
+                p: cur
+                if p not in resigned and isinstance(cur := overlay.get(p), str) and is_stub(cur)
+                else text
                 for p, text in skeleton.items()
                 if p in t.files and text
             }

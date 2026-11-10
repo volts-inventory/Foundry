@@ -79,6 +79,13 @@ def _tree(root: Path, body: str = "ok") -> Path:
     return root
 
 
+@pytest.fixture(autouse=True)
+def _fresh_host_identity():
+    reuse._host_identity.cache_clear()
+    yield
+    reuse._host_identity.cache_clear()
+
+
 @pytest.fixture
 def records() -> GlobalRecords:
     return GlobalRecords()
@@ -157,10 +164,61 @@ def test_any_input_change_reruns(tmp_path, records, monkeypatch, change):
         installed = list(importlib.metadata.distributions())
         bumped = SimpleNamespace(metadata={"Name": "pytest"}, version="999.0")
         monkeypatch.setattr(importlib.metadata, "distributions", lambda: [*installed, bumped])
+        # The host identity is cached per process; a new process sees the bump.
+        reuse._host_identity.cache_clear()
     else:
         against = OTHER_TREE
     runner.run_unit([(gate, _seq(2))], against, w2)
     assert gate.runs == 1
+
+
+def test_the_host_identity_is_scanned_once_per_process(tmp_path, monkeypatch):
+    scans: list[int] = []
+    installed = list(importlib.metadata.distributions())
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: scans.append(1) or installed)
+    w = _tree(tmp_path / "w")
+    args = {"run_against": TREE, "scanner_config_rev": "s", "lineage_map_revision": "l"}
+    first = reuse.unit_key([FileGate()], w, **args)
+    assert reuse.unit_key([FileGate()], w, **args) == first
+    monkeypatch.setenv("FOUNDRY_GATE_REUSE_TEST", "1")
+    assert reuse.unit_key([FileGate()], w, **args) not in (None, first)
+    assert len(scans) == 1
+
+
+def _pass_record(tmp_path, records):
+    (rec,) = _runner(records, VerdictCache()).run_unit(
+        [(FileGate(), _seq(1))], TREE, _tree(tmp_path / "rec")
+    )
+    return rec
+
+
+def test_a_failed_store_write_is_a_miss_not_an_error(tmp_path, records):
+    rec = _pass_record(tmp_path, records)
+    blocked = tmp_path / "blocked"
+    blocked.write_text("")  # a file where the store dir should be: mkdir raises
+    cache = VerdictCache(blocked / "verdicts")
+    cache.put("k", [rec], durable=True)
+    assert cache.get("k") == [rec]  # still reused in memory
+    assert VerdictCache(blocked / "verdicts").get("k") is None
+
+
+def test_interleaved_puts_of_one_key_do_not_share_a_tmp_file(tmp_path, records, monkeypatch):
+    rec = _pass_record(tmp_path, records)
+    store = tmp_path / "verdicts"
+    real_replace = reuse.os.replace
+    srcs: list[str] = []
+
+    def replace(src, dst):
+        srcs.append(str(src))
+        if len(srcs) == 1:  # another thread's put of the same key lands first
+            VerdictCache(store).put("k", [rec], durable=True)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(reuse.os, "replace", replace)
+    VerdictCache(store).put("k", [rec], durable=True)
+    assert len(set(srcs)) == 2
+    assert [p.name for p in store.iterdir()] == ["k.json"]
+    assert VerdictCache(store).get("k") == [rec]
 
 
 def test_code_digest_covers_all_of_foundry(tmp_path):

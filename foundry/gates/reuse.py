@@ -43,6 +43,7 @@ import json
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -129,8 +130,10 @@ def _source_digest(root: Path) -> str:
     )
 
 
-def _env_identity() -> str:
-    from foundry.gates.sandbox import _confined_env
+@functools.cache
+def _host_identity() -> str:
+    """The process-constant part of the env: the interpreter, its distributions and
+    the host toolchains — a rescan per unit key cost every gate run."""
     from foundry.toolchains import available_toolchains
 
     return content_digest(
@@ -142,6 +145,17 @@ def _env_identity() -> str:
                 {(d.metadata["Name"] or "", d.version) for d in importlib.metadata.distributions()}
             ),
             "toolchains": [t.model_dump(mode="json") for t in available_toolchains()],
+        }
+    )
+
+
+def _env_identity() -> str:
+    from foundry.gates.sandbox import _confined_env
+
+    # The sandbox env is a cheap filter over os.environ, which a process may change.
+    return content_digest(
+        {
+            "host": _host_identity(),
             "sandbox_env": _confined_env(None),
             "foundry_env": {k: v for k, v in os.environ.items() if k.startswith("FOUNDRY_")},
         }
@@ -227,12 +241,17 @@ class VerdictCache:
             return
         if any(r.status is not GateStatus.PASS for r in records):
             return
-        self._root.mkdir(parents=True, exist_ok=True)
-        tmp = self._root / f".{key}.{os.getpid()}.tmp"
         body: list[Any] = [r.model_dump(mode="json") for r in records]
-        try:
-            tmp.write_text(json.dumps(body), encoding="utf-8")
-            os.replace(tmp, self._root / f"{key}.json")
-        finally:
-            with contextlib.suppress(FileNotFoundError):
-                tmp.unlink()
+        # Best-effort, as get treats an unreadable entry as a miss: the gates already
+        # ran, so a full disk or a read-only state dir must not fail the unit.
+        with contextlib.suppress(OSError):
+            self._root.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix=f".{key}.", suffix=".tmp", dir=self._root)
+            tmp = Path(name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(body))
+                os.replace(tmp, self._root / f"{key}.json")
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    tmp.unlink()

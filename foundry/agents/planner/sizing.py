@@ -2,9 +2,14 @@
 
 A ticket's size is its work files (``files[]`` less tests, package markers,
 stack-command files and manifests/config, which the folds add or every ticket
-carries) and its scenarios. Calibrated on the passing bench plans: cloud tickets
-reached 12 work files (an entrypoint with 11 templates) and 12 scenarios; local
-ones 3 work files and 8 scenarios.
+carries, and less templates and static assets, which a session writes from the
+code that renders them), its scenarios, and a looser guard on all its files
+(work files plus assets) so a ticket of many templates can't balloon either.
+Calibrated on the passing bench plans (p4-p6, hybrid27): non-entrypoint cloud
+tickets reached 2 work files, 5 in all and 7 scenarios, local ones 3 work files,
+4 in all and 8 scenarios; entrypoints (exempt) 2 work files, 12 in all (a route
+module and 11 templates) and 12 scenarios. The local all-files guard leaves room
+for a whole web layer (p6-hybrid's shop pages came to 18 files in all) in one.
 """
 
 from __future__ import annotations
@@ -24,10 +29,11 @@ class TicketCeiling:
     files: int
     scenarios: int
     where: str
+    total: int  # work files plus templates and static assets
 
 
-CLOUD_CEILING = TicketCeiling(files=12, scenarios=12, where="cloud")
-LOCAL_CEILING = TicketCeiling(files=4, scenarios=8, where="local")
+CLOUD_CEILING = TicketCeiling(files=12, scenarios=12, where="cloud", total=32)
+LOCAL_CEILING = TicketCeiling(files=4, scenarios=8, where="local", total=20)
 
 Ceilings = Mapping[Difficulty, TicketCeiling]
 
@@ -72,9 +78,48 @@ _TEST_DIRS = frozenset({"tests", "test", "spec", "specs", "__tests__"})
 
 _TEST_NAME = re.compile(r"^(test_.*|.*_test\.\w+|.*\.(test|spec)\.\w+|conftest\.py)$")
 
+# Server-side templates and static assets: markup and media, not logic.
+_ASSET_DIRS = frozenset({"templates", "static"})
+_ASSET_EXT = frozenset(
+    {
+        ".html",
+        ".htm",
+        ".jinja",
+        ".jinja2",
+        ".j2",
+        ".css",
+        ".scss",
+        ".sass",
+        ".less",
+        ".svg",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".ico",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".mp3",
+        ".wav",
+        ".ogg",
+    }
+)
 
-def work_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
-    """The files of ``files`` that are the ticket's own work: never a test or step
+
+def is_asset(path: str) -> bool:
+    """A template or static asset: under a templates/ or static/ dir, or markup,
+    a stylesheet, an image, a font or audio by its extension."""
+    return (
+        any(p in _ASSET_DIRS for p in path.split("/")[:-1])
+        or posixpath.splitext(path)[1].lower() in _ASSET_EXT
+    )
+
+
+def ticket_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
+    """The files of ``files`` the ticket writes as its own: never a test or step
     module, a package marker, a ``protected`` stack-command file or a manifest.
     BDD material is the plan's top-level feature dir (feature files, cucumber step
     definitions) and ``.feature`` files: a ``src/features/`` source tree is work."""
@@ -96,13 +141,21 @@ def work_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[s
     return tuple(out)
 
 
+def work_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
+    """The :func:`ticket_files` that are source code, not a template or asset."""
+    return tuple(f for f in ticket_files(files, protected) if not is_asset(f))
+
+
 def over_ceiling(
     ticket: Ticket, ceiling: TicketCeiling, protected: Collection[str] = ()
-) -> tuple[int, int] | None:
-    """(work files, scenarios) when ``ticket`` is over ``ceiling``, else None."""
-    files, scenarios = len(work_files(ticket.files, protected)), len(ticket.scenario_ids)
-    if files > ceiling.files or scenarios > ceiling.scenarios:
-        return files, scenarios
+) -> tuple[int, int, int] | None:
+    """(work files, files in all, scenarios) when ``ticket`` is over ``ceiling``,
+    else None."""
+    total = ticket_files(ticket.files, protected)
+    files = sum(1 for f in total if not is_asset(f))
+    scenarios = len(ticket.scenario_ids)
+    if files > ceiling.files or len(total) > ceiling.total or scenarios > ceiling.scenarios:
+        return files, len(total), scenarios
     return None
 
 
@@ -112,13 +165,19 @@ def size_text(ceilings: Ceilings) -> str:
     for d in Difficulty:
         groups.setdefault(ceilings[d], []).append(d.value)
     rows = "; ".join(
-        f"{' / '.join(ds)} tickets run on a {c.where} model: at most {c.files} files and "
-        f"{c.scenarios} scenarios each"
+        f"{' / '.join(ds)} tickets run on a {c.where} model: at most {c.files} work "
+        f"files, {c.total} files in all and {c.scenarios} scenarios each"
         for c, ds in groups.items()
     )
     return (
         "\n\nTICKET SIZE (this run; checked: a ticket over it FAILS the Spec gate): "
         + rows
-        + ". The entrypoint ticket is exempt. Files count without tests, package markers "
-        "(__init__.py), stack-command files and manifests/config."
+        + ". The entrypoint ticket is exempt. Work files are source code: templates "
+        "and static assets (HTML/Jinja templates, templates/ and static/ dirs, CSS, "
+        "images, fonts) count only toward files in all, and neither counts tests, "
+        "package markers (__init__.py), stack-command files or manifests/config. It "
+        "is a ceiling, not a target: one ticket per layer or concern of an epic, split "
+        "only when a ticket would exceed the ceiling; a web layer whose routes and "
+        "templates fit stays ONE ticket, never one per page. Every feature ticket "
+        "owns at least one scenario."
     )

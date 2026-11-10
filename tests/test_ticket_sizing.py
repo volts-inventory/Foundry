@@ -1,6 +1,6 @@
 """Plans sized to the model that builds them.
 
-Each ticket has a size ceiling (work files, scenarios) set by where its tier runs
+Each ticket has a size ceiling (work files, files in all, scenarios) set by where its tier runs
 (cloud or local, from the run's level table); a ticket over it is a Spec-gate
 finding asking to split it. A ticket only one other ticket of its epic depends on
 is folded into that ticket when the merge fits the ceiling. Tickets, and so their
@@ -27,8 +27,10 @@ from foundry.agents.planner.sizing import (
     ALL_CLOUD,
     CLOUD_CEILING,
     LOCAL_CEILING,
+    is_asset,
     size_text,
     ticket_ceilings,
+    ticket_files,
     work_files,
 )
 from foundry.durability.artifact_store import ArtifactStore
@@ -326,7 +328,44 @@ def test_work_files_leave_out_tests_markers_stack_files_and_manifests() -> None:
         "src/cart.test.ts",
         "features/step_definitions/cart.js",
     )
-    assert work_files(files, {"smoke.py"}) == ("shop/app.py", "templates/cart.html")
+    assert ticket_files(files, {"smoke.py"}) == ("shop/app.py", "templates/cart.html")
+    assert work_files(files, {"smoke.py"}) == ("shop/app.py",)
+
+
+def test_templates_and_static_assets_are_not_work_files() -> None:
+    files = (
+        "shop/web.py",
+        "shop/templates/base.html",
+        "templates/partials/nav.jinja2",
+        "static/app.js",
+        "shop/static/css/site.css",
+        "public/logo.svg",
+        "public/favicon.ico",
+        "web/index.htm",
+        "src/main.js",
+        "src/game.ts",
+    )
+    assert work_files(files) == ("shop/web.py", "src/main.js", "src/game.ts")
+    assert len(ticket_files(files)) == len(files)
+    assert not is_asset("src/templates.py") and is_asset("app/templates/macros.py")
+
+
+def test_a_web_layer_of_many_pages_fits_one_local_ticket() -> None:
+    pages = ("login", "signup", "catalog", "product", "cart", "checkout", "orders")
+    web = _t(
+        "web",
+        ("shop/web.py", "shop/admin_web.py", *(f"templates/{p}.html" for p in pages)),
+        ("A1",),
+    )
+    assert _size_findings([web], _LOCAL) == ()
+    # The all-files guard still caps a ticket of templates.
+    many = tuple(f"templates/p{i}.html" for i in range(20))
+    assert _size_findings([_t("pages", ("shop/web.py", *many), ("A1",))], _LOCAL) == (
+        "Ticket pages is over its size ceiling: 1 work files, 21 files in all and 1 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "work files, 20 in all and 8 scenarios: split it into tickets each within the "
+        "ceiling.",
+    )
 
 
 def test_a_ticket_over_its_tiers_ceiling_is_a_finding_to_split_it() -> None:
@@ -338,9 +377,10 @@ def test_a_ticket_over_its_tiers_ceiling_is_a_finding_to_split_it() -> None:
     ]
     hybrid = ticket_ceilings({"T2", "T3"})
     assert _size_findings(tickets, hybrid) == (
-        "Ticket models is over its size ceiling: 6 files and 1 scenarios, where a "
-        "standard ticket (built on a local model) takes at most 4 files and 8 scenarios: "
-        "split it into tickets each within the ceiling.",
+        "Ticket models is over its size ceiling: 6 work files, 6 files in all and 1 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "work files, 20 in all and 8 scenarios: split it into tickets each within the "
+        "ceiling.",
     )
     assert _size_findings(tickets, ALL_CLOUD) == ()
     scenarios = tuple(f"A{i}" for i in range(13))
@@ -348,8 +388,8 @@ def test_a_ticket_over_its_tiers_ceiling_is_a_finding_to_split_it() -> None:
 
 
 def test_the_entrypoint_is_exempt_from_the_ceiling() -> None:
-    pages = tuple(f"shop/templates/{n}.html" for n in ("index", "cart", "login", "orders"))
-    entry = _t("web", ("shop/app.py", *pages), ("A1",), entry=True)
+    mods = tuple(f"shop/{n}.py" for n in ("index", "cart", "login", "orders"))
+    entry = _t("web", ("shop/app.py", *mods), ("A1",), entry=True)
     assert _size_findings([entry], _LOCAL) == ()
     assert len(_size_findings([entry.model_copy(update={"entrypoint": False})], _LOCAL)) == 1
 
@@ -380,8 +420,14 @@ def test_the_ceiling_follows_where_each_difficultys_tier_runs() -> None:
     moved = ticket_ceilings({"T2", "T3"}, {Difficulty.STANDARD: "T1"})
     assert moved[Difficulty.STANDARD] == CLOUD_CEILING
     text = size_text(hybrid)
-    assert "complex tickets run on a cloud model: at most 12 files and 12 scenarios" in text
-    assert "trivial / standard tickets run on a local model: at most 4 files and 8" in text
+    assert (
+        "complex tickets run on a cloud model: at most 12 work files, 32 files in all and "
+        "12 scenarios" in text
+    )
+    assert "trivial / standard tickets run on a local model: at most 4 work files, 20" in text
+    assert "a web layer whose routes and templates fit stays ONE ticket" in text
+    assert "split only when a ticket would exceed the ceiling" in text
+    assert "Every feature ticket owns at least one scenario" in text
 
 
 def _oversized() -> dict[str, Any]:
@@ -402,15 +448,16 @@ def _size_of(writes: dict[str, Any], cas: ArtifactStore) -> tuple[str, ...]:
 def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
     rt, tx, cas = _runtime(_oversized(), local=frozenset({"T2", "T3"}))  # hybrid
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert "at most 4 files and 8 scenarios" in json.dumps(tx.requests[0])
+    assert "at most 4 work files, 20 files in all and 8 scenarios" in json.dumps(tx.requests[0])
     assert _size_of(writes, cas) == (
-        "Ticket T-001 is over its size ceiling: 5 files and 1 scenarios, where a "
-        "standard ticket (built on a local model) takes at most 4 files and 8 scenarios: "
-        "split it into tickets each within the ceiling.",
+        "Ticket T-001 is over its size ceiling: 5 work files, 5 files in all and 1 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "work files, 20 in all and 8 scenarios: split it into tickets each within the "
+        "ceiling.",
     )
     rt, tx, cas = _runtime(_oversized())  # cloud: no level table
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert "at most 12 files and 12 scenarios" in json.dumps(tx.requests[0])
+    assert "at most 12 work files, 32 files in all and 12 scenarios" in json.dumps(tx.requests[0])
     assert _size_of(writes, cas) == ()
 
 
@@ -419,7 +466,15 @@ def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
 
 def test_the_prompts_size_tickets_and_name_them_for_their_domain() -> None:
     assert "FEWER, LARGER" not in SOP
-    assert "Split the work as finely as it needs" in SOP
+    assert "finely" not in SOP
+    assert "Plan one ticket per layer or concern of an epic" in SOP
+    assert "split a ticket only when it would exceed the TICKET SIZE ceiling" in SOP
+    assert "never split a web layer per page when it fits" in SOP
+    assert "A feature ticket owns at least one scenario" in SOP
+    assert "one epic per domain area of the product, no finer" in SOP
+    assert "never add an epic to keep tickets small" in SOP
+    assert "{MAX_TICKETS}" not in SOP
+    assert "Plan one ticket per layer or concern of an epic" in EPIC_SOP
     assert "Never split off work that only one other ticket uses" in SOP
     assert "never after a ticket number (T3, T3.feature, test_T2.py)" in SOP
     assert "name each ticket after its domain (catalog, cart-api; never T01)" in EPIC_SOP

@@ -18,7 +18,7 @@ from foundry.agents.implementation.stubs import python_skeleton
 from foundry.agents.implementation.tickets import pending_interface_replans
 from foundry.agents.implementation.tickets.constants import PLANNER_NODE_ID
 from foundry.agents.implementation.tickets.contracts import SignatureChangeError
-from foundry.agents.implementation.tickets.skeleton import revised_stubs
+from foundry.agents.implementation.tickets.skeleton import restub_revised, revised_stubs
 from foundry.agents.planner.interface import INTERFACE_SOP
 from foundry.agents.planner.schema import NODE_ID as PLANNER_ID
 from foundry.durability.artifact_store import ArtifactStore
@@ -30,7 +30,7 @@ from foundry.proxy.test_doubles import MockTransport
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger, FrozenModel
 from foundry.schemas.gates import GateStatus, GateTriage
-from foundry.schemas.implementation import Specialty, Ticket
+from foundry.schemas.implementation import Specialty, StackDecision, Ticket
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
 from foundry.state.reducers import reset_gate_write_verifier, set_gate_write_verifier
@@ -219,6 +219,52 @@ def test_a_revised_ticket_is_stubbed_from_its_revised_contract() -> None:
     assert "def add_todo(title: str, due: str) -> Todo" in after["todo.py"]
 
 
+def test_a_restart_of_a_revised_ticket_is_held_to_its_revised_stubs() -> None:
+    seq = Seq("run", 1, 0, "planner", 0)
+    ticket = Ticket(
+        id="T-001",
+        title="todo",
+        specialty=Specialty.BACKEND,
+        files=("todo.py",),
+        implements=("add_todo",),
+        seq=seq,
+    )
+    planned = InterfaceContract(
+        name="add_todo",
+        spec_uri="cas://c",
+        kind="function",
+        signature="def add_todo(title: str) -> Todo: ...",
+        seq=seq,
+    )
+    revised = planned.model_copy(
+        update={"signature": "def add_todo(title: str, due: str) -> Todo: ...", "version": 2}
+    )
+    texts = {
+        "contracts.py": "from dataclasses import dataclass\n\n"
+        "@dataclass\nclass Todo:\n    title: str\n"
+    }
+    planned_stub = python_skeleton([planned], [ticket], texts).files["todo.py"]
+    # The tree before the ticket holds the plan-time stub: the reset would restore it.
+    restart: tuple[tuple[str, ...], tuple[dict[str, str], tuple[str, ...]]] = (
+        ("T-001",),
+        ({"todo.py": planned_stub}, ()),
+    )
+    escalation: tuple[tuple[str, ...], tuple[dict[str, str], tuple[str, ...]]] = ((), ({}, ()))
+    for restarts, reset in (restart, escalation):
+        skeleton = {"todo.py": planned_stub}
+        restubbed, out = restub_revised(
+            [ticket], {"T-001": 3}, restarts, skeleton, {"add_todo": revised}, texts, reset
+        )
+        assert "due: str" in skeleton["todo.py"]  # the guard's reference
+        assert restubbed["T-001"] == {"todo.py": skeleton["todo.py"]}
+        assert out == (({"todo.py": skeleton["todo.py"]}, ()) if restarts else reset)
+    # A ticket whose interface was never revised keeps the skeleton's stubs.
+    skeleton = {"todo.py": planned_stub}
+    unrevised = restub_revised([ticket], {}, ("T-001",), skeleton, {}, texts, ({}, ()))
+    assert unrevised == ({}, ({}, ()))
+    assert skeleton == {"todo.py": planned_stub}
+
+
 def test_only_an_unbuilt_ticket_waits_on_the_planner() -> None:
     assert PLANNER_NODE_ID == PLANNER_ID  # the notes filter on it
 
@@ -298,6 +344,54 @@ def test_a_method_of_a_class_the_contracts_file_declares_is_not_revised() -> Non
     )
     assert out == []
     assert "class TodoStore is declared in the built contracts file" in problems[0]
+
+
+def test_a_type_the_contracts_file_declares_is_not_revised() -> None:
+    from foundry.agents.planner.interface import _revised
+
+    seq = Seq("run", 1, 0, "planner", 0)
+    contract = InterfaceContract(
+        name="Todo",
+        spec_uri="cas://c",
+        kind="type",
+        signature="class Todo:\n    title: str",
+        seq=seq,
+    )
+    reply = {"contracts": [{"name": "Todo", "signature": "class Todo:\n    due: str"}]}
+    rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted({})), adapter=None)
+    out, problems = _revised(
+        rt, _config("run"), [contract], reply, {contract.name: contract}, None, {"Todo"}
+    )
+    assert out == []
+    assert problems == [
+        "Todo is declared in the built contracts file, which a revision cannot change"
+    ]
+
+
+def test_a_revision_compiles_strict_only_for_the_exact_strict_flag(monkeypatch: Any) -> None:
+    from foundry.agents.plan_contracts import CompileResult
+    from foundry.agents.planner import interface
+
+    seen: list[bool] = []
+
+    def fake(_code: Any, _language: str, *, strict: bool = False) -> CompileResult:
+        seen.append(strict)
+        return CompileResult()
+
+    monkeypatch.setattr(interface, "check_contracts", fake)
+    seq = Seq("run", 1, 0, "planner", 0)
+    add = InterfaceContract(
+        name="add_todo",
+        spec_uri="cas://a",
+        kind="function",
+        signature="def add_todo(title: str) -> int: ...",
+        seq=seq,
+    )
+    for typecheck, strict in (("mypy --strict-optional .", False), ("mypy --strict .", True)):
+        seen.clear()
+        stack = StackDecision(language="python", typecheck=typecheck)
+        assert interface._new_compile_findings({add.name: add}, [add], stack) == []
+        assert seen == [strict, strict]
 
 
 def test_a_revision_that_adds_a_compile_error_is_refused(monkeypatch: Any) -> None:

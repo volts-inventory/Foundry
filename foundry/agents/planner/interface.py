@@ -225,6 +225,12 @@ def _revised(
                 "which a revision cannot change"
             )
             continue
+        if old.name in declared:
+            problems.append(
+                f"{old.name} is declared in the built contracts file, which a revision "
+                "cannot change"
+            )
+            continue
         if python and old.kind in CODE_CONTRACT_KINDS:
             try:
                 ast.parse(_py_normalize(signature))
@@ -265,7 +271,7 @@ def _new_compile_findings(
     if not any(c.kind in CODE_CONTRACT_KINDS for c in revised):
         return []
     language = stack.language if stack is not None else "python"
-    strict = stack is not None and "--strict" in stack.typecheck
+    strict = stack is not None and "--strict" in stack.typecheck.split()
     swapped = {**contracts, **{c.name: c for c in revised}}
 
     def code(cs: Mapping[str, InterfaceContract]) -> list[tuple[str, str]]:

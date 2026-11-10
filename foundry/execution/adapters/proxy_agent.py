@@ -141,6 +141,15 @@ _CHECK_EPILOGUE = (
     + _CHECK_CLOSE
 )
 
+
+def _with_reason(schema: dict[str, Any]) -> dict[str, Any]:
+    """``schema`` with the optional ``reason`` a fenced fixer's write outside its
+    target carries (``fix_files``)."""
+    return {**schema, "properties": {**schema["properties"], "reason": {"type": "string"}}}
+
+
+_FENCED_SCHEMAS = {id(s): _with_reason(s) for s in (ACTION_SCHEMA, _CHECK_SCHEMA)}
+
 _MAX_CALLS_PER_TURN = 8
 
 _NATIVE_EPILOGUE = (
@@ -218,6 +227,29 @@ _CHECK_TOOLS: tuple[dict[str, Any], ...] = (
     ),
     TOOLS[-1],
 )
+_REASON = {
+    "type": "string",
+    "description": "Only for a file outside `fix_files`: why this failure needs it changed.",
+}
+
+
+def _reason_tools(tools: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
+    """``tools`` with write_file/delete_file taking the optional fence ``reason``."""
+    return tuple(
+        {
+            **t,
+            "input_schema": {
+                **t["input_schema"],
+                "properties": {**t["input_schema"]["properties"], "reason": _REASON},
+            },
+        }
+        if t["name"] in ("write_file", "delete_file")
+        else t
+        for t in tools
+    )
+
+
+_FENCED_TOOLS = {id(t): _reason_tools(t) for t in (TOOLS, _CHECK_TOOLS)}
 # Refusals of a red done per session: a failure the session cannot fix by editing
 # is reported, not looped on.
 _CHECK_REFUSALS = 2
@@ -344,6 +376,10 @@ class _Loop:
     last_check: str = ""  # the newest check/run outcome, for the stopped-early digest
     # The per-write mypy's extra flags; None = no type check on write.
     write_check: tuple[str, ...] | None = None
+    # A fixer pass's write fence (packet.task["fix_files"]); None = unfenced.
+    fence: tuple[str, ...] | None = None
+    # One note per file a fenced fixer changed outside its target, with its reason.
+    outside: list[str] = field(default_factory=list)
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -431,6 +467,7 @@ class ProxyAgentAdapter:
             packet = _with_rules(packet, checker.spec.rules)
         messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
+        fence = packet.task.get("fix_files")
         st = _Loop(
             worktree,
             _tree_state(worktree),
@@ -440,6 +477,7 @@ class ProxyAgentAdapter:
             checker=checker,
             origin=before,
             write_check=_write_check_flags(),
+            fence=tuple(str(f) for f in fence) if isinstance(fence, list) and fence else None,
         )
         turns = 0
         while turns < st.budget and not st.stopped:
@@ -502,7 +540,9 @@ class ProxyAgentAdapter:
         )
 
         summary = st.summary.strip()[:500]
-        notes = [*([summary] if summary else []), *st.triage] or ["run completed with no summary"]
+        notes = [*([summary] if summary else []), *st.triage, *st.outside] or [
+            "run completed with no summary"
+        ]
         notes += [
             f"non-UTF-8 (binary) file skipped from snapshot slice: {p}" for p in skipped_binary
         ]
@@ -534,6 +574,8 @@ class ProxyAgentAdapter:
 
     def _json_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
         schema = ACTION_SCHEMA if st.checker is None else _CHECK_SCHEMA
+        if st.fence is not None:
+            schema = _FENCED_SCHEMAS[id(schema)]
         text, parsed = self._complete(messages, schema)
         act = parsed if isinstance(parsed, dict) else _lenient_action(text)
         messages.append({"role": "assistant", "content": text})
@@ -556,7 +598,10 @@ class ProxyAgentAdapter:
         st: _Loop,
         sandbox: Sandbox,
     ) -> None:
-        text, calls = tool_fn(messages, TOOLS if st.checker is None else _CHECK_TOOLS)
+        tools = TOOLS if st.checker is None else _CHECK_TOOLS
+        if st.fence is not None:
+            tools = _FENCED_TOOLS[id(tools)]
+        text, calls = tool_fn(messages, tools)
         if not calls:
             messages.append({"role": "assistant", "content": text or "(no reply)"})
             messages.append({"role": "user", "content": _NUDGE})
@@ -654,6 +699,8 @@ class ProxyAgentAdapter:
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
             elif action == "check":
                 observation = _check(st)
+            elif fenced := _fenced(st, act):
+                observation = fenced
             else:
                 observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
         except (ValueError, OSError) as exc:
@@ -812,6 +859,36 @@ def _digest(st: _Loop, authored: Mapping[str, str], deleted: Sequence[str]) -> s
         "last actions: " + (" -> ".join(st.actions[-_DIGEST_ACTIONS:]) or "none"),
     ]
     return "; ".join(parts)[:DIGEST_CAP]
+
+
+def _fenced(st: _Loop, act: dict[str, Any]) -> str | None:
+    """The refusal of a fixer's write or delete outside its target (``st.fence``)
+    that states no ``reason``, else None (an outside write with one is recorded,
+    and its file admitted from then on).
+
+    The escape is the model's stated reason, not the files a traceback names: a
+    failing test's traceback names the code it calls, and editing that code (not the
+    test) is exactly the stray fix the fence is for. A reason costs one more call,
+    makes the cross-file edit deliberate, and leaves a line a reviewer can judge."""
+    from foundry.agents.implementation.tickets import in_write_scope
+
+    if st.fence is None or act.get("action") not in ("write_file", "delete_file"):
+        return None
+    raw = str(act.get("path", ""))
+    rel = PurePosixPath(raw).as_posix() if raw else raw
+    if not rel or in_write_scope(rel, st.fence):
+        return None
+    reason = " ".join(str(act.get("reason") or "").split())
+    if reason:
+        st.fence = (*st.fence, rel)  # admitted for the rest of the session
+        st.outside.append(f"fix pass changed {rel} outside its target: {reason[:300]}")
+        return None
+    return (
+        f"ERROR: not written — {rel} is outside this fix pass's target. Edit only: "
+        + ", ".join(st.fence)
+        + f". If the failure really needs {rel} changed, repeat the call with a "
+        "`reason` saying why."
+    )
 
 
 def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:

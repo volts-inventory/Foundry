@@ -1572,3 +1572,73 @@ def test_native_sessions_get_the_install_note_and_done_refusal(tmp_path: Path) -
         assert adapter.run(make_packet(sb.worktree), sb).turns_used == 3
     assert f"NOTE: {_BCRYPT_NOTE}" in results_of(seen[1])[0]["content"]
     assert results_of(seen[2])[0]["content"].startswith("ERROR: not done —")
+
+
+# ---- a fixer pass's write fence (packet fix_files) --------------------------------
+
+
+def _fenced_packet(worktree: Path) -> TaskPacket:
+    packet = make_packet(worktree)
+    task = {**packet.task, "fix_files": ["tests/test_b.py"]}
+    return packet.model_copy(update={"task": task, "prior_failures": ("x",)})
+
+
+def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) -> None:
+    # The shop fixer, sent for a failing test, rewrote admin.py and broke the routes.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "routes.py").write_text("R = 1\n")
+    seen: list[dict[str, Any]] = []
+    actions = iter(
+        [
+            {"action": "write_file", "path": "admin.py", "content": "X = 1\n"},
+            {"action": "delete_file", "path": "routes.py"},
+            {"action": "write_file", "path": "tests/test_b.py", "content": "Y = 1\n"},
+            {
+                "action": "write_file",
+                "path": "app.py",
+                "content": "Z = 1\n",
+                "reason": "the test imports create_app, which app.py never defined",
+            },
+            {"action": "write_file", "path": "app.py", "content": "Z = 2\n"},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        assert "reason" in schema["properties"]
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    refused = [str(m["content"]) for m in seen[1:3]]
+    assert all("outside this fix pass's target. Edit only: tests/test_b.py" in r for r in refused)
+    assert "`reason`" in refused[0]
+    # The reasoned write lands and admits its file; the unreasoned ones never do.
+    assert body["files"] == {"tests/test_b.py": "Y = 1\n", "app.py": "Z = 2\n"}
+    assert "deleted" not in body
+    assert any(
+        t.explanation.startswith("fix pass changed app.py outside its target: the test imports")
+        for t in result.triage
+    )
+
+
+def test_native_tools_offer_the_reason_only_to_a_fenced_session(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    offered: list[Any] = []
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        offered.append(tools)
+        return "", [{"id": "d", "name": "done", "input": {"summary": "ok"}}]
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(no_json, tool_complete_fn=_tools).run(_fenced_packet(sb.worktree), sb)
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(no_json, tool_complete_fn=_tools).run(make_packet(sb.worktree), sb)
+    write = {t["name"]: t for t in offered[0]}["write_file"]
+    assert "reason" in write["input_schema"]["properties"]
+    assert offered[-1] is TOOLS

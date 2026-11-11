@@ -15,6 +15,7 @@ from foundry.agents.planner.checks import _goals_text
 from foundry.agents.planner.folds import _is_python_test
 from foundry.agents.planner.readers import _bool, _enum, _objs, _section, _steps, _str, _strs, _uniq
 from foundry.agents.planner.schema import (
+    _DEFAULT_CONTRACTS_FILE,
     _EPIC_WORKERS,
     _GENERATED_TICKETS,
     _SAFE_TICKET_ID,
@@ -398,19 +399,28 @@ def _tagged(epic_id: str, gaps: Iterable[str]) -> tuple[str, ...]:
     return tuple(f"[{epic_id}] {g}" for g in gaps)
 
 
-def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> str:
-    """What every epic call needs of call 1's plan besides the epics and contracts."""
+def _plan_brief(
+    payload: dict[str, Any], intent: IntentBrief | None = None, base_contracts: str = ""
+) -> str:
+    """What every epic call needs of call 1's plan besides the epics and contracts.
+    The contracts file is the plan's, else ``base_contracts`` (a change build's),
+    else the language default: where the contracts ticket writes them."""
     prd, design = _section(payload, "prd"), _section(payload, "design")
     constraints = [f"- {_str(c.get('text'))}" for c in _objs(payload.get("pinned_constraints"))]
     stack = _section(payload, "stack")
+    language = _str(stack.get("language")).strip().lower()
+    contracts_file = (
+        _str(stack.get("contracts_file")).strip()
+        or base_contracts
+        or _DEFAULT_CONTRACTS_FILE.get(language, "")
+    )
     return (
         "PLAN (from the lead planner):\n"
         f"Stack: {_str(stack.get('language')) or '(unset)'}"
         + (f" / {_str(stack.get('framework'))}" if stack.get("framework") else "")
         + (
-            f"; contracts file (written for you, never list it in files): "
-            f"{_str(stack.get('contracts_file'))}"
-            if stack.get("contracts_file")
+            f"; contracts file (written for you, never list it in files): {contracts_file}"
+            if contracts_file and _objs(payload.get("interfaces"))
             else ""
         )
         + "\n"
@@ -537,6 +547,7 @@ def _build_tickets(
     epics: Sequence[_Epic] = (),
     overflow: list[str] | None = None,
     reserved: frozenset[str] = frozenset(),
+    binds_own: bool = False,
 ) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
     """Tickets + their scenarios as criteria, made a valid DAG deterministically.
 
@@ -548,7 +559,9 @@ def _build_tickets(
     it depends on (:func:`_link_epics`), and each epic's entrypoint ticket after
     every feature ticket of the epics upstream of it. Tickets dropped at ``cap``
     are named in ``overflow``. ``reserved`` ids (a base tree's feature names) are
-    renamed so a change never replaces an existing feature file."""
+    renamed so a change never replaces an existing feature file. ``binds_own``
+    (a pytest-bdd stack, where the folds add each ticket's step module) skips the
+    untested-ticket note."""
     concerns: list[str] = []
     raw_items: dict[str, dict[str, Any]] = {}
     dropped: list[tuple[str, dict[str, Any]]] = []
@@ -672,8 +685,9 @@ def _build_tickets(
             )
         )
 
+    if binds_own:
+        return tickets, ordered, concerns
     tested = {d for t in tickets if t.specialty is Specialty.TEST for d in declared[t.id]}
-    # A demo feature ticket may bind its own scenarios from a test file it writes.
     tested |= {t.id for t in tickets if any(_is_python_test(f) for f in t.files)}
     concerns += [
         f"Ticket {t.id} has scenarios but neither a test ticket nor a test file of its own."

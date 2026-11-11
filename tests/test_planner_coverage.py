@@ -591,8 +591,9 @@ def test_a_ticket_with_scenarios_keeps_one_step_module() -> None:
 
 
 def test_the_ticket_rules_put_step_modules_with_the_feature_ticket() -> None:
-    assert "lists ONE step module tests/test_<ticket id>.py in its own files[]" in SOP
-    assert "ONE step module per ticket" in SOP and "never on a models-only ticket" in SOP
+    # The step module is added in code (_own_scenario_bindings): the model never writes it.
+    assert "ONE step module tests/test_<ticket id>.py that is added to its files[] for you" in SOP
+    assert "never list a test module for them" in SOP and "never on a models-only ticket" in SOP
 
 
 def test_a_scenario_asserting_dependency_install_is_a_finding() -> None:

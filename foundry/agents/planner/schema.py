@@ -89,11 +89,10 @@ _DEFAULT_CONTRACTS_FILE: dict[str, str] = {
 
 
 _TICKET_RULES = (
-    "Cover every case the request needs. Plan one ticket per layer or concern of an "
-    "epic (its data, its service, its web layer), and split a ticket only when it "
-    "would exceed the TICKET SIZE ceiling for the model its difficulty runs on (the "
-    "numbers for this run follow the request; checked: a ticket over it FAILS the "
-    "Spec gate and must be split). Templates and static assets count only toward its "
+    "Cover every case the request needs. Keep each ticket within the TICKET SIZE "
+    "ceiling for the model its difficulty runs on (the numbers for this run follow "
+    "the request; checked: a ticket over it FAILS the Spec gate and must be split). "
+    "Templates and static assets count only toward its "
     "looser files-in-all limit, so never split a web layer per page when it fits. "
     "A feature ticket owns at least one scenario: work no scenario of its own "
     "proves belongs in the ticket whose behaviour it serves. Never split off work that only one "
@@ -186,11 +185,7 @@ SOP = (
     "PRD: the problem, user stories and prioritization; declare "
     "required_capabilities (e.g. 'ui', 'ml') — they drive specialist routing.\n"
     "EPICS: group the work into epics (ids E1, E2, ... in delivery order; at most "
-    f"{MAX_EPICS}): one epic per domain area of the product, no finer: closely "
-    "related features share one (cart and checkout are one epic, not two), and "
-    "never add an epic to keep tickets small: the ticket size ceiling is met by "
-    f"tickets inside an epic. A SMALL build (one epic, at most {MAX_TICKETS} tickets) "
-    "returns "
+    f"{MAX_EPICS}). A SMALL build (one epic, at most {MAX_TICKETS} tickets) returns "
     "ONE epic and its tickets inline under tickets. A LARGER build returns its epics "
     "and leaves tickets EMPTY: each epic's tickets are then planned in a separate "
     "call that sees only this plan, so every boundary between epics MUST be an "

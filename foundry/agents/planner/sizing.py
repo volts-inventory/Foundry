@@ -174,8 +174,7 @@ def size_text(ceilings: Ceilings) -> str:
         "or module is work wherever it lives) count only toward files in all, and "
         "neither counts tests, package markers (__init__.py), stack-command files "
         "or manifests/config. It "
-        "is a ceiling, not a target: one ticket per epic, split (by layer first) "
-        "only when it would exceed the ceiling; a web layer whose routes and "
+        "is a ceiling, not a target; a web layer whose routes and "
         "templates fit stays ONE ticket, never one per page. Every feature ticket "
         "owns at least one scenario."
     )

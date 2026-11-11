@@ -50,7 +50,13 @@ HINT_COUNTS = "hint_counts.json"
 
 
 def run_case(
-    mode: str, backend: str, case: str, cap: int, out_dir: Path, scope: str = "demo"
+    mode: str,
+    backend: str,
+    case: str,
+    cap: int,
+    out_dir: Path,
+    scope: str = "demo",
+    plan_reuse: bool = False,
 ) -> None:
     root = out_dir / mode / case
     root.mkdir(parents=True, exist_ok=True)
@@ -59,7 +65,9 @@ def run_case(
         "--backend", backend, "--model-mode", mode, "--scope", scope,
         "--time-cap", str(cap), "--out", str(root / "out"), "--state-dir", str(root / "state"),
     ]  # fmt: skip
-    env = {**os.environ, "FOUNDRY_PROGRESS": "1"}
+    # A bench measures planning: a checked plan from an earlier round in this state
+    # dir is replayed only on --plan-reuse, whatever the caller's env says.
+    env = {**os.environ, "FOUNDRY_PROGRESS": "1", "FOUNDRY_PLAN_REUSE": "1" if plan_reuse else "0"}
     # Rerunning a case resumes its saved state, so its log and wall time carry on.
     meta = root / "run.json"
     prior = json.loads(meta.read_text()) if meta.exists() else {}
@@ -216,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         help="minutes per case (default: 120 cloud, 600 with a local model)",
     )
     ap.add_argument("--summarize-only", action="store_true")
+    ap.add_argument(
+        "--plan-reuse",
+        action="store_true",
+        help="replay a checked plan from an earlier round (off: a bench measures planning)",
+    )
     args = ap.parse_args(argv)
     cases = [c for c in args.cases.split(",") if c]
     unknown = [c for c in cases if c not in CASES]
@@ -225,7 +238,15 @@ def main(argv: list[str] | None = None) -> int:
         args.time_cap = 120 if args.mode == "cloud" else 600
     if not args.summarize_only:
         for case in cases:
-            run_case(args.mode, args.backend, case, args.time_cap, args.out_dir, args.scope)
+            run_case(
+                args.mode,
+                args.backend,
+                case,
+                args.time_cap,
+                args.out_dir,
+                args.scope,
+                args.plan_reuse,
+            )
     mode_dir = args.out_dir / args.mode
     summary = {c: summarize_case(mode_dir / c) for c in cases if (mode_dir / c).is_dir()}
     mode_dir.mkdir(parents=True, exist_ok=True)

@@ -54,6 +54,7 @@ from foundry.state.seq import EpochCounter, Seq
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
 
+    from foundry.agents.planner.reuse import PlanReuse
     from foundry.durability.artifact_store import ArtifactStore
     from foundry.execution.adapter_contract import WorkerAdapter
     from foundry.proxy.model_provider_proxy import ModelProviderProxy
@@ -105,6 +106,8 @@ class AgentRuntime:
     # The run's downloaded non-Python dependencies (Go modules, cargo registry, ...),
     # shared by every build's gate steps (foundry.gates.sandbox.toolchain_scope).
     toolchain_cache: ToolchainCache = field(default_factory=ToolchainCache)
+    # Checked-plan reuse across runs (foundry.agents.planner.reuse); None = off.
+    plan_reuse: PlanReuse | None = None
 
     def seq(
         self,

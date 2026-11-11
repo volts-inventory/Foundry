@@ -177,6 +177,7 @@ from foundry.agents.planner.prompt import (
     latest_spec_failure,
 )
 from foundry.agents.planner.readers import _int, _newest_by_id, _objs, _section, _str, _strs
+from foundry.agents.planner.reuse import PlanReuse, call_key
 from foundry.agents.planner.schema import (
     DELIVERABLES,
     DELTA_SCHEMA,
@@ -385,9 +386,19 @@ def make_planner_node(
     staged = TIER in rt.proxy.local_tiers
     lead_sop = DESIGN_SOP if staged else SOP
 
+    # The planning pass's checked-plan reuse (None outside a planning pass) and its
+    # replayed calls: an interface re-plan or a split is mid-build, never replayed.
+    reuse: list[PlanReuse | None] = [None]
+    replayed: list[str] = []
+
     def _call(
         sop: str, schema: dict[str, Any], content: str, effort: Effort = None
     ) -> dict[str, Any]:
+        store = reuse[0]
+        ck = call_key(sop, schema, content, effort) if store is not None else ""
+        if store is not None and (hit := store.replay(ck)) is not None:
+            replayed.append(ck)
+            return hit
         completion = rt.proxy.complete(
             NODE_ID,
             TIER,
@@ -397,7 +408,10 @@ def make_planner_node(
             schema=schema,
             effort=effort,
         )
-        return completion.parsed or {}
+        parsed = completion.parsed or {}
+        if store is not None:
+            store.record(ck, parsed)
+        return parsed
 
     def _self_revise(
         sop: str,
@@ -869,6 +883,20 @@ def make_planner_node(
             return revise_interfaces(rt, state, config, asked, _call)
         if not findings and (asked := pending_splits(state)):
             return _split_tickets(state, config, asked)
+        reuse[0] = rt.plan_reuse
+        replayed.clear()
+        try:
+            out = _plan(state, config, findings)
+        finally:
+            reuse[0] = None
+        if replayed and rt.plan_reuse is not None:
+            count("planner.reused")
+            progress.log(f"planner: reused checked plan {rt.plan_reuse.key}")
+        return out
+
+    def _plan(
+        state: FactoryState, config: RunnableConfig, findings: tuple[str, ...] | None
+    ) -> dict[str, Any]:
         if findings:
             _count_findings(findings)
         prior = _prior_plan(state, rt) if findings else None

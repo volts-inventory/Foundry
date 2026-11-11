@@ -125,6 +125,7 @@ from foundry.agents.planner.delta import (
     _patchable,
     _rejected,
     _structural_findings,
+    _ticket_level,
 )
 from foundry.agents.planner.folds import (
     _add_contract_deps,
@@ -177,7 +178,7 @@ from foundry.agents.planner.prompt import (
     latest_spec_failure,
 )
 from foundry.agents.planner.readers import _int, _newest_by_id, _objs, _section, _str, _strs
-from foundry.agents.planner.reuse import PlanReuse, call_key
+from foundry.agents.planner.reuse import PlanReuse, call_key, newest_prd
 from foundry.agents.planner.schema import (
     DELIVERABLES,
     DELTA_SCHEMA,
@@ -206,7 +207,7 @@ from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutpu
 from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.gates import JudgmentProvenance
 from foundry.schemas.governance import ScopeTier
-from foundry.schemas.implementation import Epic, Ticket, Toolchain
+from foundry.schemas.implementation import CONTRACTS_TICKET_ID, Epic, Ticket, Toolchain
 from foundry.schemas.product import PRD, CriteriaCritique, Criticality, IntentBrief, SprintPlan
 from foundry.telemetry import count
 
@@ -488,9 +489,11 @@ def make_planner_node(
         overflow: list[str],
         *,
         repair: bool,
+        everyone: bool = False,
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str]]:
         """The in-node revision of only the epics ``targets`` names, each handed the
-        findings naming it; every other epic's items stand. A ``repair`` corrects
+        findings naming it (``everyone``: and those naming no epic); every other
+        epic's items stand. A ``repair`` corrects
         each epic's tickets in place at lower effort. Returns the merged items, the
         re-run epics' review gaps and concerns."""
         intake, brief, iface_text = inputs
@@ -503,7 +506,11 @@ def make_planner_node(
                 e,
                 iface_text,
                 _epic_revision_text(
-                    tuple(f for f in findings if e.id in (_target_epics((f,), mem) or ())),
+                    tuple(
+                        f
+                        for f in findings
+                        if e.id in (_target_epics((f,), mem) or ((e.id,) if everyone else ()))
+                    ),
                     mem,
                     e.id,
                     e.id,
@@ -635,6 +642,14 @@ def make_planner_node(
         review = _section(payload, "criteria_review")
         missing = _strs(review.get("missing"))
         omissions = _strs(review.get("security_abuse_omissions"))
+        # stack is single-writer: an operator pin or an earlier pass wins.
+        decided, stack_concerns = (
+            _stack_decision(payload, languages) if pinned is None else (None, [])
+        )
+        raw_stack = _section(payload, "stack")
+        generated, gen_concerns = _generated_tickets(
+            interfaces, raw_stack, pinned or decided, seqs["tickets"], base
+        )
         revised: list[str] = []
         inputs = ("", "", "")
         raw: list[dict[str, Any]] = inline
@@ -650,7 +665,7 @@ def make_planner_node(
                 _plan_brief(
                     payload,
                     brief,
-                    next(iter(base.contracts_files), "") if base is not None else "",
+                    next((t.files for t in generated if t.id == CONTRACTS_TICKET_ID), ()),
                 ),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
@@ -684,14 +699,6 @@ def make_planner_node(
             missing += epic_missing
             omissions += epic_omissions
             concerns += more
-        # stack is single-writer: an operator pin or an earlier pass wins.
-        decided, stack_concerns = (
-            _stack_decision(payload, languages) if pinned is None else (None, [])
-        )
-        raw_stack = _section(payload, "stack")
-        generated, gen_concerns = _generated_tickets(
-            interfaces, raw_stack, pinned or decided, seqs["tickets"], base
-        )
         concerns += [*stack_concerns, *gen_concerns]
         raw_run = _str(raw_stack.get("run")).strip()
         stack_update = decided
@@ -752,6 +759,34 @@ def make_planner_node(
             fit=_assemble(raw, frame, overflow),
         )
 
+    def _try_patch(
+        state: FactoryState,
+        draft: _Draft,
+        notes: tuple[str, ...],
+        items: list[dict[str, Any]],
+    ) -> _Fit | None:
+        """The delta over the draft's tickets, when the tickets alone can close every
+        finding; None when skipped or rejected."""
+        blocking = draft.fit.blocking
+        # An open review gap needs the full re-plan: the delta never sees it.
+        if draft.missing or draft.omissions:
+            progress.log("planner delta skipped: the review has an open gap")
+            return None
+        if not _patchable(blocking, items, draft.frame, draft.fit.overflow):
+            progress.log("planner delta skipped: a finding needs more than the tickets changed")
+            return None
+        return _patch(
+            state,
+            notes,
+            items,
+            [
+                (_str(i.get("name")), _contract_text(i))
+                for i in _objs(draft.payload.get("interfaces"))
+            ],
+            draft.frame,
+            frozenset(_structural_findings(draft.fit.criteria)),
+        )
+
     def _self_check(
         state: FactoryState,
         draft: _Draft,
@@ -762,7 +797,9 @@ def make_planner_node(
     ) -> tuple[_Draft, str]:
         """The one in-node revision of a plan the checks still fault: an epic plan
         re-runs only the epics the findings name; a finding naming none (or an
-        inline plan) re-plans call 1 with every finding. Each revision is first a
+        inline plan) re-plans call 1 with every finding — except on a staged plan
+        whose tickets alone reproduce every finding, where the delta runs and, if
+        it does not close them, every epic re-runs on the same design. Each revision is first a
         repair of the failed plan at lower effort; a repair leaving any finding gets
         one fresh revision at the default effort. Of the original, the repair and
         the fresh revision the one with the fewest findings is kept, a tie going to
@@ -774,6 +811,24 @@ def make_planner_node(
         _count_findings(notes)
         mem = _draft_prior(draft, seqs["prd"]) if draft.per_epic else None
         targets = _target_epics(blocking, mem) if mem is not None else None
+        items = _ticket_items(
+            draft.fit.tickets,
+            draft.fit.criteria,
+            _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
+        )
+        everyone = False
+        if (
+            staged
+            and mem is not None
+            and not targets
+            and _ticket_level(blocking, items, draft.frame)
+        ):
+            # A staged design is sound when the tickets alone reproduce every finding:
+            # patch them, else redo every epic's call on the same design, never call 1.
+            fit = _try_patch(state, draft, notes, items)
+            if fit is not None:
+                return replace(draft, fit=fit), _patch_note(len(blocking))
+            targets, everyone = tuple(e.id for e in draft.epics), True
         if mem is not None and targets:
             what = f"epic(s) {', '.join(targets)}"
 
@@ -788,6 +843,7 @@ def make_planner_node(
                     draft.epic_inputs,
                     over,
                     repair=repair,
+                    everyone=everyone,
                 )
                 return replace(
                     draft,
@@ -807,30 +863,8 @@ def make_planner_node(
             else:
                 _outcome("repair.closed", what, blocking)
         else:
-            items = _ticket_items(
-                draft.fit.tickets,
-                draft.fit.criteria,
-                _ticket_epics(draft.fit.tickets) if draft.per_epic else {},
-            )
-            # An open review gap needs the full re-plan: the delta never sees it.
-            if draft.missing or draft.omissions:
-                progress.log("planner delta skipped: the review has an open gap")
-            elif not _patchable(blocking, items, draft.frame, draft.fit.overflow):
-                progress.log("planner delta skipped: a finding needs more than the tickets changed")
-            else:
-                fit = _patch(
-                    state,
-                    notes,
-                    items,
-                    [
-                        (_str(i.get("name")), _contract_text(i))
-                        for i in _objs(draft.payload.get("interfaces"))
-                    ],
-                    draft.frame,
-                    frozenset(_structural_findings(draft.fit.criteria)),
-                )
-                if fit is not None:
-                    return replace(draft, fit=fit), _patch_note(len(blocking))
+            if (fit := _try_patch(state, draft, notes, items)) is not None:
+                return replace(draft, fit=fit), _patch_note(len(blocking))
             what = "the plan"
             # An epic plan's tickets reach their own epic calls, not call 1.
             plan = _payload_text(draft.payload, None if draft.per_epic else items)
@@ -885,10 +919,14 @@ def make_planner_node(
             return _split_tickets(state, config, asked)
         reuse[0] = rt.plan_reuse
         replayed.clear()
+        if rt.plan_reuse is not None:
+            rt.plan_reuse.begin_pass()
         try:
             out = _plan(state, config, findings)
         finally:
             reuse[0] = None
+        if rt.plan_reuse is not None:
+            rt.plan_reuse.end_pass(newest_prd(out))
         if replayed and rt.plan_reuse is not None:
             count("planner.reused")
             progress.log(f"planner: reused checked plan {rt.plan_reuse.key}")

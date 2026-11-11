@@ -139,6 +139,25 @@ def _python_deps_rule(stack: StackDecision, where: str) -> str:
     )
 
 
+def contracts_paths(
+    raw_stack: dict[str, Any],
+    language: str,
+    base: BaseView | None = None,
+    concerns: list[str] | None = None,
+) -> tuple[str, ...]:
+    """Where the contracts ticket writes the code-kind contracts: the plan's
+    contracts_file, else a change build's existing contracts file, else the
+    language default; () when there is none."""
+    owned = _plan_paths(
+        raw_stack.get("contracts_file"), "contracts", concerns if concerns is not None else []
+    )
+    if not owned and base is not None and base.contracts_files:
+        owned = (next(iter(base.contracts_files)),)
+    if not owned and language in _DEFAULT_CONTRACTS_FILE:
+        owned = (_DEFAULT_CONTRACTS_FILE[language],)
+    return owned
+
+
 def _generated_tickets(
     interfaces: Sequence[InterfaceContract],
     raw_stack: dict[str, Any],
@@ -158,11 +177,7 @@ def _generated_tickets(
     code = [i for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
     owned: tuple[str, ...] = ()
     if code:
-        owned = _plan_paths(raw_stack.get("contracts_file"), "contracts", concerns)
-        if not owned and base is not None and base.contracts_files:
-            owned = (next(iter(base.contracts_files)),)
-        if not owned and language in _DEFAULT_CONTRACTS_FILE:
-            owned = (_DEFAULT_CONTRACTS_FILE[language],)
+        owned = contracts_paths(raw_stack, language, base, concerns)
         if not owned:
             concerns.append(
                 f"{len(code)} code contract(s) but no contracts file for language "

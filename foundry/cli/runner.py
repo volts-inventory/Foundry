@@ -22,7 +22,7 @@ from foundry.agents.planner.reuse import (
     PLANS_DIR,
     PlanReuse,
     plan_key,
-    promote_if_checked,
+    promote_if_passed,
     reuse_enabled,
 )
 from foundry.cli import defaults, doubles, invoke, output, wiring
@@ -138,10 +138,12 @@ def _plan_reuse(
     backend: str,
     proxy: Any,
     ticket_tiers: Mapping[Any, str] | None,
+    local_thinking: str | None,
 ) -> PlanReuse:
     """This run's checked-plan reuse, keyed on every planner input of the run."""
     from foundry.agents.planner import TIER
-    from foundry.toolchains import available_toolchains
+    from foundry.proxy.model_provider_proxy import LOCAL_THINKING_ENV, parse_local_thinking
+    from foundry.toolchains import available_languages
 
     stack: dict[str, Any] = {"profile": profile}
     if profile is not None and profile != "auto":
@@ -155,14 +157,19 @@ def _plan_reuse(
         spec=spec,
         scope=scope,
         stack=stack,
-        languages=frozenset(t.language for t in available_toolchains()),
+        languages=available_languages(),
         local_tiers=proxy.local_tiers,
         planner_level=(
-            {"backend": level.backend, "model": level.model}
+            level.as_dict()
             if level is not None
             else {"backend": backend, "model": proxy.tier_models.get(TIER)}
         ),
         ticket_tiers=ticket_tiers,
+        # As the proxy resolves it: None reads the environment.
+        local_thinking=parse_local_thinking(
+            os.environ.get(LOCAL_THINKING_ENV, "") if local_thinking is None else local_thinking
+        ),
+        base_urls={t: lvl.base_url for t, lvl in (level_table or {}).items()},
     )
     return PlanReuse(state_dir / PLANS_DIR, key, run_key)
 
@@ -437,6 +444,7 @@ def run(
                 backend=backend,
                 proxy=proxy,
                 ticket_tiers=ticket_tiers,
+                local_thinking=local_thinking,
             )
     meter: TokenMeter | None = None
     if token_cap is not None or time_cap_minutes is not None or cancel is not None:
@@ -511,7 +519,6 @@ def run(
         telemetry.counting() as fire_counts,
         tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
     ):
-        app: Any = None
         try:
             if base_root is not None:
                 from foundry.base_tree import copy_base_tree
@@ -718,11 +725,6 @@ def run(
                     )
                 raise
         finally:
-            if rt.plan_reuse is not None and app is not None:
-                # Promoted however the run ends (halted, capped, stopped) once its
-                # Spec gate passed: that is when its plan is a checked one.
-                with contextlib.suppress(OSError):
-                    promote_if_checked(rt.plan_reuse, invoke._prior_values(app, config))
             if run_dir is not None:
                 # This process's counts only, written even when the run stops or
                 # raises: a caller resuming a run (scripts/bench.py) sums segments.
@@ -748,6 +750,9 @@ def run(
         backend=backend,
     )
     result = replace(result, hint_counts=fire_counts.snapshot())
+    if rt.plan_reuse is not None:
+        with contextlib.suppress(OSError):
+            promote_if_passed(rt.plan_reuse, final_state, passed=result.passed)
     if level_table is not None:
         result = replace(
             result,

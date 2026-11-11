@@ -42,6 +42,7 @@ when the backend is not the Anthropic SDK:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -719,6 +720,55 @@ def _find_usage(event: dict[str, Any]) -> dict[str, int] | None:
 # --------------------------------------------------------------------------- #
 
 
+def _nullable(schema: dict[str, Any]) -> dict[str, Any]:
+    kind = schema.get("type")
+    if isinstance(kind, str):
+        out = {**schema, "type": [kind, "null"]}
+        if isinstance(schema.get("enum"), list):
+            out["enum"] = [*schema["enum"], None]
+        return out
+    if isinstance(kind, list):
+        return schema if "null" in kind else {**schema, "type": [*kind, "null"]}
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _strict_schema(schema: Any) -> Any:
+    """``schema`` as OpenAI's strict structured outputs accept it: every property
+    listed in ``required``, an optional one made nullable (the model writes null
+    where it would have left the field out; :func:`_drop_optional_nulls` removes it)."""
+    if isinstance(schema, list):
+        return [_strict_schema(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out = {k: _strict_schema(v) for k, v in schema.items() if k != "properties"}
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        required = set(schema.get("required") or ())
+        out["properties"] = {
+            k: _strict_schema(v) if k in required else _nullable(_strict_schema(v))
+            for k, v in props.items()
+        }
+        out["required"] = list(props)
+    return out
+
+
+def _drop_optional_nulls(value: Any, schema: Any) -> Any:
+    """Undo :func:`_strict_schema` on a reply: drop the null an optional property
+    was given, so readers see it absent as the original schema allows."""
+    if not isinstance(schema, dict):
+        return value
+    if isinstance(value, dict) and isinstance(schema.get("properties"), dict):
+        props, required = schema["properties"], set(schema.get("required") or ())
+        return {
+            k: _drop_optional_nulls(v, props.get(k))
+            for k, v in value.items()
+            if not (v is None and k in props and k not in required)
+        }
+    if isinstance(value, list) and isinstance(schema.get("items"), dict):
+        return [_drop_optional_nulls(v, schema["items"]) for v in value]
+    return value
+
+
 class OpenAITransport:
     """Default transport over the real OpenAI SDK (``chat.completions``).
 
@@ -777,7 +827,11 @@ class OpenAITransport:
         if schema is not None:
             params["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {"name": "verdict", "schema": schema, "strict": True},
+                "json_schema": {
+                    "name": "verdict",
+                    "schema": _strict_schema(schema),
+                    "strict": True,
+                },
             }
         if "tools" in request:
             if self._tools_by_model.get(model) is False:
@@ -795,6 +849,11 @@ class OpenAITransport:
             response = self._cache.run(lambda c: c.chat.completions.create(**params))
         choice = response.choices[0] if getattr(response, "choices", None) else None
         text = (getattr(choice.message, "content", "") or "") if choice is not None else ""
+        if schema is not None and isinstance(text, str) and text:
+            with contextlib.suppress(ValueError):
+                reply = json.loads(text)
+                if (cleaned := _drop_optional_nulls(reply, schema)) != reply:
+                    text = json.dumps(cleaned)
         usage = getattr(response, "usage", None)
         details = getattr(usage, "prompt_tokens_details", None) if usage else None
         return ProviderResponse(

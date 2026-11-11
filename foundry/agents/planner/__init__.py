@@ -18,7 +18,9 @@ channels:
 
 Large plans: call 1 also splits the work into epics joined by the interface
 contracts it defines. A small plan (one epic) carries its tickets inline, so it
-stays one call; otherwise each epic's tickets come from their own call, run in
+stays one call — except on a local planner level, where call 1 is the design
+alone (:data:`DESIGN_SOP`) and even one epic gets its own ticket call; otherwise
+each epic's tickets come from their own call, run in
 parallel, namespaced ``<epic>-<id>`` and merged in epic order, with each epic's
 root tickets made to depend on the upstream epics' tickets implementing what it
 consumes (else on their sink tickets).
@@ -63,7 +65,13 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from foundry import progress
-from foundry.agents._common import cas_uri, emit_artifact, journal_entry, persist_prose
+from foundry.agents._common import (
+    cas_uri,
+    demo_criteria_directive,
+    emit_artifact,
+    journal_entry,
+    persist_prose,
+)
 from foundry.agents.implementation.tickets.split import pending_splits
 from foundry.agents.implementation.tickets.tasks import pending_interface_replans
 from foundry.agents.plan_contracts import CompileResult
@@ -157,6 +165,7 @@ from foundry.agents.planner.prompt import (
     _base,
     _criteria_text,
     _declared_criteria_text,
+    _forced_standard,
     _intake_text,
     _payload_text,
     _repair_block,
@@ -172,6 +181,8 @@ from foundry.agents.planner.schema import (
     DELIVERABLES,
     DELTA_SCHEMA,
     DELTA_SOP,
+    DESIGN_SCHEMA,
+    DESIGN_SOP,
     EPIC_KIND,
     EPIC_SCHEMA,
     EPIC_SOP,
@@ -209,6 +220,8 @@ if TYPE_CHECKING:
 __all__ = [
     "DELTA_SCHEMA",
     "DELTA_SOP",
+    "DESIGN_SCHEMA",
+    "DESIGN_SOP",
     "EPIC_KIND",
     "EPIC_SCHEMA",
     "EPIC_SOP",
@@ -252,6 +265,32 @@ Effort = Literal["medium", "xhigh"] | None
 # one: the first plan call keeps the default (xhigh locally), every repair and delta
 # runs at medium.
 _REPAIR_EFFORT: Effort = "medium"
+
+
+def _sole_epic(payload: dict[str, Any]) -> dict[str, Any]:
+    """The one epic of a staged design that named none: the whole build, providing
+    every contract the design defines."""
+    return {
+        "id": "E1",
+        "title": _str(_section(payload, "prd").get("title")) or "The build",
+        "summary": _str(_section(payload, "intent").get("intent")),
+        "depends_on": [],
+        "provides": [_str(i.get("name")) for i in _objs(payload.get("interfaces"))],
+        "consumes": [],
+    }
+
+
+def _demo_caps(state: FactoryState, payload: dict[str, Any] | None = None) -> str:
+    """The DEMO criteria cap for a staged plan's epic calls, which author the
+    scenarios call 1 no longer does: the decided tier, else call 1's judgement
+    (a design spec forces standard)."""
+    decided = state.get("scope_tier")
+    if decided is not None:
+        demo = decided.tier is ScopeTier.DEMO
+    else:
+        judged = _str(_section(payload or {}, "scope").get("tier")).strip().lower()
+        demo = judged == ScopeTier.DEMO.value and not _forced_standard(state)
+    return demo_criteria_directive() if demo else ""
 
 
 def _count_findings(findings: Iterable[str]) -> None:
@@ -339,6 +378,12 @@ def make_planner_node(
 
     ceilings = ticket_ceilings(rt.proxy.local_tiers, ticket_tiers)
     sizing = size_text(ceilings)
+    # On a local planner level call 1 writes the design only and every epic's
+    # tickets come from their own call, even for a one-epic build: Ollama serves one
+    # request at a time, so a single all-in-one call is the slowest shape there, and
+    # a faulty epic is redone alone. A cloud planner keeps the inline small build.
+    staged = TIER in rt.proxy.local_tiers
+    lead_sop = DESIGN_SOP if staged else SOP
 
     def _call(
         sop: str, schema: dict[str, Any], content: str, effort: Effort = None
@@ -567,8 +612,12 @@ def make_planner_node(
         existing = base.contract_names if base is not None else frozenset()
         names = {i.name for i in interfaces} | existing
         overflow: list[str] = []
-        epics, concerns = _build_epics(payload.get("epics"), names, overflow)
         inline = _objs(payload.get("tickets"))
+        raw_epics = _objs(payload.get("epics"))
+        if staged and not raw_epics and not inline:
+            # A design with no epics is one epic: its tickets still need their call.
+            raw_epics = [_sole_epic(payload)]
+        epics, concerns = _build_epics(raw_epics, names, overflow)
         review = _section(payload, "criteria_review")
         missing = _strs(review.get("missing"))
         omissions = _strs(review.get("security_abuse_omissions"))
@@ -583,8 +632,12 @@ def make_planner_node(
                     f"{len(epics)} epics, each planned in its own call."
                 )
             inputs = (
-                _intake_text(state) + sizing,
-                _plan_brief(payload, brief),
+                _intake_text(state) + sizing + (_demo_caps(state, payload) if staged else ""),
+                _plan_brief(
+                    payload,
+                    brief,
+                    next(iter(base.contracts_files), "") if base is not None else "",
+                ),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
                     for i in _objs(payload.get("interfaces"))
@@ -769,7 +822,9 @@ def make_planner_node(
             plan = _payload_text(draft.payload, None if draft.per_epic else items)
             repaired = _draft(
                 state,
-                _call(SOP, schema, content + _repair_block(notes, plan, _CHECK), _REPAIR_EFFORT),
+                _call(
+                    lead_sop, schema, content + _repair_block(notes, plan, _CHECK), _REPAIR_EFFORT
+                ),
                 seqs,
                 languages,
                 notes,
@@ -786,7 +841,7 @@ def make_planner_node(
                 )
                 replanned = _draft(
                     state,
-                    _call(SOP, schema, content + text),
+                    _call(lead_sop, schema, content + text),
                     seqs,
                     languages,
                     notes,
@@ -834,7 +889,7 @@ def make_planner_node(
             tools = tuple(toolchains)
         languages = {t.language for t in tools}
         pinned = state.get("stack")
-        schema = _plan_schema(languages | ({pinned.language} if pinned else set()))
+        schema = _plan_schema(languages | ({pinned.language} if pinned else set()), design=staged)
         content = _user_content(state, rt, spans, tools) + sizing
         store = rt.cas
 
@@ -856,7 +911,7 @@ def make_planner_node(
             repaired = _draft(
                 state,
                 _call(
-                    SOP,
+                    lead_sop,
                     schema,
                     _user_content(state, rt, spans, tools, _prior_plan_text(earlier)) + sizing,
                     _REPAIR_EFFORT,
@@ -876,12 +931,12 @@ def make_planner_node(
                 _outcome("repair.closed", "Spec-gate re-plan", findings or ())
                 draft = repaired
         if draft is None:
-            payload = _call(SOP, schema, content)
+            payload = _call(lead_sop, schema, content)
             # One free in-node revision when the self-review flags gaps, so they don't
             # spend the shared Spec-gate fix budget: a repair, then at most one fresh call.
             gaps = _self_review_gaps(payload)
             if gaps:
-                payload = _self_revise(SOP, schema, content, payload, gaps, "plan")
+                payload = _self_revise(lead_sop, schema, content, payload, gaps, "plan")
             draft = _draft(state, payload, seqs, languages, findings, prior)
         draft, check_note = _self_check(state, draft, content, schema, seqs, languages)
         _count_folds(draft.fit)
@@ -1086,7 +1141,7 @@ def make_planner_node(
 
         chosen = [e for e in prior.epics if e.id in targets]
         inputs = (
-            _intake_text(state) + sizing,
+            _intake_text(state) + sizing + (_demo_caps(state) if staged else ""),
             prior.brief,
             _interfaces_text(prior.interfaces),
         )

@@ -21,6 +21,7 @@ from foundry import telemetry
 from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
+    DESIGN_SOP,
     SOP,
     _add_read_deps,
     _affected,
@@ -1086,8 +1087,10 @@ def test_a_self_consumed_contract_is_dropped_from_consumes() -> None:
 
 
 def test_the_sop_states_the_scaffold_rules() -> None:
-    assert "PACKAGE MARKERS" in SOP and "__init__.py" in SOP
-    assert "python contracts.py" in SOP and "typescript src/contracts.ts" in SOP
+    # Package markers are added in code (_own_package_inits): the model never writes them.
+    for sop in (SOP, DESIGN_SOP):
+        assert "Every Python package directory's __init__.py is added for you" in sop
+        assert "python contracts.py" in sop and "typescript src/contracts.ts" in sop
 
 
 # ---- plan-time contract compile -----------------------------------------------------

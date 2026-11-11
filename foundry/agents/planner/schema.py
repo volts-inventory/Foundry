@@ -103,36 +103,40 @@ _TICKET_RULES = (
     "chance to mismatch. A ticket is one coherent slice of the product: its closely "
     "related behaviours and their files; tickets meet at interface contracts. State "
     "what each ticket must do and why, not how to implement it. NAMES: name every "
-    "ticket id, module and test file after its domain (ticket stats -> stats.py, "
-    "ticket cli -> features/cli.feature and tests/test_cli.py), never after a "
-    "ticket number (T3, T3.feature, test_T2.py): the gate names a ticket's feature "
-    "file and step module after its id. "
+    "ticket id and module after its domain (ticket stats -> stats.py, ticket cli -> "
+    "features/cli.feature), never after a ticket number (T3, T3.feature, "
+    "test_T2.py): the gate names a ticket's feature file and step module after its "
+    "id. "
     "Each ticket "
     "lists in files[] every path it may write, has a specialty (frontend | backend "
     "| data | test) and a difficulty (trivial | standard | complex — it picks the "
     "model), and depends_on the ticket ids that must land first; depends_on MUST "
     "form a DAG. Name the interface contracts each ticket implements[] and "
     "consumes[] by their interfaces[].name, so tickets built in parallel code "
-    "against the same signatures, and list in reads[] the files it reads. CONTRACT "
+    "against the same signatures. ADDED FOR YOU (never write them): the dependency "
+    "on the one ticket implementing a contract a ticket consumes, the entrypoint's "
+    "dependencies on every feature ticket, and every ticket's dependency on the "
+    "planner's own tickets; reads[] lists only files a ticket reads beyond the "
+    "contracts file and its dependencies' files (it is shown those), usually none. "
+    "CONTRACT "
     "FIT (checked; a violation FAILS the Spec gate): every contract a ticket "
     "consumes is implemented by exactly ONE ticket, which the consumer depends_on "
     "(directly or through other tickets). Every implemented contract should have a "
     "consumer or a scenario on its implementing ticket. STEP DEFINITIONS bind the "
     "gate-written features/<feature ticket id>.feature (the gate renders one per "
     "ticket from its scenarios). On a Python stack with no bdd command (pytest-bdd), "
-    "the feature ticket that builds the behaviour lists ONE step module "
-    "tests/test_<ticket id>.py in its own files[] and binds its own scenarios there, "
-    "so each wave's check runs them as soon as it lands: never a trailing test-only "
-    "ticket that binds several feature tickets' scenarios (checked and repaired). "
+    "the feature ticket that builds the behaviour binds its own scenarios from ONE "
+    "step module tests/test_<ticket id>.py that is added to its files[] for you: "
+    "never list a test module for them, and never plan a test-only ticket that binds "
+    "feature tickets' scenarios (checked and repaired), so each wave's check runs "
+    "them as soon as it lands. "
     "So give each ticket only scenarios its own code and its dependencies can pass "
     "the moment it lands: a user-level scenario (an HTTP request, a CLI run) belongs "
     "on the ticket that exposes that surface, never on a models-only ticket. "
-    "Otherwise, unless a DEMO scope cap says so, every feature ticket gets a paired "
-    "specialty='test' ticket that depends_on it and writes the step definitions for "
-    "that feature's scenarios; the test ticket carries no scenarios of its own. ONE "
-    "step module per ticket: never split its steps across modules by layer "
-    "(test_x_routes.py + test_x_service.py): only one binds the scenarios and the "
-    "rest are dropped (checked). Never list a .feature file in files[]: "
+    "On any other stack, unless a DEMO scope cap says so, every feature ticket gets "
+    "a paired specialty='test' ticket that depends_on it and writes the step "
+    "definitions for that feature's scenarios in ONE step file; the test ticket "
+    "carries no scenarios of its own. Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
     "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
     "Where a scope cap speaks of ownership units, it means the files across your "
@@ -142,19 +146,20 @@ _TICKET_RULES = (
     "given, one when and one then step (plain phrases, without the keyword), and "
     "covers[]: the ids of the must-haves (MH-n) and success criteria (SC-n) it "
     "proves (empty when it proves none of them). Mark "
-    "high-risk scenarios 'high-risk', the rest 'normal'. COVERAGE (checked; a "
+    "high-risk scenarios 'high-risk' (omit criticality otherwise). COVERAGE (checked; a "
     "violation FAILS the Spec gate): every must-have and every success criterion is "
     "listed in the covers[] of at least one scenario; every feature (non-test) "
     "ticket carries at least one scenario; exactly one feature ticket has "
     "entrypoint=true: it wires the whole app together end to end (main / server / "
     "CLI / the public API of a library), depends_on every other feature ticket "
-    "(directly or through other tickets) and carries an end-to-end scenario; every "
-    "other ticket has entrypoint=false. Identify how the component "
+    "(directly or through other tickets) and carries an end-to-end scenario; omit "
+    "entrypoint on every other ticket. Identify how the component "
     "can be MISUSED or ABUSED (malformed/wrong-type input, invalid operations on an "
     "empty or boundary state, resource exhaustion, authn/authz for anything exposed) "
     "and author at least one scenario covering the applicable case with "
-    "security_abuse=true. ALWAYS author one scenario requiring a pinned dependency "
-    "manifest for the stack at the repo root (requirements.txt / uv.lock / "
+    "security_abuse=true (omit security_abuse on the rest). ALWAYS author one "
+    "scenario requiring a pinned dependency manifest for the stack at the repo root "
+    "(requirements.txt / uv.lock / "
     "package-lock.json / go.sum / Cargo.lock; pin dev/test deps if there are no "
     "runtime deps), on the ticket that writes that manifest; it checks the manifest "
     "itself (present, every entry pinned), never that installing succeeds: the gates "
@@ -167,10 +172,7 @@ _TICKET_RULES = (
 )
 
 
-SOP = (
-    "You are the Planner. In ONE reply, turn the request into a complete, buildable, "
-    "testable plan: intent, product spec, acceptance criteria, delivery plan, and "
-    "architecture. Fill every section of the constrained JSON schema.\n"
+_SCOPE_RULES = (
     "SCOPE (scope.tier): 'demo' only when the request is for something to look at or "
     "learn from (demo, toy, example, prototype, spike, exercise) that nobody depends "
     "on; 'standard' otherwise. Judge the subject, not the length; real users, "
@@ -184,27 +186,19 @@ SOP = (
     "'app'.\n"
     "PRD: the problem, user stories and prioritization; declare "
     "required_capabilities (e.g. 'ui', 'ml') — they drive specialist routing.\n"
-    "EPICS: group the work into epics (ids E1, E2, ... in delivery order; at most "
-    f"{MAX_EPICS}). A SMALL build (one epic, at most {MAX_TICKETS} tickets) returns "
-    "ONE epic and its tickets inline under tickets. A LARGER build returns its epics "
-    "and leaves tickets EMPTY: each epic's tickets are then planned in a separate "
-    "call that sees only this plan, so every boundary between epics MUST be an "
-    "interface contract defined here — give each epic the interfaces[].name it "
-    "provides[] and consumes[], the epic ids it depends_on (a DAG), and a "
-    "specialty_mix hint. The LAST epic depends (directly or through other epics) on "
-    "every other epic and holds the entrypoint ticket. Work over the caps is dropped "
-    "(and reported), so consolidate instead.\n"
-    "TICKETS: decompose the work into Jira-style tickets. "
-    + _TICKET_RULES
-    + "When you return epics without inline tickets, criteria_review covers only "
-    "plan-level gaps: each epic reviews its own scenarios.\n"
+)
+
+
+_DESIGN_RULES = (
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
     "micro-USD (never a float); a short risk register; done-for-this-iteration.\n"
     "ARCHITECTURE: choose the component decomposition; write ADRs WITH rejected "
     "alternatives; define interface/API contracts FIRST (tickets reference them): "
     "every seam between tickets is a contract with a name, a kind (function | class "
     "| type for code seams; http | cli | event for the rest), its signature written "
-    "in the chosen language, its inputs, outputs and errors, and a description. "
+    "in the chosen language and a description; give inputs, outputs and errors only "
+    "where the signature does not already state them (an http | cli | event "
+    "contract; the errors a function raises). "
     "Every data type, interface and error that crosses a ticket boundary is a contract "
     "(kind type or class): the contracts file is its ONLY definition, every ticket "
     "imports it from there, and no ticket redeclares it (never plan a models module "
@@ -216,8 +210,9 @@ SOP = (
     "tickets' class contracts (the app / composition root) declares how it receives "
     "them: an __init__ (constructor) taking them, or a factory function in the "
     "contract that takes them and returns it (checked; a violation FAILS the Spec "
-    "gate). Emit cross-cutting concerns as pinned constraints, which are injected "
-    "verbatim into every build task.\n"
+    "gate). Emit cross-cutting concerns as pinned constraints (their text; id, scope "
+    "and source are filled in when omitted), which are injected verbatim into every "
+    "build task.\n"
     "STACK: choose the stack yourself from the request: stack.language MUST be one "
     "of the LANGUAGES AVAILABLE HERE; pick the framework and package manager. Give "
     "the shell commands the gates run from the repo root, in a sandbox that can "
@@ -240,29 +235,71 @@ SOP = (
     "that starts the app on port 0, makes one request, stops it and exits 0 — never "
     "the bare server entry such as `node app.js`, `npm start`, `flask run` or "
     "`uvicorn ...`, which never exits; checked). "
-    "contracts_file is the source file the code-kind contracts are written to (e.g. "
-    "src/contracts.ts, contracts.py); harness_files are the package manifest and "
-    "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
+    "contracts_file is the source file the code-kind contracts are written to (omit "
+    "it for the language default below); harness_files are build/runner config "
+    "beyond the package manifest and the runner's own config, which are included "
+    "for you (usually none); "
     "cucumber-js step files go under features/step_definitions/. The ids "
     f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are reserved: never plan a "
     f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes "
     "contracts_file first; only when stack.bdd is set, "
     f"'{HARNESS_TICKET_ID}' is added too and wires the Cucumber runner into "
-    "harness_files. Every ticket you write depends on them, and none may list "
-    "contracts_file in files. "
+    "harness_files. Every ticket depends on them for you, and none may list "
+    "contracts_file in files. Every Python package directory's __init__.py is added "
+    "for you. "
     "Default contracts_file per language: "
     + ", ".join(f"{lang} {path}" for lang, path in _DEFAULT_CONTRACTS_FILE.items())
     + ". The code-kind contract signatures are compiled together as that file at plan "
     "time (Python with mypy, TypeScript with tsc), so write each as complete, valid "
     "declarations of the chosen language that reference only each other and the "
     "standard library.\n"
-    "PACKAGE MARKERS: every Python package directory (one holding imported .py "
-    "files, e.g. finance/ for finance/store.py) needs an __init__.py that exactly one "
-    "ticket lists in files[] — the ticket that first writes into that directory, or "
-    f"'{CONTRACTS_TICKET_ID}' when contracts_file lives there; any you leave out is "
-    "given to the contracts ticket. Test directories need none.\n"
     "When a DESIGN SPEC is provided, it is the detailed source of truth: derive the "
     "plan FROM it rather than from the one-line request alone."
+)
+
+
+SOP = (
+    "You are the Planner. In ONE reply, turn the request into a complete, buildable, "
+    "testable plan: intent, product spec, acceptance criteria, delivery plan, and "
+    "architecture. Fill every section of the constrained JSON schema.\n"
+    + _SCOPE_RULES
+    + "EPICS: group the work into epics (ids E1, E2, ... in delivery order; at most "
+    f"{MAX_EPICS}). A SMALL build (one epic, at most {MAX_TICKETS} tickets) returns "
+    "ONE epic and its tickets inline under tickets. A LARGER build returns its epics "
+    "and leaves tickets EMPTY: each epic's tickets are then planned in a separate "
+    "call that sees only this plan, so every boundary between epics MUST be an "
+    "interface contract defined here — give each epic the interfaces[].name it "
+    "provides[] and consumes[], the epic ids it depends_on (a DAG), and a "
+    "specialty_mix hint. The LAST epic depends (directly or through other epics) on "
+    "every other epic and holds the entrypoint ticket. Work over the caps is dropped "
+    "(and reported), so consolidate instead.\n"
+    "TICKETS: decompose the work into Jira-style tickets. "
+    + _TICKET_RULES
+    + "When you return epics without inline tickets, criteria_review covers only "
+    "plan-level gaps: each epic reviews its own scenarios.\n" + _DESIGN_RULES
+)
+
+
+# Call 1 of a staged plan (a local planner level): the design alone; every epic's
+# tickets and scenarios come from their own call, so one bad epic is redone alone.
+DESIGN_SOP = (
+    "You are the Planner. In ONE reply, write the DESIGN of a complete, buildable, "
+    "testable plan: intent, product spec, delivery plan, architecture, stack, the "
+    "shared interface contracts and the epics. The tickets and their scenarios (the "
+    "acceptance criteria) are NOT yours: each epic's are planned in a separate call "
+    "that sees only this design. Fill every section of the constrained JSON schema.\n"
+    + _SCOPE_RULES
+    + "EPICS: split the work into epics (ids E1, E2, ... in delivery order; at most "
+    f"{MAX_EPICS}); a small build is ONE epic. Each epic becomes at most "
+    f"{MAX_EPIC_TICKETS} Jira-style tickets, each a coding session within the TICKET "
+    "SIZE ceiling that follows the request. Every boundary between epics MUST be an "
+    "interface contract defined here — give each epic the interfaces[].name it "
+    "provides[] and consumes[], the epic ids it depends_on (a DAG), and a "
+    "specialty_mix hint; its summary names the behaviours and the must-have (MH-n) "
+    "and success-criterion (SC-n) ids it delivers, so the epics cover every one. The "
+    "LAST epic depends (directly or through other epics) on every other epic and "
+    "holds the entrypoint ticket, which wires the whole app together. Work over the "
+    "caps is dropped (and reported), so consolidate instead.\n" + _DESIGN_RULES
 )
 
 
@@ -323,7 +360,7 @@ _SCENARIO_SCHEMA: dict[str, Any] = {
         "security_abuse": {"type": "boolean"},
         "covers": _STR_ARRAY,
     },
-    "required": ["id", "given", "when", "then", "security_abuse", "covers"],
+    "required": ["id", "given", "when", "then", "covers"],
     "additionalProperties": False,
 }
 
@@ -352,7 +389,6 @@ _TICKET_SCHEMA: dict[str, Any] = {
         "depends_on",
         "files",
         "scenarios",
-        "entrypoint",
     ],
     "additionalProperties": False,
 }
@@ -370,7 +406,7 @@ _INTERFACE_SCHEMA: dict[str, Any] = {
         "description": {"type": "string"},
         "consumers": _STR_ARRAY,
     },
-    "required": ["name", "kind", "signature", "inputs", "outputs", "errors", "description"],
+    "required": ["name", "kind", "signature", "description"],
     "additionalProperties": False,
 }
 
@@ -401,8 +437,6 @@ _STACK_SCHEMA: dict[str, Any] = {
         "test",
         "bdd",
         "run",
-        "contracts_file",
-        "harness_files",
     ],
     "additionalProperties": False,
 }
@@ -519,7 +553,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "body": {"type": "string"},
                     "rejected_alternatives": _STR_ARRAY,
                 },
-                "required": ["id", "title", "decision", "body"],
+                "required": ["title", "decision", "body"],
                 "additionalProperties": False,
             },
         },
@@ -537,7 +571,7 @@ PLAN_SCHEMA: dict[str, Any] = {
                     "scope": {"type": "string", "enum": ["global", "local"]},
                     "source": {"type": "string"},
                 },
-                "required": ["id", "text", "scope", "source"],
+                "required": ["text"],
                 "additionalProperties": False,
             },
         },
@@ -558,11 +592,24 @@ PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
-def _plan_schema(languages: Iterable[str]) -> dict[str, Any]:
-    """:data:`PLAN_SCHEMA` with ``stack.language`` limited to ``languages``."""
+# Staged call 1 (:data:`DESIGN_SOP`): the plan less what the epic calls write.
+_EPIC_OWNED = ("tickets", "criteria_review")
+
+
+DESIGN_SCHEMA: dict[str, Any] = {
+    **PLAN_SCHEMA,
+    "properties": {k: v for k, v in PLAN_SCHEMA["properties"].items() if k not in _EPIC_OWNED},
+    "required": [k for k in PLAN_SCHEMA["required"] if k not in _EPIC_OWNED],
+}
+
+
+def _plan_schema(languages: Iterable[str], *, design: bool = False) -> dict[str, Any]:
+    """:data:`PLAN_SCHEMA` (``design``: :data:`DESIGN_SCHEMA`) with ``stack.language``
+    limited to ``languages``."""
+    base = DESIGN_SCHEMA if design else PLAN_SCHEMA
     language = {"type": "string", "enum": sorted(set(languages))}
     stack = {**_STACK_SCHEMA, "properties": {**_STACK_SCHEMA["properties"], "language": language}}
-    return {**PLAN_SCHEMA, "properties": {**PLAN_SCHEMA["properties"], "stack": stack}}
+    return {**base, "properties": {**base["properties"], "stack": stack}}
 
 
 EPIC_SCHEMA: dict[str, Any] = {

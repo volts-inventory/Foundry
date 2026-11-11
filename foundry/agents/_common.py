@@ -166,9 +166,9 @@ _DEMO_ARCHITECT_DIRECTIVE = (
     "yields zero tasks and an empty repo that fails the build gate.\n"
     "- Keep ADRs to the one or two decisions that actually shaped the design.\n"
     "- On a Python stack without a bdd command, NO paired test tickets: each feature "
-    "ticket lists its own tests/test_<name>.py in files[] and writes the step "
-    "definitions for its own scenarios. Fold the dependency manifest into the main "
-    "feature ticket rather than giving it a ticket of its own."
+    "ticket writes the step definitions for its own scenarios in its "
+    "tests/test_<ticket id>.py, which is added to its files[] for you. Fold the "
+    "dependency manifest into the main feature ticket rather than giving it a ticket of its own."
 )
 
 
@@ -188,6 +188,12 @@ def scope_directive(state: FactoryState, *, architect: bool = False) -> str:
     if decision is None or decision.tier is not ScopeTier.DEMO:
         return ""
     return _DEMO_ARCHITECT_DIRECTIVE if architect else _DEMO_PM_DIRECTIVE
+
+
+def demo_criteria_directive() -> str:
+    """The DEMO criteria cap alone, for a call that authors scenarios but not the
+    architecture (a staged plan's epic call)."""
+    return _DEMO_PM_DIRECTIVE
 
 
 def demo_directives() -> str:

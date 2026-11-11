@@ -1034,6 +1034,127 @@ def test_single_epic_with_inline_tickets_is_one_call() -> None:
     assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 3
 
 
+_ONE_EPIC = {
+    "id": "E1",
+    "title": "Todo",
+    "summary": "all of it",
+    "depends_on": [],
+    "provides": ["TodoStore.add", "TodoStore.list"],
+    "consumes": [],
+}
+
+
+def _design(**overrides: Any) -> dict[str, Any]:
+    """PLAN as a staged call 1 writes it: no tickets, no criteria review."""
+    out = {k: v for k, v in PLAN.items() if k not in ("tickets", "criteria_review")}
+    return {**out, "epics": [_ONE_EPIC], **overrides}
+
+
+def _local_runtime(
+    *scripts: ResponseScript, cas: ArtifactStore | None = None
+) -> tuple[AgentRuntime, MockTransport]:
+    tx = MockTransport(scripts)
+    proxy = ModelProviderProxy(
+        tx, signer=ZoneBSigner(KEY, KEY_ID), local_tiers=frozenset({"T1", "T2", "T3"})
+    )
+    return AgentRuntime(proxy=proxy, cas=cas), tx
+
+
+def _schema_of(request: dict[str, Any]) -> dict[str, Any]:
+    schema: dict[str, Any] = request["output_config"]["format"]["schema"]
+    return schema
+
+
+def test_a_local_planner_stages_even_a_one_epic_build() -> None:
+    cas = ArtifactStore()
+    tickets = {"tickets": PLAN["tickets"], "criteria_review": _review()}
+    rt, tx = _local_runtime(*_epic_scripts(_design(), {"E1": tickets}), cas=cas)
+    efforts: list[Any] = []
+    complete = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        efforts.append(kwargs.get("effort"))
+        return complete(*args, **kwargs)
+
+    rt.proxy.complete = spy  # type: ignore[method-assign]
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    design, epic = tx.requests
+    assert "write the DESIGN" in json.dumps(design)
+    assert {"tickets", "criteria_review"}.isdisjoint(_schema_of(design)["properties"])
+    assert _epic_of(epic) == "E1"
+    assert set(_schema_of(epic)["properties"]) == {"tickets", "criteria_review"}
+    # Both stages think at the level's default (xhigh locally): neither is a repair.
+    assert efforts == [None, None]
+    assert [t.id for t in _bodies(cas, writes, "ticket")] == [
+        "E1-T-001",
+        "E1-T-002",
+        "E1-T-003",
+    ]
+    assert [e.id for e in _bodies(cas, writes, "epic")] == ["E1"]
+    assert "1 parallel call(s) (E1)" in writes["agent_journal"][0].summary
+
+
+def test_a_local_design_naming_no_epic_is_planned_as_one() -> None:
+    cas = ArtifactStore()
+    tickets = {"tickets": PLAN["tickets"], "criteria_review": _review()}
+    rt, tx = _local_runtime(*_epic_scripts(_design(epics=[]), {"E1": tickets}), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 2
+    [epic] = _bodies(cas, writes, "epic")
+    assert (epic.title, epic.provides) == ("Todo service", ("TodoStore.add", "TodoStore.list"))
+    assert len(_bodies(cas, writes, "ticket")) == 3
+
+
+def test_a_local_demo_design_caps_the_epic_calls_criteria() -> None:
+    tickets = {"tickets": PLAN["tickets"], "criteria_review": _review()}
+    demo = {"tier": "demo", "rationale": "a toy", "signals": ["toy"]}
+    rt, tx = _local_runtime(*_epic_scripts(_design(scope=demo), {"E1": tickets}))
+    make_planner_node(rt)({"request": "a toy todo"}, config_for("r"))
+    assert "SCOPE: DEMO" in json.dumps(tx.requests[1])
+    rt, tx = _local_runtime(*_epic_scripts(_design(), {"E1": tickets}))
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert "SCOPE: DEMO" not in json.dumps(tx.requests[1])
+
+
+def test_the_model_writes_no_field_the_assembly_derives() -> None:
+    ticket = planner.PLAN_SCHEMA["properties"]["tickets"]["items"]
+    scenario = ticket["properties"]["scenarios"]["items"]
+    interface = planner.PLAN_SCHEMA["properties"]["interfaces"]["items"]
+    stack = planner.PLAN_SCHEMA["properties"]["stack"]
+    assert "entrypoint" not in ticket["required"] and "reads" not in ticket["required"]
+    assert "security_abuse" not in scenario["required"]
+    assert {"inputs", "outputs", "errors"}.isdisjoint(interface["required"])
+    assert {"contracts_file", "harness_files"}.isdisjoint(stack["required"])
+    constraint = planner.PLAN_SCHEMA["properties"]["pinned_constraints"]["items"]
+    assert constraint["required"] == ["text"]
+    assert "id" not in planner.PLAN_SCHEMA["properties"]["adrs"]["items"]["required"]
+    # A minimal ticket: no step module, entrypoint, security flag or generated deps.
+    bare = {
+        "id": "store",
+        "title": "Store",
+        "specialty": "data",
+        "difficulty": "standard",
+        "depends_on": [],
+        "files": ["todo/store.py"],
+        "implements": ["TodoStore.add", "TodoStore.list"],
+        "scenarios": [
+            {"id": "AC-1", "given": ["g"], "when": ["w"], "then": ["t"], "covers": ["MH-1"]}
+        ],
+    }
+    cas = ArtifactStore()
+    interfaces = [
+        {"name": n, "kind": "type", "signature": f"{n.replace('.', '_')} = int", "description": "d"}
+        for n in ("TodoStore.add", "TodoStore.list")
+    ]
+    rt, _ = runtime_for(_plan(tickets=[bare], interfaces=interfaces), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    by_id = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert by_id["store"].files == ("todo/store.py", "tests/test_store.py")
+    assert "todo/__init__.py" in by_id["contracts"].files
+    assert by_id["store"].depends_on == ("contracts",)
+    assert not any("neither a test ticket" in c for c in writes["agent_journal"][0].concerns)
+
+
 def test_multi_epic_plan_makes_one_ticket_call_per_epic_with_namespaced_ids() -> None:
     plan, replies = multi_epic_plan()
     cas = ArtifactStore()
@@ -1315,9 +1436,8 @@ def test_cross_epic_links_never_count_as_test_coverage() -> None:
     tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
     assert tickets["E2-T01"].depends_on == ("E1-T02",)  # ordered after E1 ...
     assert tickets["E2-T01"].scenario_ids == ()  # ... but covers none of its scenarios
-    assert "Ticket E1-T02 has scenarios but neither a test ticket nor a test file of its own." in (
-        writes["agent_journal"][0].concerns
-    )
+    # On pytest-bdd E1-T02 binds its own scenarios from the step module added for it.
+    assert "tests/test_e1_t02.py" in tickets["E1-T02"].files
 
 
 def test_a_feature_ticket_with_its_own_test_file_needs_no_test_ticket() -> None:

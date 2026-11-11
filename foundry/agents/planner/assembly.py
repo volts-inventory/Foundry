@@ -35,6 +35,7 @@ from foundry.agents.planner.folds import (
 from foundry.agents.planner.sizing import ALL_CLOUD, Ceilings
 from foundry.agents.planner.stack import _attach_generated, _python_deps_ticket
 from foundry.base_tree import BaseView
+from foundry.gates.profiles import pytest_bdd_binds
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import StackDecision, Ticket
 from foundry.schemas.product import AcceptanceCriterion, IntentBrief
@@ -107,6 +108,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         epics=frame.epics,
         overflow=over,
         reserved=base.feature_names if base is not None else frozenset(),
+        binds_own=pytest_bdd_binds(frame.stack),
     )
     generated = (
         *frame.generated,

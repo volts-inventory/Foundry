@@ -1116,6 +1116,103 @@ def test_a_local_demo_design_caps_the_epic_calls_criteria() -> None:
     assert "SCOPE: DEMO" not in json.dumps(tx.requests[1])
 
 
+def test_a_local_ticket_level_finding_naming_no_epic_reruns_the_epics_not_the_design() -> None:
+    uncovered = json.loads(json.dumps(PLAN["tickets"]))
+    uncovered[1]["scenarios"][0]["covers"] = []  # MH-1 / SC-1 covered by no scenario
+    good = {"tickets": PLAN["tickets"], "criteria_review": _review()}
+    rt, tx = _local_runtime(
+        ResponseScript("{}", match=_match(DELTA_SOP_KEY)),
+        ResponseScript(json.dumps(good), match=_match("YOUR EPIC: E1", "Plan check findings")),
+        ResponseScript(
+            json.dumps({"tickets": uncovered, "criteria_review": _review()}),
+            match=_match("YOUR EPIC: E1"),
+        ),
+        ResponseScript(json.dumps(_design()), match=_match(PLANNER_SOP_KEY)),
+    )
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    shapes = [
+        "design"
+        if "write the DESIGN" in json.dumps(r)
+        else "delta"
+        if DELTA_SOP_KEY in json.dumps(r)
+        else _epic_of(r)
+        for r in tx.requests
+    ]
+    # The delta is tried first; its rejection redoes E1's call on the same design.
+    assert shapes == ["design", "E1", "delta", "E1"]
+    assert "MH-1" in json.dumps(tx.requests[-1])
+    assert "2 -> 0 finding(s)" in writes["agent_journal"][0].summary
+
+
+def _code_interfaces() -> list[dict[str, Any]]:
+    return [
+        {"name": n, "kind": "type", "signature": f"{n.replace('.', '_')} = int", "description": "d"}
+        for n in ("TodoStore.add", "TodoStore.list")
+    ]
+
+
+@pytest.mark.parametrize(
+    ("interfaces", "contracts_file", "brief"),
+    [
+        (None, "", None),  # no code-kind contract: no contracts ticket, no mention
+        (_code_interfaces(), "", "contracts.py"),  # the language default
+        (_code_interfaces(), "todo/contracts.py", "todo/contracts.py"),
+    ],
+)
+def test_the_epic_brief_names_the_contracts_file_only_when_its_ticket_is_generated(
+    interfaces: list[dict[str, Any]] | None, contracts_file: str, brief: str | None
+) -> None:
+    tickets = {"tickets": PLAN["tickets"], "criteria_review": _review()}
+    design = _design(stack={**PYTHON_STACK, "contracts_file": contracts_file})
+    if interfaces is not None:
+        design["interfaces"] = interfaces
+    cas = ArtifactStore()
+    rt, tx = _local_runtime(*_epic_scripts(design, {"E1": tickets}), cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    epic = json.dumps(tx.requests[1])
+    contracts = [t for t in _bodies(cas, writes, "ticket") if t.id == "contracts"]
+    if brief is None:
+        assert "contracts file (written for you" not in epic and not contracts
+    else:
+        assert f"contracts file (written for you, never list it in files): {brief}" in epic
+        assert contracts and contracts[0].files[0] == brief
+
+
+def test_the_contracts_file_resolves_plan_then_base_then_language_default() -> None:
+    from foundry.agents.planner.stack import contracts_paths
+    from foundry.base_tree import BaseView
+
+    base = BaseView(
+        files=("app/contracts.py",), features={}, contracts_files={"app/contracts.py": ""}
+    )
+    assert contracts_paths({"contracts_file": "x/c.py"}, "python", base) == ("x/c.py",)
+    assert contracts_paths({}, "python", base) == ("app/contracts.py",)
+    assert contracts_paths({}, "python") == ("contracts.py",)
+    assert contracts_paths({}, "cobol") == ()
+
+
+def test_the_untested_note_is_spared_only_tickets_the_fold_binds() -> None:
+    seq = Seq("r", 1, 1, NODE_ID, 0)
+    scenario = {"id": "AC-1", "given": ["g"], "when": ["w"], "then": ["t"]}
+    raw = [
+        {"id": "store", "specialty": "data", "files": ["todo/store.py"], "scenarios": [scenario]},
+        {
+            "id": "accept",
+            "specialty": "backend",
+            "files": [],
+            "scenarios": [{**scenario, "id": "AC-2"}],
+        },
+    ]
+
+    def untested(binds_own: bool) -> set[str]:
+        _, _, concerns = _build_tickets(raw, seq, seq, set(), binds_own=binds_own)
+        return {c.split()[1] for c in concerns if "neither a test ticket" in c}
+
+    # The file-less ticket gets no step module from _own_scenario_bindings.
+    assert untested(binds_own=True) == {"accept"}
+    assert untested(binds_own=False) == {"store", "accept"}
+
+
 def test_the_model_writes_no_field_the_assembly_derives() -> None:
     ticket = planner.PLAN_SCHEMA["properties"]["tickets"]["items"]
     scenario = ticket["properties"]["scenarios"]["items"]

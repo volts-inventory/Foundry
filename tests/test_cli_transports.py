@@ -445,6 +445,55 @@ def test_openai_verdict_channel_sends_native_json_schema_format() -> None:
     assert schema["properties"]["status"]["enum"] == ["approve", "request-changes"]
 
 
+def _every_object(schema: Any) -> list[dict[str, Any]]:
+    if isinstance(schema, list):
+        return [o for s in schema for o in _every_object(s)]
+    if not isinstance(schema, dict):
+        return []
+    own = [schema] if isinstance(schema.get("properties"), dict) else []
+    return own + [o for v in schema.values() for o in _every_object(v)]
+
+
+def test_openai_strict_schema_requires_every_property_and_hides_the_nulls() -> None:
+    from foundry.agents.planner import PLAN_SCHEMA
+
+    ticket = {
+        "id": "store",
+        "title": "Store",
+        "specialty": "data",
+        "difficulty": "standard",
+        "depends_on": [],
+        "files": ["store.py"],
+        "scenarios": [{"id": "AC-1", "given": ["g"], "when": ["w"], "then": ["t"], "covers": []}],
+        "entrypoint": None,  # an optional field the strict grammar made the model write
+        "reads": None,
+    }
+    client = _openai_client(content=json.dumps({"tickets": [ticket]}))
+    proxy = build_backend("openai", client=client)
+    result = proxy.complete(
+        "planner",
+        "T1",
+        "SYS",
+        [{"role": "user", "content": "x"}],
+        purpose="ideation",
+        schema=PLAN_SCHEMA,
+    )
+    sent = client.chat.completions.create.calls[0]["response_format"]["json_schema"]
+    assert sent["strict"] is True
+    objects = _every_object(sent["schema"])
+    assert objects and all(set(o["required"]) == set(o["properties"]) for o in objects)
+    props = sent["schema"]["properties"]["tickets"]["items"]["properties"]
+    assert props["entrypoint"]["type"] == ["boolean", "null"]
+    assert props["id"]["type"] == "string"  # a required field stays non-null
+    scenario = props["scenarios"]["items"]["properties"]
+    assert scenario["criticality"]["enum"][-1] is None
+    # The proxy's own schema is left as it was, and the reply reads as if omitted.
+    assert "entrypoint" not in PLAN_SCHEMA["properties"]["tickets"]["items"]["required"]
+    [parsed] = (result.parsed or {})["tickets"]
+    assert "entrypoint" not in parsed and "reads" not in parsed
+    assert parsed["files"] == ["store.py"]
+
+
 def test_openai_gate_call_pins_effort_not_temperature() -> None:
     # gpt-5 is a reasoning model: a deterministic gate call pins `effort` (sent as
     # reasoning_effort) and NEVER a temperature it would reject.

@@ -108,7 +108,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         epics=frame.epics,
         overflow=over,
         reserved=base.feature_names if base is not None else frozenset(),
-        binds_own=pytest_bdd_binds(frame.stack),
+        # An undecided stack (None) may yet be one the folds bind nothing on.
+        binds_own=frame.stack is not None and pytest_bdd_binds(frame.stack),
     )
     generated = (
         *frame.generated,

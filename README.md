@@ -331,6 +331,7 @@ uv run pytest -n auto -q                                  # full suite (slow e2e
 | `FOUNDRY_MAX_SLOTS` | Parallelism ceiling | auto |
 | `FOUNDRY_COST_CAP_MICROUSD` / `FOUNDRY_TOKEN_CAP` | Spend / token envelope | — |
 | `FOUNDRY_STATE_DIR` | Durable state dir | in-memory |
+| `FOUNDRY_PLAN_REUSE` | `0` stops a fresh run from replaying the plan of an identical earlier run that passed (needs a state dir; `scripts/bench.py` turns it off unless `--plan-reuse`) | on |
 | `FOUNDRY_GATE_SANDBOX` | `inprocess` opts out of the namespace sandbox | sandbox |
 | `FOUNDRY_ALLOW_UNSANDBOXED_INSTALL` | `1` lets the networked install step run under the `inprocess` opt-out (refused otherwise) | off |
 | `WORKSHOP_HOST` / `WORKSHOP_PORT` | UI bind address / port | `127.0.0.1` / `8765` |

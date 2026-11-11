@@ -43,6 +43,12 @@ def _patchable(
     return not fit.overflow and set(findings) <= set(fit.blocking)
 
 
+def _ticket_level(findings: Iterable[str], items: Sequence[dict[str, Any]], frame: _Frame) -> bool:
+    """True when the tickets alone reproduce every finding: none comes of the
+    contracts, their compile or the run command."""
+    return bool(items) and set(findings) <= set(_assemble(items, _ticket_frame(frame)).blocking)
+
+
 def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
     """What the Spec gate checks of the criteria themselves, beside the critique,
     run over the entries it would materialize (``gate_wiring.materialize._criteria_list``)."""

@@ -52,11 +52,13 @@ DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
 Effort = Literal["low", "medium", "xhigh"]
 EFFORT_LEVELS: tuple[Effort, ...] = ("low", "medium", "xhigh")
 
-# Difficulty -> the local thinking level its coding session runs at.
+# Difficulty -> the local thinking level its coding session runs at. A complex
+# ticket's first attempt stays at medium: xhigh doubled local dice's build time
+# (51 xhigh calls) without fewer fix passes, so it is kept for retries.
 TICKET_EFFORT: dict[Difficulty, Effort] = {
     Difficulty.TRIVIAL: "low",
     Difficulty.STANDARD: "medium",
-    Difficulty.COMPLEX: "xhigh",
+    Difficulty.COMPLEX: "medium",
 }
 
 

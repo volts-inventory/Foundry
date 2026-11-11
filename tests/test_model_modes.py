@@ -906,7 +906,7 @@ def test_a_packets_effort_reaches_the_proxy_closures_but_not_the_prompt() -> Non
 
 
 def test_ticket_and_fixer_thinking_levels() -> None:
-    assert [ticket_effort(d) for d in Difficulty] == ["low", "medium", "xhigh"]
+    assert [ticket_effort(d) for d in Difficulty] == ["low", "medium", "medium"]
     assert [ticket_effort(d, retry=True) for d in Difficulty] == ["medium", "xhigh", "xhigh"]
     assert [fix_effort(n) for n in (0, 1, 2, 5)] == ["medium", "medium", "xhigh", "xhigh"]
 

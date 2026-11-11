@@ -82,6 +82,7 @@ _THINK_BLOCK = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 # Chat roles some local chat templates reject (Qwen3.8 has no developer turn).
 _LOCAL_ROLES = {"developer": "system"}
 _REASONING_MEMORY = 1024
+_CHARS_PER_TOKEN = 4  # estimate when the server reports no reasoning_tokens
 # The sampling fields Ollama's /v1/chat/completions maps onto its options. Its Go
 # decoder silently drops the rest (top_k, min_p, repeat_penalty), so those ride as
 # extra body fields: honoured by llama.cpp / vLLM / LM Studio, while on Ollama the
@@ -113,6 +114,22 @@ def _split_thinking(text: str) -> tuple[str, str]:
         head, _, rest = rest.rpartition("</think>")
         parts.insert(0, head.replace("<think>", "").strip())
     return "\n\n".join(p for p in parts if p), rest.strip()
+
+
+def _token_split(usage: Any, reasoning: str, text: str) -> tuple[int, int]:
+    """``(think, answer)`` output tokens. Uses the server's
+    ``completion_tokens_details.reasoning_tokens`` when it reports one; otherwise
+    an ESTIMATE from the reasoning's character length at ~4 chars/token (the
+    answer is the rest of ``completion_tokens``, or the text's estimate)."""
+    total = _as_int(getattr(usage, "completion_tokens", 0)) if usage else 0
+    details = getattr(usage, "completion_tokens_details", None) if usage else None
+    think = _as_int(getattr(details, "reasoning_tokens", 0)) if details else 0
+    if not think:
+        think = len(reasoning) // _CHARS_PER_TOKEN
+    if total:
+        think = min(think, total)
+        return think, total - think
+    return think, len(text) // _CHARS_PER_TOKEN
 
 
 def _turn_key(content: Any, call_ids: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -296,6 +313,7 @@ class LocalOpenAITransport:
             stop_reason=str(getattr(choice, "finish_reason", "") or "stop") if choice else "stop",
             tool_calls=_chat_tool_calls(message) if message is not None else (),
             reasoning=reasoning,
+            token_split=_token_split(usage, reasoning, text),
         )
         self.remember(out)
         return out

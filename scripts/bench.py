@@ -13,7 +13,11 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from foundry.proxy.model_provider_proxy import EFFORT_COUNT_PREFIX
+from foundry.proxy.model_provider_proxy import (
+    ANSWER_COUNT_PREFIX,
+    EFFORT_COUNT_PREFIX,
+    THINK_COUNT_PREFIX,
+)
 
 CASES = {
     "dice": "a Python command-line tool that rolls dice given notation like 2d6+3",
@@ -153,8 +157,17 @@ def summarize_case(root: Path) -> dict[str, Any]:
             for k, v in counts.items()
             if k.startswith(EFFORT_COUNT_PREFIX)
         },
-        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(EFFORT_COUNT_PREFIX)},
+        "think_tokens_by_node": _by_node(counts, THINK_COUNT_PREFIX),
+        "answer_tokens_by_node": _by_node(counts, ANSWER_COUNT_PREFIX),
+        "hint_counts": {k: v for k, v in counts.items() if not k.startswith(_SPLIT_PREFIXES)},
     }
+
+
+_SPLIT_PREFIXES = (EFFORT_COUNT_PREFIX, THINK_COUNT_PREFIX, ANSWER_COUNT_PREFIX)
+
+
+def _by_node(counts: dict[str, int], prefix: str) -> dict[str, int]:
+    return {k.removeprefix(prefix): v for k, v in counts.items() if k.startswith(prefix)}
 
 
 def render(summary: dict[str, dict[str, Any]]) -> str:
@@ -178,6 +191,14 @@ def render(summary: dict[str, dict[str, Any]]) -> str:
         rows.append(f"{case} hints: {fired}")
         if efforts := s.get("calls_by_effort"):
             rows.append(f"{case} effort: " + ", ".join(f"{k}={v}" for k, v in efforts.items()))
+        think = s.get("think_tokens_by_node") or {}
+        answer = s.get("answer_tokens_by_node") or {}
+        if think or answer:
+            nodes = sorted(think.keys() | answer.keys())
+            rows.append(
+                f"{case} tokens: "
+                + ", ".join(f"{n} think={think.get(n, 0)}/answer={answer.get(n, 0)}" for n in nodes)
+            )
     return "\n".join(rows)
 
 

@@ -147,3 +147,14 @@ def test_hint_counts_sum_across_resumed_segments(
     assert json.loads((root / "run.json").read_text())["hint_counts"] == want
     assert bench.summarize_case(root)["hint_counts"] == want
     assert "dice hints: fix_stop.time=1, test.shared_state=3" in capsys.readouterr().out
+
+
+def test_summarize_case_splits_think_and_answer_tokens_per_node(tmp_path: Path) -> None:
+    root = _case(tmp_path, 0, True)
+    counts = {"tokens.think.planner": 41000, "tokens.answer.planner": 9000, "gate.reuse.build": 3}
+    meta = {"wall_s": 1.0, "exit_code": 0, "hint_counts": counts}
+    (root / "run.json").write_text(json.dumps(meta))
+    s = bench.summarize_case(root)
+    assert s["think_tokens_by_node"] == {"planner": 41000}
+    assert s["hint_counts"] == {"gate.reuse.build": 3}
+    assert "dice tokens: planner think=41000/answer=9000" in bench.render({"dice": s})

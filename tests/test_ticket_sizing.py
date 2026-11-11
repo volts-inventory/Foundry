@@ -432,7 +432,7 @@ def test_the_ceiling_follows_where_each_difficultys_tier_runs() -> None:
     )
     assert "trivial / standard tickets run on a local model: at most 4 work files, 20" in text
     assert "a web layer whose routes and templates fit stays ONE ticket" in text
-    assert "split only when a ticket would exceed the ceiling" in text
+    assert "only when it would exceed the ceiling" in text
     assert "Every feature ticket owns at least one scenario" in text
 
 
@@ -473,14 +473,14 @@ def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
 def test_the_prompts_size_tickets_and_name_them_for_their_domain() -> None:
     assert "FEWER, LARGER" not in SOP
     assert "finely" not in SOP
-    assert "Plan one ticket per layer or concern of an epic" in SOP
-    assert "split a ticket only when it would exceed the TICKET SIZE ceiling" in SOP
+    assert "Plan one ticket per epic, its data" in SOP
+    assert "only when it would exceed the TICKET SIZE ceiling" in SOP
     assert "never split a web layer per page when it fits" in SOP
     assert "A feature ticket owns at least one scenario" in SOP
     assert "one epic per domain area of the product, no finer" in SOP
     assert "never add an epic to keep tickets small" in SOP
     assert "{MAX_TICKETS}" not in SOP
-    assert "Plan one ticket per layer or concern of an epic" in EPIC_SOP
+    assert "Plan one ticket per epic, its data" in EPIC_SOP
     assert "Never split off work that only one other ticket uses" in SOP
     assert "never after a ticket number (T3, T3.feature, test_T2.py)" in SOP
     assert "name each ticket after its domain (catalog, cart-api; never T01)" in EPIC_SOP

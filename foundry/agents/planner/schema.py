@@ -89,8 +89,8 @@ _DEFAULT_CONTRACTS_FILE: dict[str, str] = {
 
 
 _TICKET_RULES = (
-    "Cover every case the request needs. Plan one ticket per layer or concern of an "
-    "epic (its data, its service, its web layer), and split a ticket only when it "
+    "Cover every case the request needs. Plan one ticket per epic, its data, "
+    "service and web code together, and split it (by layer first) only when it "
     "would exceed the TICKET SIZE ceiling for the model its difficulty runs on (the "
     "numbers for this run follow the request; checked: a ticket over it FAILS the "
     "Spec gate and must be split). Templates and static assets count only toward its "

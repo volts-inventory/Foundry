@@ -18,6 +18,13 @@ from typing import TYPE_CHECKING, Any, cast
 from foundry import progress, telemetry
 from foundry.agents import AgentRuntime
 from foundry.agents.planner import TICKET_KIND
+from foundry.agents.planner.reuse import (
+    PLANS_DIR,
+    PlanReuse,
+    plan_key,
+    promote_if_checked,
+    reuse_enabled,
+)
 from foundry.cli import defaults, doubles, invoke, output, wiring
 from foundry.cli import result as cli_result
 from foundry.cli import spec as cli_spec
@@ -117,6 +124,47 @@ def _change_seed(base_root: str, *, has_stack: bool) -> FactoryState:
 
         seed["stack"] = StackDecision.model_validate(recorded)
     return seed
+
+
+def _plan_reuse(
+    state_dir: Path,
+    run_key: str,
+    *,
+    request: str,
+    spec: str,
+    scope: str,
+    profile: str | None,
+    level_table: Mapping[str, Level] | None,
+    backend: str,
+    proxy: Any,
+    ticket_tiers: Mapping[Any, str] | None,
+) -> PlanReuse:
+    """This run's checked-plan reuse, keyed on every planner input of the run."""
+    from foundry.agents.planner import TIER
+    from foundry.toolchains import available_toolchains
+
+    stack: dict[str, Any] = {"profile": profile}
+    if profile is not None and profile != "auto":
+        from foundry.gates.profiles import PROFILES, pinned_stack
+
+        if profile in PROFILES:
+            stack["pinned"] = pinned_stack(profile).model_dump()
+    level = level_table.get(TIER) if level_table is not None else None
+    key = plan_key(
+        request=request,
+        spec=spec,
+        scope=scope,
+        stack=stack,
+        languages=frozenset(t.language for t in available_toolchains()),
+        local_tiers=proxy.local_tiers,
+        planner_level=(
+            {"backend": level.backend, "model": level.model}
+            if level is not None
+            else {"backend": backend, "model": proxy.tier_models.get(TIER)}
+        ),
+        ticket_tiers=ticket_tiers,
+    )
+    return PlanReuse(state_dir / PLANS_DIR, key, run_key)
 
 
 def fix_until_cap_for(
@@ -376,6 +424,20 @@ def run(
         run_key = hashlib.sha256(thread_id.encode()).hexdigest()[:16]
         run_dir = Path(resolved_state_dir) / "calls" / run_key
         proxy.call_cache = run_dir
+        # A change build plans against its base tree, which the key does not carry.
+        if base_root is None and reuse_enabled():
+            rt.plan_reuse = _plan_reuse(
+                Path(resolved_state_dir),
+                run_key,
+                request=request,
+                spec=spec_text or "",
+                scope=scope,
+                profile=profile,
+                level_table=level_table,
+                backend=backend,
+                proxy=proxy,
+                ticket_tiers=ticket_tiers,
+            )
     meter: TokenMeter | None = None
     if token_cap is not None or time_cap_minutes is not None or cancel is not None:
         meter = TokenMeter(
@@ -449,6 +511,7 @@ def run(
         telemetry.counting() as fire_counts,
         tempfile.TemporaryDirectory(prefix="foundry-cli-src-") as source_dir,
     ):
+        app: Any = None
         try:
             if base_root is not None:
                 from foundry.base_tree import copy_base_tree
@@ -655,6 +718,11 @@ def run(
                     )
                 raise
         finally:
+            if rt.plan_reuse is not None and app is not None:
+                # Promoted however the run ends (halted, capped, stopped) once its
+                # Spec gate passed: that is when its plan is a checked one.
+                with contextlib.suppress(OSError):
+                    promote_if_checked(rt.plan_reuse, invoke._prior_values(app, config))
             if run_dir is not None:
                 # This process's counts only, written even when the run stops or
                 # raises: a caller resuming a run (scripts/bench.py) sums segments.

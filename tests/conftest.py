@@ -61,3 +61,5 @@ def _in_process_test_gate(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("FOUNDRY_LOCAL_THINKING", raising=False)
     # And a fix-until-cap override would change every run's fix bound.
     monkeypatch.delenv("FOUNDRY_FIX_UNTIL_CAP", raising=False)
+    # And a plan-reuse opt-out would turn off what tests/test_plan_reuse.py checks.
+    monkeypatch.delenv("FOUNDRY_PLAN_REUSE", raising=False)

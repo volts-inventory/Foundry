@@ -1431,3 +1431,42 @@ def test_concurrent_remember_keeps_the_reasoning_memory_bounded() -> None:
     for t in threads:
         t.join()
     assert len(transport._reasoning) == lt._REASONING_MEMORY
+
+
+def test_token_split_uses_the_servers_reasoning_tokens_when_reported() -> None:
+    from foundry.proxy.local_transport import _token_split
+
+    usage = SimpleNamespace(
+        completion_tokens=1000, completion_tokens_details=SimpleNamespace(reasoning_tokens=800)
+    )
+    assert _token_split(usage, "x" * 40, "answer") == (800, 200)
+
+
+def test_token_split_estimates_from_chars_when_the_server_reports_none() -> None:
+    from foundry.proxy.local_transport import _token_split
+
+    usage = SimpleNamespace(completion_tokens=1000)
+    assert _token_split(usage, "x" * 3200, "answer") == (800, 200)
+    assert _token_split(None, "x" * 400, "y" * 80) == (100, 20)  # no usage at all
+    assert _token_split(SimpleNamespace(completion_tokens=10), "x" * 400, "") == (10, 0)
+
+
+def test_the_local_transport_stamps_the_split_on_its_response() -> None:
+    usage = SimpleNamespace(
+        prompt_tokens=5,
+        completion_tokens=100,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=60),
+    )
+    message = SimpleNamespace(content='{"a": 1}', reasoning="thought")
+    reply = SimpleNamespace(
+        id="r",
+        model="m",
+        choices=[SimpleNamespace(message=message, finish_reason="stop")],
+        usage=usage,
+    )
+    completions = SimpleNamespace(create=lambda **_p: reply)
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    out = LocalOpenAITransport(client=client).send(
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    )
+    assert out.token_split == (60, 40)

@@ -419,6 +419,8 @@ _LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, 
 # Run fire count of each local attempt sent (not replayed), by the thinking level it
 # was sent at (a retry may lower it) or "off".
 EFFORT_COUNT_PREFIX = "effort."
+THINK_COUNT_PREFIX = "tokens.think."
+ANSWER_COUNT_PREFIX = "tokens.answer."
 # A prompt the server saw as under this share of our estimate was cut to fit its
 # context window (Ollama truncates silently). Chars/4 under-counts code and JSON,
 # so a healthy call reads at or above 1.
@@ -673,6 +675,8 @@ class ProviderResponse:
     # A local thinking model's reasoning, kept out of ``text`` so it never reaches
     # the JSON parse; the local transport replays it on the session's next turn.
     reasoning: str = ""
+    # Local calls: output tokens split into thinking and answer (None: not measured).
+    token_split: tuple[int, int] | None = None
 
 
 class ProviderTransport(Protocol):
@@ -1255,7 +1259,13 @@ class ModelProviderProxy:
             progress.log(f"start {label}")
             started = time.monotonic()
             response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
-            progress.finished(label, started, response.usage, self.token_meter)
+            progress.finished(
+                label, started, response.usage, self.token_meter, split=response.token_split
+            )
+            if local and response.token_split is not None:
+                think, answer = response.token_split
+                telemetry.count(f"{THINK_COUNT_PREFIX}{node_id}", think)
+                telemetry.count(f"{ANSWER_COUNT_PREFIX}{node_id}", answer)
             self._cache_put(request, schema, response)
             if local:
                 truncated = truncation_warning(request, response.usage)

@@ -144,3 +144,17 @@ def test_run_settings_override_the_env_and_log_cb_gets_the_runs_lines(
     # The model calls run in the graph's node threads; their lines reach the run's sink.
     assert any("start model call:" in line for line in lines)
     assert any("done  model call:" in line for line in lines)
+
+
+def test_finished_shows_the_think_answer_split_only_when_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("FOUNDRY_PROGRESS", raising=False)
+    usage = {"input_tokens": 0, "output_tokens": 50_000}
+    lines: list[str] = []
+    with progress.sink(lines.append):
+        now = time.monotonic()
+        progress.finished("model call: planner", now, usage, None, split=(41_000, 9_000))
+        progress.finished("model call: planner", now, usage, None)
+    assert "50k tokens (think 41k, answer 9k)" in lines[0]
+    assert "think" not in lines[1]

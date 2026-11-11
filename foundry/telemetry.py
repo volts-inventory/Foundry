@@ -27,9 +27,9 @@ class Counts:
         self._lock = threading.Lock()
         self._counts: Counter[str] = Counter()
 
-    def add(self, name: str) -> None:
+    def add(self, name: str, n: int = 1) -> None:
         with self._lock:
-            self._counts[name] += 1
+            self._counts[name] += n
 
     def snapshot(self) -> dict[str, int]:
         with self._lock:
@@ -49,10 +49,10 @@ def counting() -> Iterator[Counts]:
         _COUNTS.reset(token)
 
 
-def count(name: str) -> None:
+def count(name: str, n: int = 1) -> None:
     counts = _COUNTS.get()
     if counts is not None:
-        counts.add(name)
+        counts.add(name, n)
 
 
 def counted(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:

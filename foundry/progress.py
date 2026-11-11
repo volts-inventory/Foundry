@@ -52,7 +52,13 @@ def log(message: str, *, stderr: bool | None = None) -> None:
             cb(line)
 
 
-def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter: Any) -> None:
+def finished(
+    label: str,
+    started: float,
+    usage: Mapping[str, Any] | None,
+    meter: Any,
+    split: tuple[int, int] | None = None,
+) -> None:
     """``label`` done in Ns, with this call's weighted tokens and the run total."""
     if _SINK.get() is None and not enabled():
         return
@@ -61,6 +67,8 @@ def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter:
     secs = time.monotonic() - started
     took = f"{secs / 60:.1f}m" if secs >= 90 else f"{secs:.0f}s"
     tokens = f", {weighted_tokens(usage) / 1000:.0f}k tokens" if usage else ""
+    if usage and split is not None:
+        tokens += f" (think {split[0] / 1000:.0f}k, answer {split[1] / 1000:.0f}k)"
     total = ""
     if meter is not None:
         of = f" of {meter.cap / 1e6:.1f}M" if meter.cap is not None else ""

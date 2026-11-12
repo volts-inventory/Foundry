@@ -590,7 +590,7 @@ class LaunchGate:
             "probes": [list(p) for p in t.probes],
             "posts": list(t.posts),
             "runs": list(t.runs),
-            "launch_id": secrets.token_hex(16),
+            "launch_id": (launch_id := secrets.token_hex(16)),
         }
         try:
             rc, out, err = ground_untrusted(
@@ -601,7 +601,7 @@ class LaunchGate:
                 binds=self._pyenv.binds if self._pyenv is not None else (),
             )
         except subprocess.TimeoutExpired as exc:
-            _reap_escapees(cfg["launch_id"])
+            _reap_escapees(launch_id)
             return observe(
                 self.name,
                 structured={"cmd": t.cmd, "timed_out_s": self._timeout_s},
@@ -611,7 +611,7 @@ class LaunchGate:
                 ),
                 seal_key=self._seal_key,
             )
-        _reap_escapees(cfg["launch_id"])
+        _reap_escapees(launch_id)
         result = _driver_result(out)
         if result is None:
             return observe(

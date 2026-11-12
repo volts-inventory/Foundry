@@ -1,7 +1,7 @@
 """Static app checks: per-language regex rules for app-safety footguns the tests
 rarely catch (a hardcoded secret, a SQLite connection shared across server threads,
 an in-memory database for data that must persist, a fast digest on passwords, SQL
-built by string formatting, a form POST without CSRF).
+built by string formatting, a form POST without CSRF, one data type defined twice).
 
 BUILD runs them over the tree after its commands pass (``BuildGate``): a hit FAILs
 the build with one ``path:line`` finding per hit, each naming its fix, so the fix
@@ -426,6 +426,147 @@ def _go(rel: str, text: str, tree: _Tree) -> Iterator[tuple[int, _Rule]]:
     yield from _like_hits(text, _GO_WILDCARD)
 
 
+# ---- duplicate types ------------------------------------------------------------
+
+_DUPLICATE_TYPE = _Rule(
+    "duplicate-type",
+    "the same data type (same name, same fields) defined in two source files: two "
+    "tickets each wrote their own copy, so values of one are not the other; keep one "
+    "definition (the contracts file's, when either is it) and import it everywhere",
+)
+
+# A type whose fields we can name: `(name, line, fields)`. A type with no fields
+# (a bare error class, a marker) is never compared: same-named ones are too common.
+_TypeDef = tuple[str, int, frozenset[str]]
+
+
+def _py_types(text: str) -> Iterator[_TypeDef]:
+    try:
+        module = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return
+    for node in module.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        fields: set[str] = set()
+        for stmt in node.body:
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                fields.add(stmt.target.id)
+            elif isinstance(stmt, ast.Assign):
+                fields.update(t.id for t in stmt.targets if isinstance(t, ast.Name))
+            elif isinstance(stmt, ast.FunctionDef) and stmt.name == "__init__":
+                for sub in ast.walk(stmt):
+                    targets = (
+                        sub.targets
+                        if isinstance(sub, ast.Assign)
+                        else [sub.target]
+                        if isinstance(sub, ast.AnnAssign)
+                        else []
+                    )
+                    fields.update(
+                        t.attr
+                        for t in targets
+                        if isinstance(t, ast.Attribute)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id == "self"
+                    )
+        fields.discard("__slots__")
+        if fields:
+            yield node.name, node.lineno, frozenset(fields)
+
+
+def _brace_body(text: str, start: int) -> str:
+    """The text between the ``{`` at/after ``start`` and its matching ``}``."""
+    open_at = text.find("{", start)
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1 : i]
+    return text[open_at + 1 :]
+
+
+def _top_level_lines(body: str) -> Iterator[str]:
+    """``body``'s lines at brace depth 0 (a member, not a method's statements)."""
+    depth = 0
+    for line in body.splitlines():
+        if depth == 0:
+            yield line
+        depth += line.count("{") - line.count("}")
+
+
+_JS_TYPE = re.compile(
+    r"^[ \t]*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?"
+    r"(?:class|interface)\s+([A-Za-z_$][\w$]*)[^{\n]*\{",
+    re.MULTILINE,
+)
+_JS_FIELD = re.compile(
+    r"^\s*(?:(?:public|private|protected|readonly|static|declare)\s+)*#?([A-Za-z_$][\w$]*)"
+    r"[?!]?\s*(?::|=(?!=|>)|;|,|$)"
+)
+_JS_THIS_FIELD = re.compile(r"\bthis\.([A-Za-z_$][\w$]*)\s*=(?!=)")
+_GO_TYPE = re.compile(r"^type\s+([A-Za-z_]\w*)\s+(struct|interface)\s*\{", re.MULTILINE)
+_GO_FIELD = re.compile(r"^\s*([A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s+[^\s/(]")
+_GO_METHOD = re.compile(r"^\s*([A-Za-z_]\w*)\s*\(")
+
+
+def _js_types(text: str) -> Iterator[_TypeDef]:
+    for m in _JS_TYPE.finditer(text):
+        body = _brace_body(text, m.end() - 1)
+        fields = {
+            f.group(1)
+            for line in _top_level_lines(body)
+            if (f := _JS_FIELD.match(_strip_comment(line, "//"))) is not None
+        }
+        fields.update(_JS_THIS_FIELD.findall(body))
+        fields.discard("constructor")
+        if fields:
+            yield m.group(1), _line_of(text, m.start(1)), frozenset(fields)
+
+
+def _go_types(text: str) -> Iterator[_TypeDef]:
+    for m in _GO_TYPE.finditer(text):
+        body = _brace_body(text, m.end() - 1)
+        fields: set[str] = set()
+        for line in _top_level_lines(body):
+            line = _strip_comment(line, "//")
+            if m.group(2) == "interface":
+                if (g := _GO_METHOD.match(line)) is not None:
+                    fields.add(g.group(1))
+            elif (g := _GO_FIELD.match(line)) is not None:
+                fields.update(n.strip() for n in g.group(1).split(","))
+        if fields:
+            yield m.group(1), _line_of(text, m.start(1)), frozenset(fields)
+
+
+_TYPE_SCANNERS: dict[str, Callable[[str], Iterator[_TypeDef]]] = {
+    "python": _py_types,
+    "javascript": _js_types,
+    "go": _go_types,
+}
+
+
+def _duplicate_types(lang: str, sources: list[tuple[str, str]]) -> list[str]:
+    """One finding per source file redefining a type (same name and field set) an
+    earlier file already defines. A re-export (an import) defines nothing, and test
+    code is never among ``sources``."""
+    first: dict[tuple[str, frozenset[str]], str] = {}
+    out: list[str] = []
+    for rel, text in sources:
+        for name, line, fields in _TYPE_SCANNERS[lang](text):
+            other = first.setdefault((name, fields), rel)
+            if other != rel:
+                out.append(
+                    f"app check {_DUPLICATE_TYPE.id}: {rel}:{line}: duplicate type {name} "
+                    f"in {other} and {rel}: import one from the contracts file instead "
+                    "of redefining it"
+                )
+    return out
+
+
 # ---- the scan -------------------------------------------------------------------
 
 
@@ -535,15 +676,33 @@ def app_check_findings(workdir: Path, language: str) -> tuple[str, ...]:
                 continue
             seen.add((rel, line, rule.id))
             out.append(f"app check {rule.id}: {rel}:{line}: {rule.fix}")
+    out += _duplicate_types(lang, sources)
     if len(out) > _MAX_FINDINGS:
         out = [*out[:_MAX_FINDINGS], f"... {len(out) - _MAX_FINDINGS} more app-check hit(s)"]
     return tuple(out)
 
 
 _CONSTRAINT_RULES: dict[str, tuple[_Rule, ...]] = {
-    "python": (_SECRET, _SQLITE_THREADS, _MEMORY_DB, _WEAK_HASH, _SQL_FORMAT, _LIKE_ESCAPE, _CSRF),
-    "javascript": (_SECRET, _MEMORY_DB, _WEAK_HASH, _SQL_FORMAT, _LIKE_ESCAPE, _CSRF),
-    "go": (_SECRET, _MEMORY_DB, _WEAK_HASH, _SQL_FORMAT, _LIKE_ESCAPE),
+    "python": (
+        _SECRET,
+        _SQLITE_THREADS,
+        _MEMORY_DB,
+        _WEAK_HASH,
+        _SQL_FORMAT,
+        _LIKE_ESCAPE,
+        _CSRF,
+        _DUPLICATE_TYPE,
+    ),
+    "javascript": (
+        _SECRET,
+        _MEMORY_DB,
+        _WEAK_HASH,
+        _SQL_FORMAT,
+        _LIKE_ESCAPE,
+        _CSRF,
+        _DUPLICATE_TYPE,
+    ),
+    "go": (_SECRET, _MEMORY_DB, _WEAK_HASH, _SQL_FORMAT, _LIKE_ESCAPE, _DUPLICATE_TYPE),
 }
 
 

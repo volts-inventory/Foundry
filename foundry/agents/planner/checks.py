@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import builtins
+import collections.abc
 import re
 import textwrap
+import typing
 from collections.abc import Collection, Sequence
 from typing import Any
 
@@ -625,6 +627,123 @@ def _stack_command_findings(stack: StackDecision | None) -> tuple[str, ...]:
     return (*_run_findings(stack), *_bdd_findings(stack))
 
 
+# Capitalised names a signature uses that no plan declares: builtins, the standard
+# library and the usual framework types, across the languages. A name missing here
+# that two tickets both use FAILs the plan, so the list leans long.
+_KNOWN_TYPES = frozenset(
+    {
+        *(n for n in dir(builtins) if n[:1].isupper()),
+        *(n for n in dir(typing) if n[:1].isupper()),
+        *(n for n in dir(collections.abc) if n[:1].isupper()),
+        # Python stdlib and frameworks
+        "Random", "Path", "PurePath", "PurePosixPath", "Decimal", "Fraction", "UUID",
+        "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ABC", "ABCMeta", "TextIO",
+        "BinaryIO", "IO", "StringIO", "BytesIO", "Logger", "Thread", "Lock", "RLock",
+        "Queue", "Counter", "OrderedDict", "ChainMap", "Namespace",
+        "ArgumentParser", "Connection", "Cursor", "Engine", "Session",
+        "BaseModel", "Field", "FastAPI", "APIRouter", "Depends", "HTTPException",
+        "Request", "Response", "JSONResponse", "HTMLResponse", "Flask", "Blueprint",
+        "BaseHTTPRequestHandler", "HTTPServer", "ThreadingHTTPServer", "Template",
+        "Jinja2Templates", "TestClient", "Mock", "MagicMock", "Pattern", "Match",
+        "Executor", "Future", "Popen", "CompletedProcess", "Dialect",
+        "ElementTree", "Cookie", "SimpleCookie", "Headers",
+        # TypeScript / JavaScript globals and frameworks
+        "Promise", "Array", "ReadonlyArray", "Record", "Partial", "Required", "Readonly",
+        "Pick", "Omit", "Exclude", "Extract", "NonNullable", "ReturnType", "Parameters",
+        "InstanceType", "Awaited", "Map", "Set", "WeakMap", "WeakSet", "Date", "Error",
+        "TypeError", "RangeError", "SyntaxError", "RegExp", "Function", "Object",
+        "String", "Number", "Boolean", "Symbol", "BigInt", "JSON", "Math", "Uint8Array",
+        "ArrayBuffer", "Buffer", "Blob", "File", "FormData", "URL", "URLSearchParams",
+        "AbortSignal", "AbortController", "EventEmitter", "ReadableStream", "Readable",
+        "Writable", "Express", "Router", "NextFunction", "RequestHandler", "Application",
+        "Server", "IncomingMessage", "ServerResponse", "Database", "Statement",
+        "HTMLElement", "HTMLInputElement", "Document", "Window",
+        "AsyncIterable", "AsyncIterableIterator", "AsyncGenerator", "Generator",
+        "PropertyKey", "Console", "Storage", "Body",
+        # Java / Kotlin / C# / Rust
+        "Integer", "Long", "Double", "Float", "Short", "Byte", "Character", "Void",
+        "List", "ArrayList", "LinkedList", "HashMap", "TreeMap", "HashSet", "TreeSet",
+        "Optional", "Stream", "Collection", "Iterable", "Iterator", "Comparable",
+        "Exception", "RuntimeException", "IllegalArgumentException", "Throwable",
+        "Vec", "Box", "Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock", "Option",
+        "Result", "Ok", "Err", "Some", "None", "Self", "BTreeMap", "Cow",
+        "Duration", "Instant", "SystemTime", "PathBuf", "Display", "Debug", "Clone",
+        "Default", "Serialize", "Deserialize", "Send", "Sync", "Sized", "Into", "From",
+        "IEnumerable", "IList", "Dictionary", "Guid", "DateTime", "TimeSpan", "Int32",
+        "Int64", "Unit", "Any", "Nothing", "MutableList", "MutableMap", "Sequence",
+    }
+)  # fmt: skip
+_TYPE_NAME = re.compile(r"(?<![\w.$])([A-Z][A-Za-z0-9_]*)\b(?!\s*\.)")
+_STRING = re.compile(r"\"\"\".*?\"\"\"|'''.*?'''|\"[^\"\n]*\"|'[^'\n]*'|`[^`]*`", re.DOTALL)
+_COMMENT = re.compile(r"#[^\n]*|//[^\n]*|/\*.*?\*/", re.DOTALL)
+_LITERAL = re.compile(r"\bLiteral\[[^\]]*\]")
+_FORWARD_REF = re.compile(r"""^["']([A-Za-z_]\w*)["']$""")
+_IMPORTED = re.compile(
+    r"^\s*(?:from\s+\S+\s+import\s+\(?([^)\n]+)|import\s+(?:type\s+)?\{([^}]+)\})",
+    re.MULTILINE,
+)
+_PY_ALIAS = re.compile(r"^([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=", re.MULTILINE)
+
+
+def _type_names(signature: str) -> set[str]:
+    """The capitalised, non-builtin type names ``signature`` uses: never its strings
+    (bar a quoted forward reference), comments, ``Literal`` values, an attribute or
+    module-qualified head, an ALL-CAPS constant or a one-letter type parameter."""
+    imported = {
+        n.split(" as ")[-1].strip()
+        for m in _IMPORTED.finditer(signature)
+        for n in (m.group(1) or m.group(2)).split(",")
+    }
+    text = _COMMENT.sub(" ", _LITERAL.sub(" ", signature))
+    text = _STRING.sub(
+        lambda m: f" {ref.group(1)} " if (ref := _FORWARD_REF.match(m.group())) else " ", text
+    )
+    return {
+        n
+        for n in _TYPE_NAME.findall(text)
+        if len(n) > 1 and not n.isupper() and n not in _KNOWN_TYPES and n not in imported
+    }
+
+
+def _defined_names(signature: str) -> set[str]:
+    return top_symbols(signature) | set(_PY_ALIAS.findall(signature))
+
+
+def _shared_type_findings(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+) -> tuple[str, ...]:
+    """A data type two tickets' contracts name that the contracts file does not
+    declare: each ticket writes its own copy (a parser's and an evaluator's
+    ``Expression``) and the values of one are not the other. A name is accounted for
+    when the contracts file declares it (``declared``) or any contract defines it:
+    by name, or in its signature (a class one ticket implements, imported from
+    there; a declaration-only signature's extra records)."""
+    by_name = {i.name: i for i in interfaces}
+    known = set(declared)
+    for i in interfaces:
+        known |= {i.name.partition(".")[0], *_defined_names(i.signature)}
+    users: dict[str, list[str]] = {}
+    for t in tickets:
+        if t.id in _GENERATED_TICKETS:
+            continue
+        names: set[str] = set()
+        for n in (*t.implements, *t.consumes):
+            c = by_name.get(n)
+            if c is not None and c.kind in CODE_CONTRACT_KINDS and not _declaration_only(c):
+                names |= _type_names(c.signature)
+        for name in sorted(names - known):
+            users.setdefault(name, []).append(t.id)
+    return tuple(
+        f"Type {name} is used by the contracts of tickets {', '.join(ids)} but is not "
+        "declared in the contracts file: each ticket would define its own copy. Add a "
+        f"type contract {name} (its fields) so every ticket imports the one definition."
+        for name, ids in users.items()
+        if len(ids) > 1
+    )
+
+
 def _redeclared_findings(
     interfaces: Sequence[InterfaceContract], base: BaseView
 ) -> tuple[str, ...]:
@@ -667,6 +786,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"consumes contract .* but does not depend on", "contract-dep-missing"),
         (r"after a builtin its own annotations use", "contract-builtin-method"),
         (r"already exists in the base tree", "contract-redeclared"),
+        (r"^Type \S+ is used by the contracts of tickets", "type-undeclared"),
         (r"declares no way to receive them", "contract-unwired"),
         (r"^Contract \S.* does not compile", "contract-compile"),
         (r"more \S+ error\(s\)\.$", "contract-compile"),

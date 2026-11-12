@@ -177,3 +177,71 @@ def test_cucumber_js_and_go_step_files_are_linted(tmp_path: Path) -> None:
         )
     )
     assert cucumber_weak_step_notes(tmp_path / "go", _TRUSTED, "go") == {}
+
+
+def test_an_exception_type_check_is_clean_when_the_then_line_states_only_an_error(
+    tmp_path: Path,
+) -> None:
+    for i, then in enumerate(("a ValueError is raised", "the empty title is rejected")):
+        for j, body in enumerate(
+            (
+                "    assert isinstance(items, ValueError)\n",
+                "    assert items is not None and isinstance(items, ValueError)\n",
+                "    assert type(items) is ValueError\n",
+            )
+        ):
+            assert _then_says(tmp_path / f"{i}{j}", then, body) == (), (then, body)
+    (note,) = _then_says(
+        tmp_path / "list", "the list has 1 item", "    assert isinstance(items, list)\n"
+    )
+    assert "only check is truthiness" in note
+    (msg,) = _then_says(
+        tmp_path / "msg",
+        'the title is rejected with "title required"',
+        "    assert isinstance(items, ValueError)\n",
+    )
+    assert '"title required" in str(context["error"])' in msg
+
+
+def test_a_weak_then_note_shows_a_passing_example(tmp_path: Path) -> None:
+    (note,) = _then_says(tmp_path / "a", "an error is raised", "    assert items\n")
+    assert 'e.g. `assert isinstance(context["error"], ValueError)`' in note
+    (note,) = _then_says(
+        tmp_path / "b",
+        'the command exits 0 and prints "saved"',
+        "    assert items.returncode == 0\n",
+    )
+    assert 'e.g. `assert result.returncode == 0 and "saved" in result.stdout`' in note
+    (note,) = _notes(tmp_path / "c", _then("    assert items\n"))
+    assert "e.g. `assert result == <the value the Then line states>`" in note
+
+
+def test_cucumber_error_type_checks_are_accepted_for_an_error_then_line(tmp_path: Path) -> None:
+    trusted = {_REF: [("then", "the note is rejected")]}
+    js = tmp_path / "js" / "features" / "step_definitions"
+    js.mkdir(parents=True)
+    steps = js / "list.steps.js"
+    steps.write_text(
+        "Then('the note is rejected', function () {\n"
+        "  expect(this.exitCode).toBe(1);\n  expect(this.error).toBeInstanceOf(ValidationError);\n"
+        "});\n"
+    )
+    assert cucumber_weak_step_notes(tmp_path / "js", trusted, "javascript") == {}
+    steps.write_text("Then('the note is rejected', function () { assert.ok(this.error); });\n")
+    (note,) = cucumber_weak_step_notes(tmp_path / "js", trusted, "javascript")[_REF]
+    assert "e.g. `expect(() => this.act()).toThrow(ValidationError)`" in note
+    go = tmp_path / "go" / "bdd"
+    go.mkdir(parents=True)
+    src = (
+        "package bdd\n\nfunc rejected() error {\n"
+        '\tif exitCode != 1 || !errors.Is(err, ErrInvalid) { return fmt.Errorf("got %v", err) }\n'
+        "\treturn nil\n}\n"
+        "func init() { register(func(sc *godog.ScenarioContext) {\n"
+        "\tsc.Step(`^the note is rejected$`, rejected)\n"
+        "}) }\n"
+    )
+    (go / "steps_test.go").write_text(src)
+    assert cucumber_weak_step_notes(tmp_path / "go", trusted, "go") == {}
+    (go / "steps_test.go").write_text(src.replace(" || !errors.Is(err, ErrInvalid)", ""))
+    (note,) = cucumber_weak_step_notes(tmp_path / "go", trusted, "go")[_REF]
+    assert "errors.Is(err, ErrInvalid)" in note

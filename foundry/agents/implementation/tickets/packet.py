@@ -373,7 +373,10 @@ def property_rule(properties: Sequence[str], stack: StackDecision | None) -> str
         "optional or dynamic import, or a skip when it is missing (the gate counts a "
         "guarded test as no test)"
         + (f"; declare {lib.dependency} if no ticket has yet" if lib.dependency else "")
-        + ". A failing property is a bug in the code: fix the code, never weaken the "
+        + ". Never skip inside a property (the gate counts a skipped test as not run, "
+        "and a skip on the first input it tries skips it every run): discard the inputs "
+        "it does not cover with the library's assume() or a filtered strategy. A "
+        "failing property is a bug in the code: fix the code, never weaken the "
         "property. Properties: " + "; ".join(properties)
     )
 

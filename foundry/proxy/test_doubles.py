@@ -117,8 +117,8 @@ def verdict_json(
                 "finding": "scripted rejection",
                 "failing_check": "",
                 "command": "scripted",
-                "expected": "pass",
-                "actual": "fail",
+                "correct_result": "pass",
+                "observed_result": "fail",
             },
         )
     return json.dumps({"status": status, "findings": list(findings)})

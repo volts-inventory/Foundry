@@ -289,8 +289,8 @@ def test_claude_cli_verdict_path_parses_and_stamps_verifiable_binding() -> None:
                     "finding": "nit",
                     "failing_check": "",
                     "command": "app",
-                    "expected": "1",
-                    "actual": "2",
+                    "correct_result": "1",
+                    "observed_result": "2",
                 }
             ],
         }

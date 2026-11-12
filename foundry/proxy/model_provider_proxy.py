@@ -139,9 +139,12 @@ Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
 
 # A finding's evidence: the failing gate/test it cites, or a reproducible command
-# with its expected and actual result. "" means absent (strict grammars need every
-# field present).
-_EVIDENCE_FIELDS = ("failing_check", "command", "expected", "actual")
+# with what a correct app does and what this one did. "" means absent (strict
+# grammars need every field present). Not "expected"/"actual": reviewers read
+# "expected" as "what I predict" and filled both with the observed crash.
+_EVIDENCE_FIELDS = ("failing_check", "command", "correct_result", "observed_result")
+# Cached calls and stored verdicts predating the rename.
+_LEGACY_RESULT_FIELDS = {"correct_result": "expected", "observed_result": "actual"}
 _FINDING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -166,7 +169,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
 
 ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # Strict grammars make the model fill every field, so "no evidence" often arrives
-# as a placeholder rather than "". Only for the citing fields: an expected/actual of
+# as a placeholder rather than "". Only for the citing fields: a result of
 # "None" or "null" is a real observed value.
 _PLACEHOLDERS = frozenset(
     {
@@ -225,6 +228,34 @@ def _norm(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _result(item: dict[str, Any], field: str) -> str:
+    value = item.get(field)
+    if value is None:
+        value = item.get(_LEGACY_RESULT_FIELDS[field], "")
+    return str(value).strip()
+
+
+# An observed crash: a correct app never answers with one, whatever the reviewer
+# wrote as the correct result (reviewers have echoed the crash into both fields).
+_CRASH = re.compile(
+    r"traceback|(?-i:\b[A-Z]\w*(?:Error|Exception)\b)|\b(?:raised|threw|thrown)\b"
+    r"|\bpanic:|segmentation fault|core dumped"
+    r"|\bcrash(?:ed|es)?\b|\buncaught\b|\bunhandled\b|internal server error"
+    r"|\b(?:http|status|code)\W{0,3}5\d\d\b|\b5\d\d (?:bad gateway|service unavailable)"
+    r"|\bexit(?:ed)?(?: with)?(?: code| status)?\W{0,3}(?:[1-9]\d*|-\d+)\b"
+    r"|killed by signal|\bsig(?:segv|abrt|kill)\b",
+    re.IGNORECASE,
+)
+
+
+def _backed_reproduction(command: str, correct: str, observed: str) -> bool:
+    if not (command and observed):
+        return False
+    if _CRASH.search(observed) and not _CRASH.search(correct):
+        return True
+    return bool(correct) and _norm(correct) != _norm(observed)
+
+
 def _verdict_findings(
     raw: object, failing_gates: Iterable[str] = (), failing_tests: Iterable[str] = ()
 ) -> tuple[tuple[str, ...], bool]:
@@ -234,7 +265,8 @@ def _verdict_findings(
     passing scenario as its "failing check". So a finding blocks only if it names
     one of ``failing_gates`` / ``failing_tests`` (what failed on the reviewed tree,
     per the caller's attested ``gates`` channel; see :func:`_failing_match`), or it
-    gives a command whose expected and actual results differ. The rest are kept,
+    gives a command whose observed result differs from the correct one, or shows
+    a crash (exception, 5xx, crash exit) a correct result does not. The rest are kept,
     prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
     backend) cites nothing."""
     gates, tests = tuple(failing_gates), tuple(failing_tests)
@@ -246,11 +278,11 @@ def _verdict_findings(
             continue
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
-        expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
+        correct, observed = _result(item, "correct_result"), _result(item, "observed_result")
         if (matched := _failing_match(check, command, gates, tests)) is not None:
             out.append(f"{text} [evidence: failing {matched}]")
-        elif command and expected and actual and _norm(expected) != _norm(actual):
-            out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
+        elif _backed_reproduction(command, correct, observed):
+            out.append(f"{text} [evidence: `{command}` expected {correct!r}, got {observed!r}]")
         else:
             note = f" [cites {check}: not failing in this build's gates]" if check else ""
             out.append(ADVISORY_PREFIX + text + note)

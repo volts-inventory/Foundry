@@ -449,12 +449,18 @@ def test_a_security_scenario_is_added_to_the_entrypoint_when_none_covers_misuse(
 # ---- the manifest scaffold pins runtime imports only (26) -------------------------
 
 
-def test_the_scaffold_pins_no_dev_or_test_tools(tmp_path: Path) -> None:
+def test_the_scaffold_pins_no_dev_tools_but_the_test_libraries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.graph.gate_wiring.materialize as materialize
+
+    monkeypatch.setattr(materialize, "_pin", lambda d: d)
     (tmp_path / "app.py").write_text("import json\nimport mypy\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_app.py").write_text("import pytest\nimport xdist\nimport ruff\n")
     (tmp_path / "conftest.py").write_text("import pytest_bdd\nimport pytest_cov\n")
-    assert _python_third_party_requirements(tmp_path) == []
+    # The shipped tests import pytest and pytest-bdd: without them they cannot run.
+    assert _python_third_party_requirements(tmp_path) == ["pytest", "pytest-bdd"]
 
 
 def test_the_scaffold_keeps_a_test_helper_the_harness_does_not_provide(
@@ -474,7 +480,7 @@ def test_the_scaffold_keeps_a_test_helper_the_harness_does_not_provide(
     )
     monkeypatch.setattr(materialize, "_pin", lambda d: d)
     # A types-* stub distribution is the type checker's, not the app's.
-    assert _python_third_party_requirements(tmp_path) == ["PyYAML", "freezegun"]
+    assert _python_third_party_requirements(tmp_path) == ["PyYAML", "freezegun", "pytest"]
 
 
 # ---- planner calls (22, 24) ------------------------------------------------------

@@ -138,11 +138,11 @@ def test_state_dir_unset_is_in_memory_no_file(
 def test_checkpoint_serde_loads_foundry_schema_types_without_a_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from foundry.durability.checkpointer import checkpoint_serde
+    from foundry.durability.checkpointer import FoundryCheckpointer
     from foundry.schemas.gates import GateStatus
     from foundry.schemas.implementation import StackDecision
 
-    serde = checkpoint_serde()
+    serde = FoundryCheckpointer().saver.serde
     values = [GateStatus.PASS, StackDecision(language="python")]
     with caplog.at_level("WARNING"):
         for value in values:

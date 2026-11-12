@@ -73,5 +73,7 @@ def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter:
     total = ""
     if meter is not None:
         of = f" of {meter.cap / 1e6:.1f}M" if meter.cap is not None else ""
-        total = f" (run {meter.used / 1e6:.2f}M{of})"
+        local = getattr(meter, "local_used", 0)
+        local_part = f", local {local / 1e6:.2f}M" if local else ""
+        total = f" (run {meter.used / 1e6:.2f}M{of}{local_part})"
     log(f"done  {label} in {took}{tokens}{total}")

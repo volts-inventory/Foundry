@@ -1610,6 +1610,8 @@ class ModelProviderProxy:
                     response = transport.send(sent)
                 if meter is not None and not local:
                     meter.charge(response.usage)
+                elif meter is not None:
+                    meter.note_local(response.usage)
                 parsed = None
                 if schema is not None:
                     try:

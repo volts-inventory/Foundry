@@ -439,14 +439,21 @@ def launch_target(
     if kind == "http":
         probes, posts = _probes(lines)
         return LaunchTarget(kind, cmd, required, probes, posts, needs=needs, source=source)
+    # A security_abuse scenario's command is meant to be refused: no launch verdict.
     runs = _cli_runs(
-        cmd, (s for c in criteria if not owners or c.ticket_id in owners for s in c.when)
+        cmd,
+        (
+            s
+            for c in criteria
+            if (not owners or c.ticket_id in owners) and not c.security_abuse
+            for s in c.when
+        ),
     )
     return LaunchTarget(
         kind,
         cmd,
         required,
-        runs=runs or ((f"{cmd} --help",) if cmd else ()),
+        runs=tuple(dict.fromkeys((*runs, f"{cmd} --help"))) if cmd else (),
         needs=needs,
         source=source,
     )
@@ -458,13 +465,26 @@ _TRACEBACK = re.compile(
     r"Traceback \(most recent call last\)|^panic: |^\S*Error: .*\n\s+at |Uncaught \w*Error",
     re.M,
 )
+# Only a failure to start the program: a CLI's own error for a bad argument or a
+# missing record (`Error: task 99: not found`, exit 1) is the scenario's answer.
 _ENTRY_ERROR = re.compile(
-    r"No module named|ModuleNotFoundError|ImportError|cannot import name|has no attribute|"
+    r"No module named|ModuleNotFoundError|ImportError|cannot import name|"
     r"can't find '__main__' module|is a package and cannot be directly executed|"
-    r"can't open file|No such file or directory|Cannot find module|ERR_MODULE_NOT_FOUND|"
-    r"command not found|: not found|SyntaxError|no Go files|cannot find package|"
-    r"package \S+ is not a main package|undefined: "
+    r"can't open file|Cannot find module|ERR_MODULE_NOT_FOUND|SyntaxError|no Go files|"
+    r"cannot find package|package \S+ is not a main package|undefined: "
 )
+
+
+def _program_missing(cmd: str, text: str) -> bool:
+    """The shell could not find the launch command's program itself."""
+    try:
+        prog = shlex.split(cmd)[0]
+    except (ValueError, IndexError):
+        return False
+    p = re.escape(prog)
+    return bool(re.search(rf"{p}: (?:command )?not found|command not found: {p}\b", text))
+
+
 _NO_ENTRY = (
     "no runnable entry point: the app has no command a user can launch — add a "
     "__main__/main/app entry the entrypoint ticket owns (an http app serves on "
@@ -511,7 +531,7 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
     return out
 
 
-def _cli_findings(r: dict[str, Any]) -> list[str]:
+def _cli_findings(r: dict[str, Any], cmd: str) -> list[str]:
     out: list[str] = []
     for run in r.get("runs") or ():
         cmd, rc, text = run.get("cmd"), run.get("rc"), str(run.get("output", ""))
@@ -524,7 +544,7 @@ def _cli_findings(r: dict[str, Any]) -> list[str]:
             continue  # an inferred CLI that keeps running (a game loop) is no verdict
         elif _TRACEBACK.search(text):
             out.append(f"launch: `{cmd}` crashed (exit {rc}) with a traceback:\n{_tail(text)}")
-        elif rc != 0 and _ENTRY_ERROR.search(text):
+        elif rc != 0 and (_ENTRY_ERROR.search(text) or _program_missing(cmd, text)):
             out.append(
                 f"launch: `{cmd}` cannot start (exit {rc}): the entry point or an import "
                 f"is broken — the user's launch command must work as written:\n{_tail(text)}"
@@ -624,7 +644,9 @@ class LaunchGate:
                 seal_key=self._seal_key,
             )
         result["required"] = t.required
-        findings = _http_findings(result, t.cmd) if t.kind == "http" else _cli_findings(result)
+        findings = (
+            _http_findings(result, t.cmd) if t.kind == "http" else _cli_findings(result, t.cmd)
+        )
         if findings:
             source = f" ({t.source})" if t.source else ""
             findings.insert(
@@ -650,7 +672,7 @@ class LaunchGate:
         if r.get("kind") == "http":
             bad = _http_findings(r, str(r.get("cmd", "")))
         elif r.get("kind") == "cli":
-            bad = _cli_findings(r)
+            bad = _cli_findings(r, str(r.get("cmd", "")))
         else:
             return GateStatus.ERROR
         return GateStatus.FAIL if bad else GateStatus.PASS

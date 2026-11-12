@@ -662,13 +662,54 @@ _MYPY_LENIENT = (
 _MYPY_STRICT = f"{_MYPY_LENIENT} --strict --exclude {shlex.quote(_TEST_EXCLUDE)}"
 
 
+# mypy's options that take a value (the next argv word, unless given --flag=value),
+# with how many words follow; -p/-m/-c name a target the way a positional does.
+_MYPY_VALUE_FLAGS = {
+    **dict.fromkeys(
+        (
+            "--exclude", "--config-file", "--python-version", "--cache-dir", "-p",
+            "--package", "-m", "--module", "-c", "--command", "--platform",
+            "--custom-typeshed-dir", "--python-executable", "--always-true",
+            "--always-false", "--enable-error-code", "--disable-error-code",
+            "--enable-incomplete-feature", "--follow-imports", "--package-root",
+            "--junit-xml", "--junit-format", "--find-occurrences", "--custom-typing-module",
+            "--untyped-calls-exclude", "--deprecated-calls-exclude", "--soft-error-limit",
+            "--any-exprs-report", "--cobertura-xml-report", "--html-report",
+            "--linecount-report", "--linecoverage-report", "--lineprecision-report",
+            "--memory-xml-report", "--txt-report", "--xml-report", "--xslt-html-report",
+            "--xslt-txt-report",
+        ),
+        1,
+    ),
+    "--shadow-file": 2,
+}  # fmt: skip
+_MYPY_TARGET_FLAGS = frozenset({"-p", "--package", "-m", "--module", "-c", "--command"})
+
+
 def _strict_mypy(m: re.Match[str]) -> str:
     try:
         args = shlex.split(m.group(2))
     except ValueError:
         return m.group(1) + _MYPY_STRICT + m.group(2)
-    kept = [a for a in args if a.startswith("-") or not _TEST_PATH.search(a.removeprefix("./"))]
-    if args and not [a for a in kept if not a.startswith("-")]:
+    kept: list[str] = []
+    targets = 0
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag = a.split("=", 1)[0]
+        if a.startswith("-") and flag in _MYPY_VALUE_FLAGS:
+            n = 0 if "=" in a else _MYPY_VALUE_FLAGS[flag]
+            kept.extend(args[i : i + 1 + n])
+            targets += flag in _MYPY_TARGET_FLAGS
+            i += 1 + n
+            continue
+        i += 1
+        if a.startswith("-"):
+            kept.append(a)
+        elif not _TEST_PATH.search(a.removeprefix("./")):
+            kept.append(a)
+            targets += 1
+    if args and not targets:
         kept.append(".")
     tail = m.group(2)[len(m.group(2).rstrip()) :]
     return m.group(1) + " ".join([_MYPY_STRICT, *map(shlex.quote, kept)]) + tail

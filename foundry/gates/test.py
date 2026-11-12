@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import hmac
+import itertools
 import json
 import os
 import re
@@ -1368,36 +1369,51 @@ def _calls_made(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
     }
 
 
-def _weak_test(test: ast.expr) -> bool:
-    """An assert condition that holds for nearly any outcome: truthiness, not-None,
-    a bare ``len``/``bool``, or an exit code."""
+# A Then line that names only an exit code or none-ness is checked in full by an
+# assert of exactly that; one that also states output, a message or a quoted value
+# is not.
+_THEN_ASKS_MORE = re.compile(
+    r"(?i)\b(output|message|shows?|prints?|displays?|contains?|lists?|says|reads|text)\b"
+    r"|\"[^\"]+\"|'[^']+'|`[^`]+`"
+)
+_THEN_EXIT = re.compile(r"(?i)\b(exit(s|ed)?|code|status|fail(s|ed)?|succeed(s|ed)?|success)\b")
+_THEN_NONENESS = re.compile(
+    r"(?i)\b(no|none|nothing|not|null|nil|absent|missing|empty|never|without|true|false)\b"
+)
+
+
+def _states_only(then: str, what: re.Pattern[str]) -> bool:
+    return bool(what.search(then)) and not _THEN_ASKS_MORE.search(then)
+
+
+def _weak_test(test: ast.expr, then: str = "") -> bool:
+    """An assert condition that holds for nearly any outcome: truthiness, a bare
+    ``len``/``bool``, or a not-None / exit-code check the Then line asks more of."""
     if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
         return True
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
-        return _weak_test(test.operand)
+        return _weak_test(test.operand, then)
     if isinstance(test, ast.Call):
         return _callee(test.func) in ("bool", "len", "isinstance", "callable", "hasattr")
     if isinstance(test, ast.BoolOp):
-        return all(_weak_test(v) for v in test.values)
+        return all(_weak_test(v, then) for v in test.values)
     if isinstance(test, ast.Compare) and len(test.ops) == 1:
         left, right, op = test.left, test.comparators[0], test.ops[0]
         sides = (left, right)
         if isinstance(op, (ast.Is, ast.IsNot)) and any(
             isinstance(s, ast.Constant) and s.value in (None, True, False) for s in sides
         ):
-            return True
+            return not _states_only(then, _THEN_NONENESS)
         if any(
             _EXIT_NAME.match(_callee(s) or (s.id if isinstance(s, ast.Name) else "")) for s in sides
-        ):
-            return True
-        if any(
+        ) or any(
             isinstance(s, ast.Subscript)
             and isinstance(s.slice, ast.Constant)
             and isinstance(s.slice.value, str)
             and _EXIT_NAME.match(s.slice.value)
             for s in sides
         ):
-            return True
+            return not _states_only(then, _THEN_EXIT)
         if (
             isinstance(left, ast.Call)
             and _callee(left.func) == "len"
@@ -1417,9 +1433,19 @@ def _vacuous(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return not body
 
 
+def _is_literal(e: ast.expr) -> bool:
+    try:
+        ast.literal_eval(e)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
 def _expected_from_sut(fn: ast.FunctionDef | ast.AsyncFunctionDef, sut: set[str]) -> str | None:
-    """The function under test (called by the scenario's When steps) a Then step's
-    assert also calls to compute the value it compares against."""
+    """The function a Then step's assert calls on both sides of a comparison: the
+    expected value is computed by the function under test (or an oracle copy of the
+    actual's own call), so it passes whatever that returns. Re-reading the actual
+    through the SUT and comparing it with a literal is fine."""
     assigned: dict[str, set[str]] = {}
     nodes = _own_nodes(fn)
     for n in nodes:
@@ -1431,22 +1457,31 @@ def _expected_from_sut(fn: ast.FunctionDef | ast.AsyncFunctionDef, sut: set[str]
                     )
 
     def side(e: ast.expr) -> set[str]:
-        if isinstance(e, ast.Name):
-            return assigned.get(e.id, set())
-        return {_callee(c.func) for c in ast.walk(e) if isinstance(c, ast.Call)}
+        out: set[str] = set()
+        for c in ast.walk(e):
+            if isinstance(c, ast.Call):
+                out.add(_callee(c.func))
+            elif isinstance(c, ast.Name):
+                out |= assigned.get(c.id, set())
+        return out - _GENERIC_CALLS - {""}
 
     for n in nodes:
         if not (isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)):
             continue
-        sides = [side(n.test.left), *(side(c) for c in n.test.comparators)]
-        for name in sorted(set().union(*sides) - _GENERIC_CALLS - {""}):
-            if name in sut or sum(name in s for s in sides) > 1:
-                return name
+        exprs = [n.test.left, *n.test.comparators]
+        for a, b in itertools.pairwise(exprs):
+            if _is_literal(a) or _is_literal(b):
+                continue
+            left, right = side(a), side(b)
+            if shared := sorted(left & right):
+                return shared[0]
+            if (ls := sorted(left & sut)) and right & sut:
+                return ls[0]
     return None
 
 
 def _python_step_lint(
-    fn: ast.FunctionDef | ast.AsyncFunctionDef, kind: str, sut: set[str]
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, kind: str, sut: set[str], text: str = ""
 ) -> str | None:
     nodes = _own_nodes(fn)
     asserts = [n for n in nodes if isinstance(n, ast.Assert)]
@@ -1472,7 +1507,7 @@ def _python_step_lint(
     ]
     if not asserts and not checks:
         return "is a Then step with no assert: it checks nothing"
-    if asserts and not checks and all(_weak_test(a.test) for a in asserts):
+    if asserts and not checks and all(_weak_test(a.test, text) for a in asserts):
         return (
             "is a Then step whose only check is truthiness, not-None or an exit code: "
             "assert the actual output the scenario's Then line states"
@@ -1532,8 +1567,8 @@ def weak_step_notes(
         sut = set().union(*(_calls_made(fn) for kind, _, _, fn in bound if kind == "when"))
         notes = [
             f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}, {d.function}) {why}'
-            for kind, _, d, fn in bound
-            if (why := _python_step_lint(fn, kind, sut))
+            for kind, text, d, fn in bound
+            if (why := _python_step_lint(fn, kind, sut, text))
         ]
         if notes:
             out[ref] = tuple(dict.fromkeys(notes))

@@ -1266,3 +1266,27 @@ def test_the_plans_stack_carries_what_the_app_is_and_how_a_user_starts_it() -> N
     stack, _ = _stack_decision({"stack": raw}, ["python"])
     assert stack is not None
     assert (stack.kind, stack.launch) == ("http", "python3 -m app")
+
+
+def test_python_typecheck_keeps_a_flags_value_and_only_drops_test_targets() -> None:
+    import shlex
+
+    from foundry.gates.profiles import python_typecheck
+
+    def argv(cmd: str) -> list[str]:
+        words = shlex.split(python_typecheck(cmd))
+        return words[words.index("--strict") + 3 :]  # past the gate's own --exclude
+
+    assert argv("mypy --exclude tests/ src") == ["--exclude", "tests/", "src"]
+    assert argv("mypy --exclude=tests/ src tests") == ["--exclude=tests/", "src"]
+    assert argv("mypy --config-file tests/mypy.ini -p app") == [
+        "--config-file",
+        "tests/mypy.ini",
+        "-p",
+        "app",
+    ]
+    assert argv("mypy --cache-dir /dev/null tests conftest.py") == [
+        "--cache-dir",
+        "/dev/null",
+        ".",
+    ]

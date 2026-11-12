@@ -77,6 +77,72 @@ def test_an_expected_value_from_the_function_under_test_is_flagged(tmp_path: Pat
     assert "calling `total`, the function under test" in note
 
 
+def _then_says(tmp_path: Path, then: str, body: str) -> tuple[str, ...]:
+    steps = _GOOD.replace(
+        '@then(parsers.parse("the list has {n:d} item"))\ndef _count(items, n):\n'
+        "    assert len(items) == n\n",
+        f"@then({then!r})\ndef _count(items):\n{body}",
+    )
+    trusted = {_REF: [*_TRUSTED[_REF][:2], ("then", then)]}
+    return weak_step_notes(_project(tmp_path, steps), trusted).get(_REF, ())
+
+
+def test_an_exit_code_or_none_check_the_then_line_states_exactly_is_clean(
+    tmp_path: Path,
+) -> None:
+    assert (
+        _then_says(
+            tmp_path / "a",
+            "the command exits with code 2",
+            ("    result = items\n    assert result.returncode == 2\n"),
+        )
+        == ()
+    )
+    assert _then_says(tmp_path / "b", "no user is found", "    assert items is None\n") == ()
+    (more,) = _then_says(
+        tmp_path / "c",
+        'the command exits with code 2 and prints "bad id"',
+        "    assert items.returncode == 2\n",
+    )
+    assert "only check is truthiness" in more
+    (shows,) = _then_says(
+        tmp_path / "d", "no user is found and a message shows", ("    assert items is None\n")
+    )
+    assert "only check is truthiness" in shows
+
+
+def test_rereading_the_actual_through_the_sut_against_a_literal_is_clean(
+    tmp_path: Path,
+) -> None:
+    steps = (
+        _GOOD.replace(
+            "from pytest_bdd", "def search(xs, q):\n    return list(xs)\n\n\nfrom pytest_bdd"
+        )
+        .replace("    items.append(x)\n", "    items.append(x)\n    search(items, x)\n")
+        .replace(
+            "    assert len(items) == n\n",
+            '    hits = search(items, "x")\n    assert [h for h in hits] == ["milk"]\n'
+            '    assert search(items, "x")[0] == "milk"\n',
+        )
+    )
+    assert _notes(tmp_path, steps) == ()
+
+
+def test_both_sides_from_sut_calls_are_flagged(tmp_path: Path) -> None:
+    steps = (
+        _GOOD.replace(
+            "from pytest_bdd", "def search(xs, q):\n    return list(xs)\n\n\nfrom pytest_bdd"
+        )
+        .replace("    items.append(x)\n", "    items.append(x)\n    search(items, x)\n")
+        .replace(
+            "    assert len(items) == n\n",
+            '    hits = search(items, "x")\n    assert [h for h in hits] == search(items, "x")\n',
+        )
+    )
+    (note,) = _notes(tmp_path, steps)
+    assert "calling `search`, the function under test" in note
+
+
 def test_cucumber_js_and_go_step_files_are_linted(tmp_path: Path) -> None:
     js = tmp_path / "js" / "features" / "step_definitions"
     js.mkdir(parents=True)

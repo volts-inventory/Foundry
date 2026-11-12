@@ -90,6 +90,40 @@ def test_the_safe_python_form_is_not_flagged(tmp_path: Path, source: str) -> Non
     assert _rules(tmp_path, {"app/main.py": source}) == []
 
 
+def test_a_per_request_sqlite_connection_is_not_flagged(tmp_path: Path) -> None:
+    get_db = (
+        _FLASK + "import sqlite3\nfrom flask import g\n"
+        "def get_db():\n    if 'db' not in g:\n        g.db = sqlite3.connect(DB_PATH)\n"
+        "    return g.db\n"
+    )
+    assert _rules(tmp_path / "a", {"app/main.py": get_db}) == []
+    singleton = (
+        _FLASK + "import sqlite3\n_conn = None\n"
+        "def conn():\n    global _conn\n    if _conn is None:\n"
+        "        _conn = sqlite3.connect(DB_PATH)\n    return _conn\n"
+    )
+    assert _rules(tmp_path / "b", {"app/main.py": singleton}) == ["sqlite-threads"]
+    attr = _FLASK + "import sqlite3\nclass Store:\n    conn = sqlite3.connect('app.db')\n"
+    assert _rules(tmp_path / "c", {"app/main.py": attr}) == ["sqlite-threads"]
+
+
+def test_memory_db_is_exempt_by_test_context_not_a_substring(tmp_path: Path) -> None:
+    exempt = (
+        "class TestingConfig:\n    DATABASE = ':memory:'\n\n\n"
+        "def make_test_app():\n    return connect(':memory:')\n\n\n"
+        "if app.config['TESTING']:\n    DB = ':memory:'\n"
+        "DB2 = ':memory:' if testing else 'app.db'\n"
+    )
+    assert _rules(tmp_path / "a", {"app/config.py": exempt}) == []
+    latest = "latest = connect(':memory:')\ncontest_db = ':memory:'\n"
+    assert _rules(tmp_path / "b", {"app/main.py": latest}) == ["memory-db", "memory-db"]
+    js = (
+        "const db = process.env.NODE_ENV === 'test' ? ':memory:' : 'app.db';\n"
+        "const latest = new Database(':memory:');\n"
+    )
+    assert _rules(tmp_path / "c", {"src/db.js": js}, "javascript") == ["memory-db"]
+
+
 def test_test_code_is_never_scanned(tmp_path: Path) -> None:
     bad = 'import sqlite3\nconn = sqlite3.connect(":memory:")\nSECRET_KEY = "x"\n'
     assert _rules(tmp_path, {"tests/helpers.py": bad, "conftest.py": bad, "test_app.py": bad}) == []

@@ -229,6 +229,18 @@ def test_a_cli_user_error_is_not_a_launch_failure(tmp_path: Path) -> None:
     assert gate.decide(obs) is GateStatus.PASS, obs.findings
 
 
+def test_a_declared_cli_whose_help_exits_nonzero_fails(tmp_path: Path) -> None:
+    # The bench CLI that caught SystemExit: usage printed, but exit 1.
+    (tmp_path / "todo.py").write_text("import sys\nprint('usage: todo [add|done]')\nsys.exit(1)\n")
+    cmd = f"{_PY} todo.py"
+    runs = (f"{cmd} done 99", f"{cmd} --help")
+    gate = LaunchGate(LaunchTarget(kind="cli", cmd=cmd, runs=runs, required=True))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    bad = [f for f in obs.findings if "must print usage and exit 0" in f]
+    assert len(bad) == 1 and f"`{cmd} --help` exited 1" in bad[0], obs.findings
+
+
 def test_a_cli_whose_program_is_missing_or_file_absent_fails(tmp_path: Path) -> None:
     gone = LaunchGate(
         LaunchTarget(kind="cli", cmd="no-such-prog-xyz", runs=("no-such-prog-xyz --help",))

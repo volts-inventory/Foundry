@@ -12,8 +12,10 @@ app's command in its own process group and drives it:
   group. FAIL when the app exits early or never listens, a request is refused, a
   response is a 5xx, or the app dies under the requests.
 * **cli** — the driver runs the entrypoint scenarios' commands (else
-  ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, or a
-  command that never exits with stdin closed.
+  ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, a
+  command that never exits with stdin closed, or (an app that must launch) a
+  ``--help`` that exits non-zero. A scenario command's own non-zero exit is the
+  scenario's answer, not a launch verdict.
 
 When the stack declares the spec's ``interface``, a cli option/subcommand its
 ``--help`` does not list FAILs (an unrequested extra option is advisory only), and
@@ -659,6 +661,12 @@ def _cli_findings(r: dict[str, Any], launch: str) -> list[str]:
             out.append(
                 f"launch: `{cmd}` cannot start (exit {rc}): the entry point or an import "
                 f"is broken — the user's launch command must work as written:\n{_tail(text)}"
+            )
+        # A missing subcommand's own --help already fails as missing from the CLI.
+        elif rc != 0 and cmd == f"{launch} --help" and r.get("required", True):
+            out.append(
+                f"launch: `{cmd}` exited {rc}; --help must print usage and exit 0. "
+                f"Its output:\n{_tail(text)}"
             )
     return out + _cli_interface_findings(r, launch)[0]
 

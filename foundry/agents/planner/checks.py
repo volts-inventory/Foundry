@@ -709,17 +709,17 @@ def _defined_names(signature: str) -> set[str]:
     return top_symbols(signature) | set(_PY_ALIAS.findall(signature))
 
 
-def _shared_type_findings(
+def _shared_type_users(
     tickets: Sequence[Ticket],
     interfaces: Sequence[InterfaceContract],
     declared: Collection[str],
-) -> tuple[str, ...]:
+) -> dict[str, list[str]]:
     """A data type two tickets' contracts name that the contracts file does not
-    declare: each ticket writes its own copy (a parser's and an evaluator's
-    ``Expression``) and the values of one are not the other. A name is accounted for
-    when the contracts file declares it (``declared``) or any contract defines it:
-    by name, or in its signature (a class one ticket implements, imported from
-    there; a declaration-only signature's extra records)."""
+    declare -> those tickets, in plan order: each would write its own copy (a
+    parser's and an evaluator's ``Expression``) and the values of one are not the
+    other. A name is accounted for when the contracts file declares it (``declared``)
+    or any contract defines it: by name, or in its signature (a class one ticket
+    implements, imported from there; a declaration-only signature's extra records)."""
     by_name = {i.name: i for i in interfaces}
     known = set(declared)
     for i in interfaces:
@@ -735,12 +735,23 @@ def _shared_type_findings(
                 names |= _type_names(c.signature)
         for name in sorted(names - known):
             users.setdefault(name, []).append(t.id)
+    return {name: ids for name, ids in users.items() if len(ids) > 1}
+
+
+def _shared_type_findings(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    owned: Collection[str] = (),
+) -> tuple[str, ...]:
+    """The shared undeclared types not in ``owned``, the ones
+    :func:`folds._assign_shared_types` gave an owner ticket."""
     return tuple(
         f"Type {name} is used by the contracts of tickets {', '.join(ids)} but is not "
         "declared in the contracts file: each ticket would define its own copy. Add a "
         f"type contract {name} (its fields) so every ticket imports the one definition."
-        for name, ids in users.items()
-        if len(ids) > 1
+        for name, ids in _shared_type_users(tickets, interfaces, declared).items()
+        if name not in owned
     )
 
 

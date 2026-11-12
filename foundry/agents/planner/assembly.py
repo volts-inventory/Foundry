@@ -25,6 +25,7 @@ from foundry.agents.planner.checks import (
 from foundry.agents.planner.folds import (
     _add_contract_deps,
     _add_read_deps,
+    _assign_shared_types,
     _drop_orphan_scenarios,
     _drop_self_consumes,
     _ensure_security_scenario,
@@ -152,11 +153,15 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_fix_covers.__name__, more)
     tickets, criteria, more = _ensure_security_scenario(tickets, criteria, frame.criteria_seq)
     concerns += fold(_ensure_security_scenario.__name__, more)
+    tickets, more, owned_types = _assign_shared_types(
+        tickets, frame.interfaces, frame.declared, frame.language
+    )
+    concerns += fold(_assign_shared_types.__name__, more)
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
         *_wiring_findings(tickets, frame.interfaces),
-        *_shared_type_findings(tickets, frame.interfaces, frame.declared),
+        *_shared_type_findings(tickets, frame.interfaces, frame.declared, owned_types),
         *_entrypoint_findings(tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.

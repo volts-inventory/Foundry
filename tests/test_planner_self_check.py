@@ -35,6 +35,7 @@ from foundry.agents.planner.checks import (
     _wiring_findings,
     finding_kind,
 )
+from foundry.agents.planner.folds import _assign_shared_types
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -1058,6 +1059,36 @@ def test_a_data_type_two_tickets_name_must_be_declared_in_the_contracts_file() -
     # A class contract one ticket implements is imported from that ticket.
     store = [_t("STORE", implements=("DomainStore",)), _t("APP", consumes=("DomainStore",))]
     assert _shared_type_findings(store, [_STORE], frozenset()) == ()
+
+
+def test_a_shared_undeclared_type_gets_one_owner_in_code_not_a_repair() -> None:
+    def files(t: Ticket, *paths: str) -> Ticket:
+        return t.model_copy(update={"files": paths})
+
+    tickets = [
+        files(_t("PARSER", implements=("parse",)), "tests/test_parse.py", "dice/parser.py"),
+        files(_t("EVAL", implements=("evaluate",)), "dice/evaluator.py"),
+        files(_t("CLI", "PARSER", "EVAL", entry=True, consumes=("parse", "evaluate")), "main.py"),
+    ]
+    out, concerns, owned = _assign_shared_types(tickets, [_PARSE, _EVALUATE], frozenset(), "python")
+    parser, evaluator, cli = out
+    assert "Define the shared data type DiceExpression in dice/parser.py" in parser.description
+    assert "Import the shared data type DiceExpression from dice/parser.py" in evaluator.description
+    assert evaluator.depends_on == ("PARSER",)  # it imports the owner's module
+    assert "Import the shared data type" in cli.description and cli.depends_on == ("PARSER", "EVAL")
+    assert concerns == [
+        "Shared type DiceExpression: owned by PARSER in dice/parser.py, imported by EVAL, CLI."
+    ]
+    assert owned == {"DiceExpression"}
+    assert _shared_type_findings(out, [_PARSE, _EVALUATE], frozenset(), owned) == ()
+    # A type no user can own (none writes a source file) is still a plan finding.
+    bare = [t.model_copy(update={"files": ()}) for t in tickets]
+    assert _assign_shared_types(bare, [_PARSE, _EVALUATE], frozenset(), "python") == (
+        bare,
+        [],
+        set(),
+    )
+    assert len(_shared_type_findings(bare, [_PARSE, _EVALUATE], frozenset())) == 1
 
 
 def test_builtin_and_generic_names_are_never_shared_types() -> None:

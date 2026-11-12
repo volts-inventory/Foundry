@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from foundry.agents.planner.checks import _goal_of, _goal_rows
+from foundry.agents.planner.checks import _goal_of, _goal_rows, _shared_type_users
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
-from foundry.gates.profiles import pytest_bdd_binds
+from foundry.gates.profiles import SOURCE_SUFFIXES, pytest_bdd_binds
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     Difficulty,
@@ -25,6 +26,7 @@ from foundry.schemas.implementation import (
 from foundry.schemas.product import AcceptanceCriterion, Criticality, IntentBrief, render_scenario
 
 if TYPE_CHECKING:
+    from foundry.schemas.architecture import InterfaceContract
     from foundry.state.seq import Seq
 
 # Script files a stack command can name as its own repo file (`python3 smoke.py`).
@@ -633,6 +635,68 @@ def _drop_self_consumes(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[s
             )
         out.append(t)
     return out, concerns
+
+
+def _assign_shared_types(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    language: str,
+) -> tuple[list[Ticket], list[str], set[str]]:
+    """Give each data type several tickets' contracts name, but the contracts file
+    does not declare, one owner: the first such ticket none of the others precede.
+    It defines the type in its first source file; the others depend on it and
+    import it from there. No repair call: a local re-plan for this cost ~30 min,
+    and the build's duplicate-type check still catches a second copy."""
+    suffixes = SOURCE_SUFFIXES.get(language, ())
+    by_id = {t.id: t for t in tickets}
+    deps = {t.id: t.depends_on for t in tickets}
+    notes: dict[str, list[str]] = {}
+    added: dict[str, list[str]] = {}
+    concerns: list[str] = []
+    owned: set[str] = set()
+    for name, ids in _shared_type_users(tickets, interfaces, declared).items():
+        owner = next(
+            (
+                i
+                for i in ids
+                if not _ancestors(deps, i) & set(ids)
+                and any(is_app_source(f, suffixes) for f in by_id[i].files)
+            ),
+            None,
+        )
+        if owner is None:
+            continue
+        home = next(f for f in by_id[owner].files if is_app_source(f, suffixes))
+        owned.add(name)
+        others = [i for i in ids if i != owner]
+        notes.setdefault(owner, []).append(
+            f"Define the shared data type {name} in {home}; tickets "
+            f"{', '.join(others)} import it from there."
+        )
+        for i in others:
+            notes.setdefault(i, []).append(
+                f"Import the shared data type {name} from {home} (ticket {owner}); "
+                "never define your own copy."
+            )
+            if owner not in _ancestors(deps, i):
+                added.setdefault(i, []).append(owner)
+                deps[i] = (*deps[i], owner)
+        concerns.append(
+            f"Shared type {name}: owned by {owner} in {home}, imported by {', '.join(others)}."
+        )
+    out = [
+        t.model_copy(
+            update={
+                "description": "\n".join(filter(None, (t.description, *notes[t.id]))),
+                "depends_on": (*t.depends_on, *added.get(t.id, ())),
+            }
+        )
+        if t.id in notes
+        else t
+        for t in tickets
+    ]
+    return out, concerns, owned
 
 
 def _features(tickets: Sequence[Ticket]) -> list[Ticket]:

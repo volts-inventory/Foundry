@@ -321,6 +321,7 @@ def run_check(
         _scaffold_manifest,
         _wave_test_gate,
         gate_profile,
+        launch_gate,
         planned_paths,
         wave_stack,
     )
@@ -361,6 +362,8 @@ def run_check(
                         profile.smoke_cmd, pyenv=pyenv, timeout_s=min(timeout, SMOKE_TIMEOUT_S)
                     )
                 )
+            if spec.smoke and (profile is None or not profile.unavailable):
+                gates.append(launch_gate(base.state, base._resolve, profile, pyenv=pyenv))
             return tuple(_unattested(g, work, unbuilt, root) for g in gates)
 
 
@@ -508,7 +511,9 @@ def judge(
         before = base[g.name]
         head = f"[{g.name} gate FAILED]"
         if g.name != "test":
-            own_all = everything or (spec.own_smoke if g.name == "smoke" else spec.own_build)
+            own_all = everything or (
+                spec.own_smoke if g.name in ("smoke", "launch") else spec.own_build
+            )
             own, other = _split_build(spec, g, before, own_all)
             if own:
                 yours += [head, *own]

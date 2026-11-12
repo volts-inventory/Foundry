@@ -389,6 +389,7 @@ def test_declared_dependency_installs_into_the_build_venv_only(
         "build": GateStatus.PASS,
         "test": GateStatus.PASS,
         "smoke": GateStatus.PASS,
+        "launch": GateStatus.PASS,
     }, [f for g in gates.values() for f in g.findings]
     _foundry_has_no("tinydep")
 
@@ -446,6 +447,7 @@ def test_network_failure_is_an_error_everywhere(
         "build": GateStatus.ERROR,
         "test": GateStatus.ERROR,
         "smoke": GateStatus.ERROR,
+        "launch": GateStatus.PASS,  # nothing to launch: no venv needed
     }
 
 

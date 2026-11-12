@@ -89,7 +89,9 @@ def test_smoke_boundary_includes_smoke_verdict() -> None:
     )
 
     assert _BOUNDARY_GATES[BUILD_TEST_BOUNDARY] == frozenset({"build", "test"})
-    assert _BOUNDARY_GATES[BUILD_TEST_SMOKE_BOUNDARY] == frozenset({"build", "test", "smoke"})
+    assert _BOUNDARY_GATES[BUILD_TEST_SMOKE_BOUNDARY] == frozenset(
+        {"build", "test", "smoke", "launch"}
+    )
 
 
 def test_no_profile_records_an_attested_unpinned_smoke_pass(tmp_path: Path) -> None:

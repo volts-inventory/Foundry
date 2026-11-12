@@ -1162,10 +1162,18 @@ def test_the_draft_is_the_final_loops_best_after_many_waves() -> None:
         ("build", _OK, ()),
         ("test", _RED, (_FAIL_A, _FAIL_B)),
         ("smoke", _OK, ()),
+        ("launch", _OK, ()),
     )
     state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-1", 10, {"a.py": "1\n"})]
     state = check(
-        state, final, 9, "f1", ("build", _OK, ()), ("test", _RED, (_FAIL_A,)), ("smoke", _OK, ())
+        state,
+        final,
+        9,
+        "f1",
+        ("build", _OK, ()),
+        ("test", _RED, (_FAIL_A,)),
+        ("smoke", _OK, ()),
+        ("launch", _OK, ()),
     )
     state["artifacts"] = [*state["artifacts"], _diff_art(store, "fix-2", 11, {"a.py": "(\n"})]
     state = check(
@@ -1176,6 +1184,7 @@ def test_the_draft_is_the_final_loops_best_after_many_waves() -> None:
         ("build", _RED, ("SyntaxError",)),
         ("test", _RED, ()),
         ("smoke", _RED, ()),
+        ("launch", _OK, ()),
     )
     best = draft_best(state, store.resolve)
     assert best is not None and (best.boundary, best.tree) == (final, "f1")

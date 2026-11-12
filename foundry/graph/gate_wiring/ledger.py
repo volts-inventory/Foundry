@@ -27,7 +27,9 @@ from foundry.graph.gate_wiring.materialize import (
 )
 from foundry.graph.gate_wiring.routing import (
     BUILD_BOUNDARY,
+    BUILD_LAUNCH_BOUNDARY,
     BUILD_TEST_BOUNDARY,
+    BUILD_TEST_LAUNCH_BOUNDARY,
     _failure_signature,
     is_collection_error,
 )
@@ -57,7 +59,7 @@ if TYPE_CHECKING:
 RESTARTED_TRIAGE = "ticket-restarted"
 REVERT_SKIPPED_TRIAGE = "fix-revert-skipped"
 _FIX_PASS_NODE = "fix_pass"
-_STAGES = ("build", "test", "smoke")
+_STAGES = ("build", "test", "smoke", "launch")
 _FAILING_CAP = 40
 # One epoch stream for every pass of the run: each entry's epoch is above the last
 # (and raise_floor keeps it so across a resume). A per-pass key gave every entry
@@ -78,7 +80,9 @@ def _pass_order(p: FixPass) -> tuple[int, Seq]:
 # advanced with (:func:`advanced_from`).
 CARRIED_STOP = "carried"
 WAVE_ADVANCE_STOPS = frozenset({"wave-share", CARRIED_STOP})
-_WAVE_BOUNDARIES = frozenset({BUILD_BOUNDARY, BUILD_TEST_BOUNDARY})
+_WAVE_BOUNDARIES = frozenset(
+    {BUILD_BOUNDARY, BUILD_TEST_BOUNDARY, BUILD_LAUNCH_BOUNDARY, BUILD_TEST_LAUNCH_BOUNDARY}
+)
 
 
 def advanced_from(state: FactoryState, window: str) -> FixPass | None:
@@ -405,7 +409,9 @@ def window_passes(state: FactoryState, resolve: ArtifactResolver) -> list[FixPas
         return []
     newest = max(passes, key=lambda p: p.seq)
     scope = (
-        wave_scenarios(state, resolve) if newest.boundary == BUILD_TEST_BOUNDARY else frozenset()
+        wave_scenarios(state, resolve)
+        if newest.boundary in (BUILD_TEST_BOUNDARY, BUILD_TEST_LAUNCH_BOUNDARY)
+        else frozenset()
     )
     if fix_window(state, newest.boundary, scope) != newest.window:
         return []

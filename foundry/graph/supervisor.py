@@ -444,8 +444,8 @@ def build_supervisor_graph(
         return out
 
     # The gates read the stack off state at gate time, so the boundary cannot
-    # depend on it: it is always {build, test, smoke}, and a stack without a run
-    # command records an attested "not pinned" smoke PASS.
+    # depend on it: it is always {build, test, smoke, launch}; a stack without a run
+    # command records an attested "not pinned" smoke PASS, a library a launch one.
     bt_boundary = BUILD_TEST_SMOKE_BOUNDARY
 
     def _final_gates(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

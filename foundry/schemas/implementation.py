@@ -112,6 +112,10 @@ class StackDecision(FrozenModel):
     test: str = ""
     bdd: str = ""  # must write Cucumber Messages to $FOUNDRY_BDD_REPORT
     run: str = ""  # optional smoke command
+    # What the app is: "cli" | "http" | "" (a library, or undeclared). The launch gate
+    # starts ``launch`` (an http app reads $PORT/$HOST) and drives it as that kind.
+    kind: str = ""
+    launch: str = ""
     profile: str = ""  # a pinned/legacy gate profile name, when one was used
     notes: str = ""
 

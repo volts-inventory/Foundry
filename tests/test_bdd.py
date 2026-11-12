@@ -153,7 +153,7 @@ def test_foreign_profile_gets_advisory_triage(tmp_path: Path) -> None:
         workdir=tmp_path,
         profile=profile,
     )
-    assert [g.status for g in out["gates"]] == [GateStatus.PASS] * 3
+    assert [g.status for g in out["gates"]] == [GateStatus.PASS] * 4
     (triage,) = out["gate_triage"]
     assert "node-web" in triage.explanation and "not enforced" in triage.explanation
 

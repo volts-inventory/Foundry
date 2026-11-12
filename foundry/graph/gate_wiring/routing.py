@@ -27,15 +27,21 @@ SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
 # The per-wave integration check (§2b): the build verdict alone.
 BUILD_BOUNDARY = "build"
-# The final boundary: build, test and smoke (a stack without a run command gets
-# an attested "not pinned" smoke PASS), so a missing/FAILed smoke never advances.
+# The last wave's check: the whole app is built, so it is also launched.
+BUILD_LAUNCH_BOUNDARY = "build_launch"
+BUILD_TEST_LAUNCH_BOUNDARY = "build_test_launch"
+# The final boundary: build, test, smoke and launch (a stack without a run command
+# gets an attested "not pinned" smoke PASS, a library a "not pinned" launch PASS),
+# so a missing/FAILed smoke or launch never advances.
 BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
     BUILD_BOUNDARY: frozenset({"build"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
-    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
+    BUILD_LAUNCH_BOUNDARY: frozenset({"build", "launch"}),
+    BUILD_TEST_LAUNCH_BOUNDARY: frozenset({"build", "test", "launch"}),
+    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke", "launch"}),
 }
 
 # Routing outcomes.

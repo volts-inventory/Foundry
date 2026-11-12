@@ -251,15 +251,16 @@ def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
     )
 
     spec = spec_out["gates"][0]
-    build, test, smoke = bt_out["gates"]
+    build, test, smoke, launch = bt_out["gates"]
     assert spec.name == "spec" and spec.status is GateStatus.PASS
     assert build.name == "build" and build.status is GateStatus.PASS
     assert test.name == "test" and test.status is GateStatus.PASS
     assert smoke.name == "smoke" and smoke.status is GateStatus.PASS  # not pinned
+    assert launch.name == "launch" and launch.status is GateStatus.PASS  # not pinned
 
-    # Every verdict is runner-attested -> the REAL merge_gates admits all four.
+    # Every verdict is runner-attested -> the REAL merge_gates admits all five.
     folded = merge_gates(spec_out["gates"] + bt_out["gates"], None)
-    assert set(folded) == {spec, build, test, smoke}
+    assert set(folded) == {spec, build, test, smoke, launch}
 
     # Fold onto state and route: all relevant gates PASS, nothing latched.
     state_with = {**state, "gates": folded}
@@ -437,7 +438,7 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         workdir=tmp_path / "bt",
         min_passed=1,
     )
-    build, test, _smoke = bt_out["gates"]
+    build, test, _smoke, _launch = bt_out["gates"]
     assert build.status is GateStatus.PASS  # it compiles
     assert test.status is GateStatus.FAIL  # vacuous suite cannot clear the floor
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted
@@ -798,10 +799,15 @@ def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records
         return out["gates"], counts.snapshot()
 
     first, fired = gates(rt, state, resolve, resolve_blob, "bt1")
-    assert [g.status for g in first] == [GateStatus.PASS] * 3 and fired == {}
+    assert [g.status for g in first] == [GateStatus.PASS] * 4 and fired == {}
 
     again, fired = gates(rt, state, resolve, resolve_blob, "bt2")
-    assert fired == {"gate.reuse.build": 1, "gate.reuse.test": 1, "gate.reuse.smoke": 1}
+    assert fired == {
+        "gate.reuse.build": 1,
+        "gate.reuse.test": 1,
+        "gate.reuse.smoke": 1,
+        "gate.reuse.launch": 1,
+    }
     assert [g.runner_attestation for g in again] == [g.runner_attestation for g in first]
     assert all(b.seq > a.seq for a, b in zip(first, again, strict=True))
     assert set(merge_gates(first, again)) == set(again)
@@ -810,7 +816,7 @@ def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records
     resumed = AgentRuntime(proxy=rt.proxy, epochs=EpochCounter())
     resumed.epochs.raise_floor(RUN_ID, max(g.seq.emission_epoch for g in again))
     after, fired = gates(resumed, state, resolve, resolve_blob, "bt3")
-    assert len(fired) == 3
+    assert len(fired) == 4
     assert all(c.seq > b.seq for b, c in zip(again, after, strict=True))
 
     # One changed byte in the tree re-runs every gate.

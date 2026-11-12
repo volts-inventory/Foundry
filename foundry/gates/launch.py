@@ -7,10 +7,17 @@ Inside the sandbox a trusted driver (:data:`_DRIVER`, Foundry's code) starts the
 app's command in its own process group and drives it:
 
 * **http** — ``PORT``/``HOST`` name a free loopback port. The driver waits for the
-  port to listen, GETs ``/`` and the entrypoint scenarios' paths, and POSTs the
-  first form a page serves (else a scenario's POST path). Then it kills the whole
-  group. FAIL when the app exits early or never listens, a request is refused, a
-  response is a 5xx, or the app dies under the requests.
+  port to listen, then browses it as one user: a cookie jar, same-origin redirects
+  followed, ``/`` and the entrypoint scenarios' paths and the links they serve
+  crawled. It submits each distinct form a page renders once (hidden fields such
+  as a CSRF token or ``_method`` kept, the rest filled by type/name), signup
+  before login before the rest with the same credentials, then re-crawls what
+  sign-in reveals and submits those forms too (no form at all: a scenario's POST
+  path). A burst of parallel requests (an authenticated page, a repeat of a
+  working form POST) follows. Then it kills the whole group. Requests and time
+  are capped. FAIL when the app exits early or never listens, a request is
+  refused, any response (burst included) is a 5xx, a form the app rendered is
+  answered 405, or the app dies under the requests.
 * **cli** — the driver runs the entrypoint scenarios' commands (else
   ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, a
   command that never exits with stdin closed, or (an app that must launch) a
@@ -62,12 +69,18 @@ LAUNCH_KEY = "launch"
 _RESULT_MARK = "FOUNDRY-LAUNCH-RESULT "
 _MAX_GETS = 6
 _MAX_RUNS = 3
+# The http probe's caps: sequential requests (redirect hops included), pages
+# crawled per pass (anonymous, then signed in), forms submitted, burst size.
+_MAX_REQUESTS = 80
+_MAX_PAGES = 10
+_MAX_FORMS = 12
+_BURST = 12
 
 # The trusted driver: argv[1] is its JSON config; its last stdout line is the result.
 _LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
 
 _DRIVER = r"""
-import http.client, json, os, re, signal, socket, subprocess, sys, threading, time
+import html, http.client, json, os, re, signal, socket, subprocess, sys, threading, time
 LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
 from urllib.parse import urlencode, urljoin, urlsplit
 
@@ -136,71 +149,337 @@ def run_cli():
     return {"runs": runs}
 
 
-class Forms:
-    def __init__(self):
-        self.cookies = {}
-
-    def headers(self, extra=None):
-        h = {"Connection": "close"}
-        if self.cookies:
-            h["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
-        h.update(extra or {})
-        return h
-
-    def keep(self, resp):
-        for k, v in resp.getheaders():
-            if k.lower() == "set-cookie":
-                name, _, rest = v.partition("=")
-                self.cookies[name.strip()] = rest.split(";", 1)[0]
-
-
 FORM = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.I | re.S)
-ATTR = re.compile(r'([\w-]+)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)')
-FIELD = re.compile(r"<(input|textarea|select)\b([^>]*)>", re.I)
-FILL = {"email": "launch@example.com", "number": "1", "password": "Launch-check-1",
-        "url": "http://example.com", "date": "2024-01-01"}
+ATTR = re.compile(r'([\w:-]+)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)')
+INPUT = re.compile(r"<(input|textarea|button)\b([^>]*)>", re.I)
+SELECT = re.compile(r"<select\b([^>]*)>(.*?)</select>", re.I | re.S)
+OPTION = re.compile(r"<option\b([^>]*)>", re.I)
+LINK = re.compile(r"<a\b([^>]*)>", re.I)
+EMAIL, PASSWORD, USER = "launch-check@example.com", "Launch-check-Pass-1", "launchcheck"
+SIGNUP = re.compile(r"sign.?up|register|join|create.?account|new.?user|enrol", re.I)
+LOGOUT = re.compile(r"log.?out|sign.?out", re.I)
+LEAVE = re.compile(r"log.?out|sign.?out|delete|destroy|remove", re.I)
+ASSET = re.compile(r"\.(css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|pdf|zip)$", re.I)
+REDIRECTS = (301, 302, 303, 307, 308)
+DATES = {"date": "2024-01-01", "datetime-local": "2024-01-01T12:00", "time": "12:00",
+         "month": "2024-01", "week": "2024-W01"}
 
 
 def attrs(raw):
-    return {k.lower(): v.strip("\"'") for k, v in ATTR.findall(raw)}
+    return {k.lower(): html.unescape(v.strip("\"'")) for k, v in ATTR.findall(raw)}
 
 
-def first_post_form(page, body):
+def fill(name, kind, a):
+    n = name.lower()
+    if kind == "email" or "email" in n:
+        v = EMAIL
+    elif kind == "password" or "pass" in n:
+        v = PASSWORD
+    elif kind in ("number", "range") or re.search(r"price|amount|qty|quantity|count|stock", n):
+        v = a.get("min") or "1"
+    elif kind == "url" or n.endswith("url") or "website" in n:
+        v = "http://example.com"
+    elif kind in DATES:
+        v = DATES[kind]
+    elif kind == "tel" or "phone" in n:
+        v = "5555550100"
+    elif kind == "color":
+        v = "#336699"
+    elif kind == "search" or n in ("q", "query", "search"):
+        v = "launch"
+    elif "user" in n or n in ("login", "handle", "nick", "nickname"):
+        v = USER
+    elif "title" in n or n == "name":
+        v = "Launch check"
+    else:
+        v = "launch check text"
+    ml = a.get("maxlength", "")
+    return v[: int(ml)] if ml.isdigit() and int(ml) > 0 else v
+
+
+class Session:
+    def __init__(self, port):
+        self.port = port
+        self.cookies = {}
+        self.lock = threading.Lock()
+        self.sent = 0
+        self.deadline = time.monotonic() + cfg["probe_s"]
+
+    def take(self, limit):
+        with self.lock:
+            if self.sent >= limit or time.monotonic() > self.deadline:
+                return False
+            self.sent += 1
+            return True
+
+    def keep(self, resp):
+        with self.lock:
+            for k, v in resp.getheaders():
+                if k.lower() != "set-cookie":
+                    continue
+                name, _, rest = v.partition("=")
+                value = rest.split(";", 1)[0].strip()
+                if not value or re.search(r"max-age=0\b|expires=thu, 01[ -]jan[ -]1970", v, re.I):
+                    self.cookies.pop(name.strip(), None)
+                else:
+                    self.cookies[name.strip()] = value
+
+    def local(self, base, loc):
+        u = urlsplit(urljoin(f"http://127.0.0.1:{self.port}{base}", loc))
+        if u.scheme != "http" or u.hostname not in ("127.0.0.1", "localhost"):
+            return None
+        if (u.port or 80) != self.port:
+            return None
+        return (u.path or "/") + (f"?{u.query}" if u.query else "")
+
+    def once(self, method, path, form, limit):
+        if not self.take(limit):
+            return None
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=cfg["request_s"])
+        h = {"Connection": "close", "Accept": "text/html,application/json;q=0.9,*/*;q=0.5"}
+        body = None
+        if form is not None:
+            body = urlencode(form).encode()
+            h["Content-Type"] = "application/x-www-form-urlencoded"
+        with self.lock:
+            if self.cookies:
+                h["Cookie"] = "; ".join(f"{k}={v}" for k, v in self.cookies.items())
+        try:
+            conn.request(method, path, body=body, headers=h)
+            resp = conn.getresponse()
+            self.keep(resp)
+            data = resp.read(262144).decode("utf-8", "replace")
+            ctype = resp.getheader("Content-Type", "") or ""
+            return {"status": resp.status, "full": data, "html": "html" in ctype.lower(),
+                    "location": resp.getheader("Location", "") or ""}
+        except Exception as exc:
+            return {"error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            conn.close()
+
+    def go(self, method, path, form=None, follow=5, limit=None):
+        # Same-origin redirects are followed as a browser does (a 307/308 keeps the
+        # method, any other turns a POST into a GET); the record is the final answer.
+        limit = cfg["max_requests"] if limit is None else limit
+        r = self.once(method, path, form, limit)
+        if r is None:
+            return None
+        at_m, at = method, path
+        while r.get("status") in REDIRECTS and follow > 0 and r.get("location"):
+            nxt = self.local(at, r["location"])
+            if nxt is None:
+                break
+            if r["status"] not in (307, 308):
+                at_m, form = "GET", None
+            nxt_r = self.once(at_m, nxt, form, limit)
+            if nxt_r is None:
+                break
+            at, r, follow = nxt, nxt_r, follow - 1
+        rec = {"method": method, "path": path, **r}
+        rec.pop("location", None)
+        if (at_m, at) != (method, path):
+            rec["at"] = f"{at_m} {at}"
+        rec["page"] = at if at_m == "GET" else None
+        return rec
+
+
+def norm(path):
+    return re.sub(r"\d+", "N", urlsplit(path).path)
+
+
+def parse_forms(page, body):
+    out = []
     for head, inner in FORM.findall(body):
         a = attrs(head)
-        if a.get("method", "get").lower() != "post":
-            continue
-        fields = {}
-        for tag, raw in FIELD.findall(inner):
+        # A browser sends any method but POST as a GET.
+        method = "POST" if a.get("method", "get").lower() == "post" else "GET"
+        u = urlsplit(urljoin(page, a.get("action") or page))
+        action = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        fields, pw, submit = [], 0, None
+        for tag, raw in INPUT.findall(inner):
             f = attrs(raw)
             name, kind = f.get("name"), f.get("type", "text").lower()
-            if not name or kind in ("submit", "button", "file", "reset", "image"):
+            if not name or re.search(r"(?<![\w-])disabled(?![\w-])", raw, re.I):
                 continue
-            if kind in ("hidden", "checkbox", "radio"):
-                fields.setdefault(name, f.get("value", "on"))
+            if tag.lower() == "button" or kind in ("submit", "image"):
+                if submit is None and "value" in f:
+                    submit = (name, f["value"])
+                continue
+            if kind in ("file", "reset", "button"):
+                continue
+            if kind == "password":
+                pw += 1
+            if kind == "hidden":
+                fields.append((name, f.get("value", "")))
+            elif kind in ("checkbox", "radio"):
+                if name not in (n for n, _ in fields):
+                    fields.append((name, f.get("value", "on")))
             else:
-                fields[name] = FILL.get(kind, "launch check")
-        action = urlsplit(urljoin(page, a.get("action") or page))
-        return (action.path or "/") + (f"?{action.query}" if action.query else ""), fields
-    return None
+                fields.append((name, f.get("value") or fill(name, kind, f)))
+        for raw, opts in SELECT.findall(inner):
+            f = attrs(raw)
+            values = [v for v in (attrs(o).get("value") for o in OPTION.findall(opts)) if v]
+            if f.get("name"):
+                fields.append((f["name"], values[0] if values else "1"))
+        if submit is not None:
+            fields.append(submit)
+        override = next((v.upper() for n, v in fields if n.lower() == "_method"), "")
+        if LOGOUT.search(action):
+            rank = 4
+        elif LEAVE.search(action) or override == "DELETE":
+            rank = 3
+        elif pw >= 2 or SIGNUP.search(action):
+            rank = 0
+        elif pw == 1:
+            rank = 1
+        else:
+            rank = 2
+        key = (method, override, norm(action), " ".join(sorted(n for n, _ in fields)))
+        out.append({"page": page, "method": method, "action": action, "fields": fields,
+                    "override": override, "rank": rank, "key": key})
+    return out
 
 
-def request(port, jar, method, path, form=None):
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=cfg["request_s"])
-    body = urlencode(form).encode() if form is not None else None
-    extra = {"Content-Type": "application/x-www-form-urlencoded"} if form is not None else {}
-    try:
-        conn.request(method, path, body=body, headers=jar.headers(extra))
-        resp = conn.getresponse()
-        jar.keep(resp)
-        data = resp.read(65536).decode("utf-8", "replace")
-        ctype = resp.getheader("Content-Type", "") or ""
-        return {"method": method, "path": path, "status": resp.status, "body": data,
-                "html": "html" in ctype.lower()}
-    except Exception as exc:
-        return {"method": method, "path": path, "error": f"{type(exc).__name__}: {exc}"}
-    finally:
-        conn.close()
+def parse_links(page, body, local):
+    out = []
+    for raw in LINK.findall(body):
+        href = attrs(raw).get("href", "")
+        if not href or href.startswith(("#", "mailto:", "javascript:", "tel:")):
+            continue
+        p = local(page, href.split("#", 1)[0])
+        if p and not LEAVE.search(p) and not ASSET.search(urlsplit(p).path):
+            out.append(p)
+    return out
+
+
+def probe(s, out, signed_in):
+    reqs = out["requests"]
+    seen, order, queue = set(), [], []
+    pending, done = [], set()
+    st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "post": None}
+
+    def harvest(r):
+        if not (r.get("html") and r.get("status", 500) < 400 and r.get("page")):
+            return
+        for f in parse_forms(r["page"], r.get("full", "")):
+            if f["key"] not in done and all(f["key"] != p["key"] for p in pending):
+                pending.append(f)
+        for link in parse_links(r["page"], r.get("full", ""), s.local):
+            if link not in seen and link not in queue:
+                queue.append(link)
+
+    def visit(path):
+        if path in seen or st["pages"] >= cfg["max_pages"]:
+            return
+        seen.add(path)
+        order.append(path)
+        st["pages"] += 1
+        r = s.go("GET", path)
+        if r is not None:
+            reqs.append(r)
+            harvest(r)
+            if st["authed"] and st["page"] is None and r.get("html") and r.get("status") == 200:
+                st["page"] = r["page"]
+
+    def submit(f):
+        # Re-fetch the form's page first: its CSRF token, and the session that
+        # token is bound to, may have rotated (signup, login) since it was found.
+        page = s.go("GET", f["page"])
+        if page is None:
+            return False
+        reqs.append(page)
+        found = parse_forms(page["page"], page.get("full", "")) if page.get("page") else []
+        fresh = [g for g in found if g["key"] == f["key"]]
+        if not fresh:
+            return True  # the page no longer offers it (a login form, once signed in)
+        g = fresh[0]
+        if g["method"] == "GET":
+            sep = "&" if "?" in g["action"] else "?"
+            r = s.go("GET", g["action"] + sep + urlencode(g["fields"]))
+        else:
+            r = s.go("POST", g["action"], g["fields"])
+        if r is None:
+            return False
+        r["form"] = {"page": g["page"], "method": g["method"], "override": g["override"]}
+        reqs.append(r)
+        st["forms"] += 1
+        ok = "error" not in r and r.get("status", 500) < 400
+        if g["rank"] < 2 and ok:
+            st["authed"] = True
+        if g["rank"] == 2 and g["method"] == "POST" and ok:
+            st["post"] = (g["action"], g["fields"])
+        harvest(r)
+        return True
+
+    def drive(final):
+        while True:
+            while queue and st["pages"] < cfg["max_pages"]:
+                visit(queue.pop(0))
+            pending.sort(key=lambda p: p["rank"])
+            nxt = [p for p in pending if final or p["rank"] < 4]
+            if not nxt or st["forms"] >= cfg["max_forms"]:
+                return
+            pending.remove(nxt[0])
+            done.add(nxt[0]["key"])
+            if not submit(nxt[0]):
+                return
+            if st["authed"] and not st["recrawled"] and all(p["rank"] >= 2 for p in pending):
+                # Signed in: the pages seen anonymously now show what is behind auth.
+                st["recrawled"] = True
+                st["pages"] = 0
+                queue[:0] = [p for p in order if p not in queue]
+                seen.clear()
+
+    for _, path in cfg["probes"]:
+        visit(path)
+    drive(False)
+    if st["forms"] == 0 and cfg["posts"]:
+        r = s.go("POST", cfg["posts"][0], {})
+        if r is not None:
+            reqs.append(r)
+    signed_in(st)  # the declared routes and the burst, while the session still holds
+    drive(True)
+    return st
+
+
+def burst(s, st):
+    # Requests in parallel against shared state the sequential probe never races.
+    page = st["page"] or "/"
+    jobs = [
+        ("POST", *st["post"]) if st["post"] and i % 2 else ("GET", page, None)
+        for i in range(cfg["burst"])
+    ]
+    start = threading.Barrier(len(jobs))
+    results = [None] * len(jobs)
+    limit = s.sent + len(jobs) * 2
+
+    def one(i, job):
+        try:
+            start.wait(cfg["request_s"])
+        except threading.BrokenBarrierError:
+            pass
+        results[i] = s.go(job[0], job[1], job[2], follow=1, limit=limit)
+
+    s.deadline = max(s.deadline, time.monotonic() + cfg["request_s"])
+    threads = [threading.Thread(target=one, args=(i, j), daemon=True) for i, j in enumerate(jobs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(cfg["request_s"] * 2 + 2)
+    got = [r for r in results if r is not None]
+    statuses = {}
+    for r in got:
+        k = str(r.get("status", "error"))
+        statuses[k] = statuses.get(k, 0) + 1
+    bad = [r for r in got if r.get("status", 0) >= 500]
+    return {"sent": len(got), "statuses": statuses, "failures": bad[:3], "count": len(bad)}
+
+
+def excerpt(body):
+    i = body.rfind("Traceback (most recent call last)")
+    if i >= 0:
+        return re.sub(r"<[^>]+>", "", body[i:])[-800:]
+    return body[:600]
 
 
 def run_http():
@@ -224,26 +503,26 @@ def run_http():
         except OSError:
             time.sleep(0.2)
     if out["boot"] == "listening":
-        jar = Forms()
-        form = None
-        for method, path in cfg["probes"]:
-            r = request(port, jar, method, path)
-            out["requests"].append(r)
-            if form is None and r.get("html") and r.get("status", 500) < 400:
-                form = first_post_form(path, r.get("body", ""))
-        if form is not None:
-            out["requests"].append(request(port, jar, "POST", form[0], form[1]))
-        elif cfg["posts"]:
-            out["requests"].append(request(port, jar, "POST", cfg["posts"][0], {}))
-        out["routes"] = [
-            request(port, jar, m, p, {} if m != "GET" else None) for m, p in cfg["routes"]
-        ]
+        sess = Session(port)
+
+        def signed_in(st):
+            out["routes"] = []
+            for m, p in cfg["routes"]:  # each declared route is asked once, whatever the budget
+                sess.deadline = max(sess.deadline, time.monotonic() + 1)
+                r = sess.go(m, p, {} if m != "GET" else None, follow=0, limit=sess.sent + 1)
+                out["routes"].append(r or {"method": m, "path": p, "error": "probe budget spent"})
+            if proc.poll() is None and cfg["burst"]:
+                out["burst"] = burst(sess, st)
+
+        probe(sess, out, signed_in)
+        out["sent"] = sess.sent
         for r in out["routes"]:
-            r.pop("body", None)
+            for k in ("full", "html", "page"):
+                r.pop(k, None)
+        for r in out["requests"] + out.get("burst", {}).get("failures", []):
+            r["body"] = excerpt(r.pop("full", ""))
             r.pop("html", None)
-        for r in out["requests"]:
-            r["body"] = r.get("body", "")[:600]
-            r.pop("html", None)
+            r.pop("page", None)
         out["alive"] = proc.poll() is None
         if not out["alive"]:
             out["rc"] = proc.returncode
@@ -603,6 +882,15 @@ def _tail(text: str, lines: int = 20, chars: int = 1500) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])[-chars:] or "(no output)"
 
 
+def _what(q: dict[str, Any]) -> str:
+    at = f" (redirected to {q['at']})" if q.get("at") else ""
+    return f"{q.get('method')} {q.get('path')}{at}"
+
+
+def _body(q: dict[str, Any]) -> str:
+    return str(q.get("body", ""))[-800:] or "(empty)"
+
+
 def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
     out: list[str] = []
     output = _tail(str(r.get("output", "")))
@@ -623,14 +911,38 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
         )
         return out
     for q in r.get("requests") or ():
-        what = f"{q.get('method')} {q.get('path')}"
+        what = _what(q)
+        status = int(q.get("status", 0))
+        form = q.get("form") or {}
         if "error" in q:
             out.append(f"launch: {what} failed ({q['error']}) against the running app")
-        elif int(q.get("status", 0)) >= 500:
+        elif status >= 500:
             out.append(
-                f"launch: {what} answered {q['status']} under the real server: a server "
-                f"error the tests did not catch. Response: {str(q.get('body', ''))[:400]}"
+                f"launch: {what} answered {status} under the real server: a server "
+                f"error the tests did not catch. Response: {_body(q)}"
             )
+        elif status == 405 and form and "at" not in q:
+            sent = (
+                f"{form.get('method')} with _method={form['override']}"
+                if form.get("override")
+                else str(form.get("method"))
+            )
+            out.append(
+                f"launch: the form on {form.get('page')} submits {what} ({sent}) and the "
+                "app answers 405 Method Not Allowed: its own form uses a method/action the "
+                "route does not accept. An HTML form sends only GET or POST — accept the "
+                "method the form really sends, or honor the _method override before routing. "
+                f"Response: {_body(q)}"
+            )
+    burst = r.get("burst") or {}
+    for q in burst.get("failures") or ():
+        out.append(
+            f"launch: under {burst.get('sent')} concurrent requests, {_what(q)} answered "
+            f"{q.get('status')} ({burst.get('count')} of them 5xx; it answers fine "
+            "one at a time): state shared across the server's threads (one DB connection "
+            "or cursor, a global) breaks under the real threaded server — open a "
+            f"connection per request or guard the shared state. Response: {_body(q)}"
+        )
     for q in r.get("routes") or ():
         if q.get("status") in (404, 405, 501):
             out.append(
@@ -693,7 +1005,6 @@ class LaunchGate:
         self.target = target
         self._pyenv = pyenv
         self._seal_key = seal_key
-        self._cfg = {"boot_s": boot_s, "request_s": request_s, "cli_s": cli_s}
         runs = len(target.runs) if target.kind == "cli" else 1
         self._routes = _routes(target.interface) if target.kind == "http" else ()
         # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
@@ -703,6 +1014,20 @@ class LaunchGate:
             + (cli_s + 10) * runs
             + 30
         )
+        # The http probe stops starting requests at probe_s, inside that timeout:
+        # after it one request may be in flight, each declared route and the burst
+        # (barrier wait + two hops) take a request_s each, then the kill and join.
+        probe_s = self._timeout_s - boot_s - request_s * (len(self._routes) + 5) - 20
+        self._cfg = {
+            "boot_s": boot_s,
+            "request_s": request_s,
+            "cli_s": cli_s,
+            "probe_s": max(probe_s, request_s),
+            "max_requests": _MAX_REQUESTS,
+            "max_pages": _MAX_PAGES,
+            "max_forms": _MAX_FORMS,
+            "burst": _BURST,
+        }
         self.mutant_rotation_id = 0
         self.scanner_rule_version = "launch-v1"
 

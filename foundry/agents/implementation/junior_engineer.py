@@ -98,6 +98,8 @@ _FIXER_CHECK_RULES = (
     "cannot run here (missing tool, no network), say so in a TRIAGE line.",
 )
 
+# Gates that run the app: a fixer sent for one re-runs it in its own check.
+_RUN_GATES = frozenset({"smoke", "launch"})
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
 # A local model spends ~10 of a fix pass's turns re-reading files before its first edit.
@@ -1035,8 +1037,8 @@ def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) 
         own_build=cluster is None or any(i.startswith("build:") for i in items),
         # The fixer's check runs only build + scenarios: a red smoke (smoke.py never
         # written) stayed invisible to it, and it called done on a tree that failed.
-        smoke=any(g.name == "smoke" and g.status is GateStatus.FAIL for g in failed),
-        own_smoke=cluster is None or any(i.startswith("smoke:") for i in items),
+        smoke=any(g.name in _RUN_GATES and g.status is GateStatus.FAIL for g in failed),
+        own_smoke=cluster is None or any(i.startswith(("smoke:", "launch:")) for i in items),
         rules=dict(zip(_FIXER_RULES, _FIXER_CHECK_RULES, strict=False)),
     )
 

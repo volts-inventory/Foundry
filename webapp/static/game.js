@@ -150,7 +150,7 @@ const ROSTER = {
   // (frontend/backend/data) from the live org telemetry (layoutEngineering).
   review:["Reviewer"],
 };
-const GATE_ORDER = ["spec","build","test","smoke","review"];
+const GATE_ORDER = ["spec","build","test","smoke","launch","review"];
 const AGENT_ROOM = {}; for (const rm in ROSTER) for (const nm of ROSTER[rm]) AGENT_ROOM[nm] = rm;
 // Per-area accent (shared by the org board, the Tech-Leads, and the area-expert
 // IC pool) so frontend/backend/data/… read the same colour everywhere.

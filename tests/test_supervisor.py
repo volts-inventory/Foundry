@@ -52,6 +52,7 @@ from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
     Criticality,
+    IntentBrief,
 )
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
@@ -224,6 +225,8 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             security_abuse=True,  # guarantees Spec-gate security coverage
             seq=handle.seq,
         )
+    if handle.kind == "intent_brief":
+        return IntentBrief(intent="a todo service", seq=handle.seq)
     if handle.kind == "prd":
         # No criterion ids: the synthetic criteria ids above are never filtered.
         return PRD(title="Requested service", prd_uri="cas://design/prd", seq=handle.seq)

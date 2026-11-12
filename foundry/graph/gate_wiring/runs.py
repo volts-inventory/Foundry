@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import shlex
+import sys
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,7 @@ from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.graph.gate_wiring.materialize import (
     _current_criteria,
+    _of_kind,
     _toolchain_digest,
     materialize_workdir,
     planned_files,
@@ -46,6 +48,7 @@ _SPEC_NODE = "spec_gate"
 _BUILD_NODE = "build_gate"
 _TEST_NODE = "test_gate"
 _SMOKE_NODE = "smoke_gate"
+_LAUNCH_NODE = "launch_gate"
 
 
 def _run_gates(
@@ -150,6 +153,40 @@ class UnpinnedSmokeGate:
 
 
 _GATE_TIMEOUT_S = 600.0
+
+
+def launch_gate(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    profile: VerificationProfile | None,
+    seal_key: bytes | None = None,
+    pyenv: PythonBuildEnv | None = None,
+) -> GateImpl:
+    """The launch gate for this tree: the app the stack (or pinned profile) names,
+    else the entrypoint ticket's entry, with the entrypoint scenarios' probes."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.gates.launch import LaunchGate, LaunchTarget, launch_target
+    from foundry.schemas.product import IntentBrief
+
+    if profile is not None and profile.unavailable:
+        return UnavailableGate("launch", profile.unavailable)
+    stack = state.get("stack")
+    if (stack is None or stack.profile) and not (profile is not None and profile.launch_kind):
+        return LaunchGate(LaunchTarget(), seal_key=seal_key)  # nothing pinned to launch
+    briefs = [
+        b
+        for a in sorted(_of_kind(state, "intent_brief"), key=lambda a: a.seq)
+        if isinstance(b := resolve(a), IntentBrief)
+    ]
+    target = launch_target(
+        stack,
+        profile,
+        tickets=read_tickets(state, resolve),
+        criteria=_current_criteria(state, resolve).values(),
+        deliverable=briefs[-1].deliverable if briefs else "",
+        python=pyenv.python if pyenv is not None else sys.executable,
+    )
+    return LaunchGate(target, seal_key=seal_key, pyenv=pyenv)
 
 
 def _build_gate(
@@ -288,6 +325,7 @@ def run_build_test_gates(
             discriminator_factory=discriminator_factory,
             profile=profile,
             pyenv=pyenv,
+            launch=launch_gate(state, resolve, profile, runner.seal_key, pyenv),
         )
 
 
@@ -303,6 +341,7 @@ def _build_test_smoke(
     discriminator_factory: DiscriminatorFactory | None,
     profile: VerificationProfile | None,
     pyenv: PythonBuildEnv | None,
+    launch: GateImpl,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
@@ -330,6 +369,7 @@ def _build_test_smoke(
             stack_harness=test_cmd is not None,
             profile_name=profile.name if profile is not None else "",
             pyenv=pyenv,
+            step_lint=profile.step_lint if profile is not None else "",
         )
     # Every run carries a smoke verdict: the stack's own run command, else an
     # attested "not pinned" PASS (the boundary is always build/test/smoke).
@@ -347,6 +387,7 @@ def _build_test_smoke(
             (_build_gate(profile, runner, pyenv), _BUILD_NODE),
             (test_gate, _TEST_NODE),
             (smoke, _SMOKE_NODE),
+            (launch, _LAUNCH_NODE),
         ],
         rt=rt,
         runner=runner,
@@ -425,6 +466,7 @@ def _wave_test_gate(
         scope=scope,
         pyenv=pyenv,
         timeout_s=timeout_s,
+        step_lint=profile.step_lint if profile is not None else "",
     )
 
 
@@ -489,10 +531,12 @@ def run_build_gate(
     workdir: Path,
     profile: VerificationProfile | None = None,
     scenarios: frozenset[str] = frozenset(),
+    launch: bool = False,
 ) -> dict[str, Any]:
     """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
     when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
-    unbound or failing scenario is caught in the wave that built it.
+    unbound or failing scenario is caught in the wave that built it, and with
+    ``launch`` (the last wave: the whole app is built) the Launch gate.
 
     The full Test gate is left out on purpose: scenarios of tickets not yet built
     would fail it. Keyed under the same nodes as the final gates, so the final
@@ -526,6 +570,10 @@ def run_build_gate(
             # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
             # ever runs on a later tree (a failing wave check is fixed or halts).
             gates.append((test, _TEST_NODE))
+        if launch:
+            gates.append(
+                (launch_gate(state, resolve, profile, runner.seal_key, pyenv), _LAUNCH_NODE)
+            )
         out["gates"] = _run_gates(
             gates,
             rt=rt,

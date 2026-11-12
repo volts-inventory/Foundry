@@ -588,13 +588,14 @@ def test_undetected_stack_language_is_an_error_not_another_stack(
         ("build", GateStatus.ERROR),
         ("test", GateStatus.ERROR),
         ("smoke", GateStatus.ERROR),
+        ("launch", GateStatus.ERROR),
     ]
     for g in out["gates"]:
         assert any("missing toolchain" in f and "'rust'" in f for f in g.findings)
         assert not runner.records.stable_fail_latched(g.run_against, g.name)
     check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
-    [build] = check.run(state, config)["gates"]
-    assert build.status is GateStatus.ERROR
+    build, launch = check.run(state, config)["gates"]  # the last wave also launches
+    assert build.status is launch.status is GateStatus.ERROR
 
 
 def test_stack_without_test_or_bdd_never_falls_back_to_pytest(
@@ -665,7 +666,9 @@ def test_python_stack_keeps_the_trusted_harness() -> None:
     typed = stack_profile(StackDecision(language="python", typecheck="python3 -m mypy ."))
     assert typed.build_cmd is not None and typed.build_cmd[2].endswith(
         "-m compileall -q . && python3 -m mypy --ignore-missing-imports "
-        "--disable-error-code import-not-found --disable-error-code import-untyped ."
+        "--disable-error-code import-not-found --disable-error-code import-untyped --strict "
+        "--exclude '(^|/)(tests?|features|step_defs)/|(^|/)(test_[^/]*|[^/]*_test|conftest)"
+        "\\.py$' ."
     )
 
 
@@ -741,7 +744,12 @@ def test_build_test_gates_run_the_stack_commands(
         workdir=tmp_path,
     )
     by_name = {g.name: g.status for g in out["gates"]}
-    assert by_name == {"build": GateStatus.PASS, "test": GateStatus.PASS, "smoke": GateStatus.FAIL}
+    assert by_name == {
+        "build": GateStatus.PASS,
+        "test": GateStatus.PASS,
+        "smoke": GateStatus.FAIL,
+        "launch": GateStatus.PASS,
+    }
     assert (tmp_path / "typed.txt").read_text().strip() == "typed"  # typecheck ran in BUILD
 
 
@@ -842,8 +850,10 @@ def test_wave_build_check_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> No
     runner, rt, config = _runner_rt()
     check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
     state: Any = {"artifacts": [], "stack": _js(typecheck="exit 2")}
-    [build] = check.run(state, config)["gates"]
+    # No wave left to build: the check also launches the app (a library here).
+    build, launch = check.run(state, config)["gates"]
     assert build.name == "build" and build.status is GateStatus.FAIL
+    assert launch.name == "launch" and launch.status is GateStatus.PASS
 
 
 @pytest.mark.parametrize(
@@ -1201,3 +1211,36 @@ def test_stack_profile_adds_mypy_flags_only_to_a_mypy_invocation() -> None:
     assert fix("pip install mypy && mypy .") == f"pip install mypy && {_MYPY_LENIENT} ."
     assert fix("uv run mypy .") == f"uv run {_MYPY_LENIENT} ."
     assert fix("mypy .") == f"{_MYPY_LENIENT} ."
+
+
+def test_python_typecheck_is_strict_on_source_and_leaves_tests_out(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text(
+        "def add(a: int, b: int) -> int:\n    return a + b\n"
+    )
+    (tmp_path / "tests" / "test_app.py").write_text("def test_add(client):\n    assert client\n")
+    (tmp_path / "conftest.py").write_text("def helper(x):\n    return x\n")
+    typecheck = f"{sys.executable} -m mypy --cache-dir /dev/null app tests"
+    profile = stack_profile(StackDecision(language="python", build="true", typecheck=typecheck))
+    assert profile.build_cmd is not None
+    cmd = profile.build_cmd
+
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(cmd, cwd=tmp_path, capture_output=True, text=True)
+
+    first = run()
+    assert first.returncode == 0, first.stdout
+    (tmp_path / "app" / "util.py").write_text("def untyped(x):\n    return x\n")
+    got = run()
+    assert got.returncode == 1 and "no-untyped-def" in got.stdout and "tests/" not in got.stdout
+
+
+def test_typescript_typecheck_is_strict() -> None:
+    profile = stack_profile(
+        StackDecision(language="typescript", test="npm test", typecheck="npx tsc --noEmit")
+    )
+    assert profile.build_cmd is not None and "npx tsc --strict --noEmit" in profile.build_cmd[2]

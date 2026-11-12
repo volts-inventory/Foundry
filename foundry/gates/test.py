@@ -1314,6 +1314,392 @@ def step_module_notes(
     return tuple(out)
 
 
+# ---- step-definition lint: steps that cannot fail where they should ------------
+#
+# A scenario whose steps check nothing passes whatever the code does. These static
+# checks FAIL such a scenario (it is marked "weak-steps"): a When step that asserts
+# (the action is checked, not the outcome), a Then step that is empty or checks only
+# an exit code or truthiness, and a Then step that computes its expected value by
+# calling the function the When step exercised (it passes whatever that returns).
+
+WEAK_STEPS = "weak-steps"
+_EXIT_NAME = re.compile(r"^(returncode|exit_?code|exitcode|exit_status|rc)$", re.I)
+_CHECK_CALL = re.compile(r"^(assert|check|expect|verify|fail|raises)", re.I)
+# Calls too generic to be "the function under test" when both steps make them.
+_GENERIC_CALLS = frozenset(
+    {
+        "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple", "sorted",
+        "repr", "type", "isinstance", "getattr", "range", "print", "open", "min", "max",
+        "sum", "any", "all", "get", "pop", "setdefault", "json", "items", "keys",
+        "values", "strip", "split", "lower", "upper", "format", "decode", "encode",
+        "read_text", "loads", "dumps", "append", "join", "copy",
+    }
+)  # fmt: skip
+
+
+def _callee(func: ast.expr) -> str:
+    return (
+        func.id
+        if isinstance(func, ast.Name)
+        else func.attr
+        if isinstance(func, ast.Attribute)
+        else ""
+    )
+
+
+def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    """``fn``'s nodes, minus nested functions and classes (helpers it only defines)."""
+    out: list[ast.AST] = []
+    todo: list[ast.AST] = list(fn.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        out.append(node)
+        todo.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _calls_made(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    return {
+        name
+        for n in _own_nodes(fn)
+        if isinstance(n, ast.Call) and (name := _callee(n.func)) and name not in _GENERIC_CALLS
+    }
+
+
+def _weak_test(test: ast.expr) -> bool:
+    """An assert condition that holds for nearly any outcome: truthiness, not-None,
+    a bare ``len``/``bool``, or an exit code."""
+    if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
+        return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _weak_test(test.operand)
+    if isinstance(test, ast.Call):
+        return _callee(test.func) in ("bool", "len", "isinstance", "callable", "hasattr")
+    if isinstance(test, ast.BoolOp):
+        return all(_weak_test(v) for v in test.values)
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, right, op = test.left, test.comparators[0], test.ops[0]
+        sides = (left, right)
+        if isinstance(op, (ast.Is, ast.IsNot)) and any(
+            isinstance(s, ast.Constant) and s.value in (None, True, False) for s in sides
+        ):
+            return True
+        if any(
+            _EXIT_NAME.match(_callee(s) or (s.id if isinstance(s, ast.Name) else "")) for s in sides
+        ):
+            return True
+        if any(
+            isinstance(s, ast.Subscript)
+            and isinstance(s.slice, ast.Constant)
+            and isinstance(s.slice.value, str)
+            and _EXIT_NAME.match(s.slice.value)
+            for s in sides
+        ):
+            return True
+        if (
+            isinstance(left, ast.Call)
+            and _callee(left.func) == "len"
+            and isinstance(right, ast.Constant)
+        ):
+            return isinstance(op, (ast.Gt, ast.GtE, ast.NotEq)) and right.value in (0, 1)
+    return False
+
+
+def _vacuous(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    body = [
+        s
+        for s in fn.body
+        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+        and not isinstance(s, ast.Pass)
+    ]
+    return not body
+
+
+def _expected_from_sut(fn: ast.FunctionDef | ast.AsyncFunctionDef, sut: set[str]) -> str | None:
+    """The function under test (called by the scenario's When steps) a Then step's
+    assert also calls to compute the value it compares against."""
+    assigned: dict[str, set[str]] = {}
+    nodes = _own_nodes(fn)
+    for n in nodes:
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    assigned.setdefault(t.id, set()).update(
+                        _callee(c.func) for c in ast.walk(n.value) if isinstance(c, ast.Call)
+                    )
+
+    def side(e: ast.expr) -> set[str]:
+        if isinstance(e, ast.Name):
+            return assigned.get(e.id, set())
+        return {_callee(c.func) for c in ast.walk(e) if isinstance(c, ast.Call)}
+
+    for n in nodes:
+        if not (isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)):
+            continue
+        sides = [side(n.test.left), *(side(c) for c in n.test.comparators)]
+        for name in sorted(set().union(*sides) - _GENERIC_CALLS - {""}):
+            if name in sut or sum(name in s for s in sides) > 1:
+                return name
+    return None
+
+
+def _python_step_lint(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, kind: str, sut: set[str]
+) -> str | None:
+    nodes = _own_nodes(fn)
+    asserts = [n for n in nodes if isinstance(n, ast.Assert)]
+    if kind == "when":
+        return (
+            "asserts inside a When step (a When step acts; its outcome belongs in a Then step)"
+            if asserts
+            else None
+        )
+    if kind != "then":
+        return None
+    if _vacuous(fn):
+        return "is an empty Then step (only `pass`, `...` or a docstring): it checks nothing"
+    checks = [
+        n
+        for n in nodes
+        if isinstance(n, ast.Raise)
+        or (
+            isinstance(n, ast.Call)
+            and _CHECK_CALL.match(_callee(n.func))
+            and not isinstance(n, ast.Assert)
+        )
+    ]
+    if not asserts and not checks:
+        return "is a Then step with no assert: it checks nothing"
+    if asserts and not checks and all(_weak_test(a.test) for a in asserts):
+        return (
+            "is a Then step whose only check is truthiness, not-None or an exit code: "
+            "assert the actual output the scenario's Then line states"
+        )
+    if (name := _expected_from_sut(fn, sut)) is not None:
+        return (
+            f"is a Then step that computes its expected value by calling `{name}`, the "
+            "function under test, so it passes whatever that returns: compare against "
+            "the literal value the scenario states"
+        )
+    return None
+
+
+def _step_functions(
+    root: Path, modules: Iterable[str]
+) -> list[tuple[_StepDef, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    out: list[tuple[_StepDef, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for rel in modules:
+        tree = _parse_module(root, rel)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.extend(
+                    (replace(s, function=node.name), node)
+                    for d in node.decorator_list
+                    if (s := _step_def(rel, d))
+                )
+    return sorted(out, key=lambda p: (p[0].module, p[0].line))
+
+
+def weak_step_notes(
+    workdir: Path, trusted: Mapping[str, Sequence[tuple[str, str]]]
+) -> dict[str, tuple[str, ...]]:
+    """``{scenario ref: why}`` for each trusted scenario a pytest-bdd step that
+    cannot fail where it should runs in (AST only, nothing runs)."""
+    root = Path(workdir)
+    features = {r.split("::", 1)[0] for r in trusted}
+    modules = [
+        *binding_modules(root, features),
+        *(
+            p.relative_to(root).as_posix()
+            for p in sorted(root.rglob("conftest.py"))
+            if not p.relative_to(root).as_posix().startswith(".")
+        ),
+    ]
+    defs = _step_functions(root, dict.fromkeys(modules))
+    out: dict[str, tuple[str, ...]] = {}
+    for ref, steps in trusted.items():
+        bound: list[tuple[str, str, _StepDef, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+        for kind, text in steps:
+            hits = [
+                (d, fn) for d, fn in defs if d.kind == kind and step_matches(d.parser, d.text, text)
+            ]
+            if hits:
+                bound.append((kind, text, *hits[-1]))
+        sut = set().union(*(_calls_made(fn) for kind, _, _, fn in bound if kind == "when"))
+        notes = [
+            f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}, {d.function}) {why}'
+            for kind, _, d, fn in bound
+            if (why := _python_step_lint(fn, kind, sut))
+        ]
+        if notes:
+            out[ref] = tuple(dict.fromkeys(notes))
+    return out
+
+
+# Cucumber step files (JS/TS, Go): regex checks, judged per step definition.
+_JS_STEP = re.compile(
+    r"\b(Given|When|Then)\(\s*(?:(['\"`])((?:\\.|(?!\2).)*)\2|/((?:\\.|[^/\n])+)/)\s*,"
+)
+_GO_STEP = re.compile(
+    r"\.(Step|Given|When|Then)\(\s*(?:`([^`]*)`|\"((?:\\.|[^\"\\])*)\")\s*,\s*([\w.]+|func\b)"
+)
+_JS_ASSERT = re.compile(r"\b(assert(?:\.\w+)?|expect)\s*\(|\.should\b|\bthrow\b")
+_JS_WEAK = re.compile(
+    r"\bassert(?:\.ok)?\s*\(\s*!?[\w.$\[\]'\"]+\s*\)"
+    r"|\.(toBeTruthy|toBeDefined|toBeFalsy|toBeUndefined|toBeNull)\s*\(\s*\)"
+    r"|\.not\.toBeNull\s*\(\s*\)"
+)
+_GO_ASSERT = re.compile(r"\b(assert|require)\.\w+\(|\bt\.(Error|Fatal)")
+_GO_CHECK = re.compile(r"\bif\b|\b(assert|require)\.\w+\(|Errorf\(|errors\.New\(|\bpanic\(")
+_GO_IF = re.compile(r"\bif\s+([^{]+)\{")
+_EXIT_TEXT = re.compile(r"exit_?code|ExitCode|exitCode|returncode|\bcode\s*[!=]=", re.I)
+
+
+def _braced(text: str, start: int) -> str:
+    """The ``{...}`` block starting at the first brace at or after ``start``."""
+    i = text.find("{", start)
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1 : j]
+    return text[i + 1 :]
+
+
+def _cucumber_step_defs(root: Path, language: str) -> list[tuple[str, str, str, str]]:
+    """(kind or "step", pattern regex, location, body) per step definition."""
+    out: list[tuple[str, str, str, str]] = []
+    suffixes = (".go",) if language == "go" else (".js", ".mjs", ".cjs", ".ts", ".mts")
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if (
+            path.suffix not in suffixes
+            or not path.is_file()
+            or rel.startswith((".", "node_modules/"))
+            or "/node_modules/" in rel
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if language == "go":
+            for m in _GO_STEP.finditer(text):
+                kind, pattern = (
+                    m.group(1).lower(),
+                    m.group(2) if m.group(2) is not None else m.group(3),
+                )
+                fn = m.group(4)
+                if fn == "func":
+                    body = _braced(text, m.end())
+                else:
+                    name = fn.rsplit(".", 1)[-1]
+                    d = re.search(rf"\bfunc\s+(?:\([^)]*\)\s*)?{re.escape(name)}\s*\(", text)
+                    body = _braced(text, d.end()) if d else ""
+                out.append((kind, pattern, f"{rel}:{text.count(chr(10), 0, m.start()) + 1}", body))
+            continue
+        for m in _JS_STEP.finditer(text):
+            if m.group(4) is not None:
+                pattern = cucumber._js_to_py(m.group(4))
+            else:
+                pattern = cucumber.expression_to_regex(m.group(3), {})
+            body = _braced(text, m.end())
+            out.append(
+                (
+                    m.group(1).lower(),
+                    pattern,
+                    f"{rel}:{text.count(chr(10), 0, m.start()) + 1}",
+                    body,
+                )
+            )
+    return out
+
+
+def _cucumber_lint(kind: str, body: str, language: str) -> str | None:
+    code = re.sub(r"//[^\n]*|/\*.*?\*/", "", body, flags=re.S)
+    if kind == "when":
+        rx = _GO_ASSERT if language == "go" else _JS_ASSERT
+        return (
+            "asserts inside a When step (its outcome belongs in a Then step)"
+            if rx.search(code)
+            else None
+        )
+    if kind != "then":
+        return None
+    if language == "go":
+        if not _GO_CHECK.search(code):
+            return "is a Then step that checks nothing (no condition, assertion or error)"
+        conds = _GO_IF.findall(code)
+        if conds and not _GO_ASSERT.search(code) and all(_EXIT_TEXT.search(c) for c in conds):
+            return "is a Then step whose only check is the exit code: check the actual output"
+        return None
+    checks = [
+        m.group(0)
+        for m in re.finditer(
+            r"(assert(?:\.\w+)?|expect)\s*\([^;\n]*|\.should[^;\n]*|\bthrow\b[^;\n]*", code
+        )
+    ]
+    if not checks:
+        return "is a Then step that checks nothing (no assert or expect)"
+    if all(_JS_WEAK.search(c) or _EXIT_TEXT.search(c) for c in checks):
+        return (
+            "is a Then step whose only check is truthiness or an exit code: assert the "
+            "actual output the scenario's Then line states"
+        )
+    return None
+
+
+def cucumber_weak_step_notes(
+    workdir: Path, trusted: Mapping[str, Sequence[tuple[str, str]]], language: str
+) -> dict[str, tuple[str, ...]]:
+    """:func:`weak_step_notes` for a Cucumber stack's step files (``language``:
+    javascript, typescript or go), by regex; a definition is bound to the trusted
+    step lines its pattern fully matches."""
+    defs = _cucumber_step_defs(Path(workdir), language)
+    out: dict[str, tuple[str, ...]] = {}
+    for ref, steps in trusted.items():
+        notes: list[str] = []
+        for kind, text in steps:
+            for dkind, pattern, where, body in defs:
+                if dkind not in (kind, "step"):
+                    continue
+                try:
+                    if re.fullmatch(pattern.removeprefix("^").removesuffix("$"), text) is None:
+                        continue
+                except re.error:
+                    continue
+                if why := _cucumber_lint(kind, body, language):
+                    notes.append(f"step `{text}` ({where}) {why}")
+                break
+        if notes:
+            out[ref] = tuple(dict.fromkeys(notes))
+    return out
+
+
+def lint_scenarios(scenarios: dict[str, str], notes: Mapping[str, Sequence[str]]) -> dict[str, str]:
+    """``{ref: why}`` for each passed scenario ``notes`` flags, now marked
+    :data:`WEAK_STEPS` in ``scenarios`` (in place)."""
+    why: dict[str, str] = {}
+    for ref, lines in notes.items():
+        if scenarios.get(ref) == "passed":
+            scenarios[ref] = WEAK_STEPS
+            why[ref] = (
+                "passed, but its steps cannot fail where they should — "
+                + "; ".join(lines)
+                + ". Rewrite the step definitions (the .feature file is gate-owned)"
+            )
+    return why
+
+
 @counted("test.static_step")
 def static_step_notes(
     workdir: Path, features: Iterable[str], *, params: bool = True
@@ -1377,6 +1763,7 @@ class TestGate:
         profile_name: str = "",
         scope: frozenset[str] | None = None,
         pyenv: PythonBuildEnv | None = None,
+        step_lint: str = "",
     ) -> None:
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
@@ -1406,9 +1793,13 @@ class TestGate:
         # these scenarios run and decide the verdict; other tests are not judged.
         self.scope = scope
         # The command digest: a cached verdict never outlives a change of commands.
-        self.scanner_rule_version = "test-harness-v3:" + commands_digest(
+        # The Cucumber step files' lint language (the pytest-bdd lint always runs).
+        self.step_lint = step_lint
+        # v4: the step-definition lint FAILs scenarios whose steps cannot fail.
+        self.scanner_rule_version = "test-harness-v4:" + commands_digest(
             cmd=list(self.cmd),
             bdd_cmd=self.bdd_cmd,
+            step_lint=step_lint,
             stack_harness=stack_harness,
             profile=profile_name,
             scope=sorted(scope) if scope is not None else None,
@@ -1629,6 +2020,13 @@ class TestGate:
             scenarios, notes = self._cucumber_scenarios(
                 report_path, digest, trusted, workdir, (bdd_rc, bdd_out, bdd_err)
             )
+            weak = (
+                lint_scenarios(
+                    scenarios, cucumber_weak_step_notes(workdir, trusted, self.step_lint)
+                )
+                if self.step_lint
+                else {}
+            )
             structured[BDD_KEY] = scenarios
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
@@ -1648,7 +2046,7 @@ class TestGate:
                 )
             findings = (
                 *notes,
-                *bdd_findings(scenarios, _CUCUMBER_WHY),
+                *bdd_findings(scenarios, _CUCUMBER_WHY, why_ref=weak),
                 *bdd_failures,
                 *findings,
                 cucumber.CUCUMBER_RESIDUAL,
@@ -1660,12 +2058,14 @@ class TestGate:
             # run never executed (unbound feature, collection miss) is "missing".
             got = executed or {}
             scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
+            weak = lint_scenarios(scenarios, weak_step_notes(workdir, trusted))
             structured[BDD_KEY] = scenarios
             missing = [ref for ref, o in scenarios.items() if o == "missing"]
             findings = (
                 *shadowed_scenario_notes(workdir, missing),
                 *bdd_findings(
-                    scenarios, why_ref=uncollected_binding_reasons(out, workdir, missing)
+                    scenarios,
+                    why_ref={**uncollected_binding_reasons(out, workdir, missing), **weak},
                 ),
                 *findings,
             )

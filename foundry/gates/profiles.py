@@ -72,6 +72,14 @@ class VerificationProfile:
     # Why the TEST gate cannot run (a non-Python stack with no test and no bdd
     # command): that gate alone is an ERROR, never the pytest harness.
     test_unavailable: str = ""
+    # The launch gate (``foundry.gates.launch``): the shell line that starts the app
+    # and how it is driven ("cli" | "http"; "" = nothing to launch). None = the gate
+    # derives it from the plan's entrypoint ticket.
+    launch_cmd: str | None = None
+    launch_kind: str = ""
+    # The language whose step-definition lint the Test gate runs over a Cucumber
+    # stack's step files (``javascript`` | ``typescript`` | ``go``; "" = none).
+    step_lint: str = ""
 
 
 def _sh(script: str) -> tuple[str, ...]:
@@ -633,13 +641,56 @@ def pinned_stack(name: str) -> StackDecision:
 # A third-party library without stubs (flask_login) is not the project's type error.
 # The CLI flag beats a model-written global `ignore_missing_imports = false` or
 # `strict`, but a per-module override beats the flag, so the error codes go too.
+# The source is checked --strict; test code (step definitions, conftest, tests/) is
+# excluded: --exclude prunes the directories mypy walks, and a test path named on the
+# command line is dropped (mypy checks a named file whatever --exclude says).
 _MYPY = re.compile(
     r"((?:^|&&|;|\|\|)\s*(?:uv\s+run\s+)?(?:(?:\S*/)?python[\d.]*\s+-m\s+)?)mypy(?=\s|$)"
 )
+_MYPY_CALL = re.compile(_MYPY.pattern + r"([^;&|]*)")
+_TEST_PATH = re.compile(
+    r"(^|/)(tests?|features|step_defs)(/|$)|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$"
+)
+_TEST_EXCLUDE = r"(^|/)(tests?|features|step_defs)/|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$"
 _MYPY_LENIENT = (
     "mypy --ignore-missing-imports --disable-error-code import-not-found "
     "--disable-error-code import-untyped"
 )
+_MYPY_STRICT = f"{_MYPY_LENIENT} --strict --exclude {shlex.quote(_TEST_EXCLUDE)}"
+
+
+def _strict_mypy(m: re.Match[str]) -> str:
+    try:
+        args = shlex.split(m.group(2))
+    except ValueError:
+        return m.group(1) + _MYPY_STRICT + m.group(2)
+    kept = [a for a in args if a.startswith("-") or not _TEST_PATH.search(a.removeprefix("./"))]
+    if args and not [a for a in kept if not a.startswith("-")]:
+        kept.append(".")
+    tail = m.group(2)[len(m.group(2).rstrip()) :]
+    return m.group(1) + " ".join([_MYPY_STRICT, *map(shlex.quote, kept)]) + tail
+
+
+def python_typecheck(cmd: str) -> str:
+    """A Python stack's typecheck as the gate runs it: each mypy call --strict on the
+    source, with stubless third-party imports tolerated and test code left out."""
+    return _MYPY_CALL.sub(_strict_mypy, cmd)
+
+
+_TSC = re.compile(r"(?<![\w-])tsc(?=\s|$)")
+
+
+def typescript_typecheck(cmd: str) -> str:
+    """``tsc`` --strict, whatever the tsconfig says."""
+    return cmd if "--strict" in cmd else _TSC.sub("tsc --strict", cmd)
+
+
+_LAUNCH_CONTRACT = (
+    "launch = Foundry itself starts {cmd} as a user would (an http app on $PORT/$HOST, "
+    "then GET / and the entrypoint scenarios' paths; a CLI with its scenario command "
+    "or --help) and FAILs on a 5xx, a refused connection, an early exit or a traceback"
+)
+_STEP_LINTS = frozenset({"javascript", "typescript", "go"})
 
 
 def stack_profile(stack: StackDecision) -> VerificationProfile:
@@ -656,8 +707,10 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
     typecheck = (
-        _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, stack.typecheck)
+        python_typecheck(stack.typecheck)
         if python
+        else typescript_typecheck(stack.typecheck)
+        if stack.language == "typescript"
         else stack.typecheck
     )
     steps = [s for s in (build, typecheck) if s]
@@ -681,6 +734,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         f"test = `{_script(test_cmd) or 'pytest'}`",
         *([f"bdd = `{stack.bdd}`"] if stack.bdd else []),
         f"smoke = `{stack.run}`" if stack.run else "smoke = not pinned",
+        _LAUNCH_CONTRACT.format(cmd=f"`{stack.launch}`" if stack.launch else "the app's entry"),
     ]
     return VerificationProfile(
         name=f"stack:{stack.language}",
@@ -701,6 +755,9 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
+        launch_cmd=stack.launch or None,
+        launch_kind=stack.kind,
+        step_lint=stack.language if stack.bdd and stack.language in _STEP_LINTS else "",
     )
 
 

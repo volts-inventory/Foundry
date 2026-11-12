@@ -348,7 +348,7 @@ def _final_state(*trees: tuple[str, GateStatus]) -> FactoryState:
     for i, (tree, status) in enumerate(trees):
         gates += [
             _gate(n, tree, 10 * i + k, status if n == "test" else _OK)
-            for k, n in enumerate(("build", "test", "smoke"))
+            for k, n in enumerate(("build", "test", "smoke", "launch"))
         ]
     return {
         "artifacts": [_diff_art(store, "T-001", 1, {"app.py": "x\n"})],
@@ -566,8 +566,11 @@ def test_a_spent_wave_share_moves_on_to_the_next_wave(tmp_path: Path) -> None:
     assert [g.status for g in out["gates"] if g.name == "build"] == [GateStatus.FAIL]
     assert out["budget"].fix_attempts_since_all_green == 0
 
-    # With no wave left to build the same stop halts, as it always did.
-    check = _check(rec, store, policy)
+    # With no wave left to build the same stop halts, as it always did. (The window
+    # was judged as a mid-run wave, so this check does not add the last wave's launch.)
+    import dataclasses
+
+    check = dataclasses.replace(_check(rec, store, policy), check_launch=False)
     cfg: Any = {"configurable": {"thread_id": "wave-run"}}
     wave1 = {**out, "artifacts": [a for a in out["artifacts"] if a.task_id != "T-002"]}
     assert check.route(wave1, cfg) == "advance"

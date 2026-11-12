@@ -27,7 +27,9 @@ from foundry.graph.gate_wiring.restarts import (
 from foundry.graph.gate_wiring.routing import (
     ADVANCE,
     BUILD_BOUNDARY,
+    BUILD_LAUNCH_BOUNDARY,
     BUILD_TEST_BOUNDARY,
+    BUILD_TEST_LAUNCH_BOUNDARY,
     ESCALATE,
     FIX,
     HALT,
@@ -90,9 +92,13 @@ class WaveBuildCheck:
     scenarios whose tickets are all built (:func:`wave_scenarios`), so an unbound or
     failing scenario reaches the wave's fixer instead of piling up for the final gate.
 
+    The last wave's check (no wave left to build) also runs the Launch gate
+    (``check_launch``): the whole app is built, so it is started as a user would.
+
     ``run`` is the node (verdict + budget bump); ``route`` returns
     :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`, or
-    :data:`BUILD_TEST_BOUNDARY` when the check judged scenarios."""
+    :data:`BUILD_TEST_BOUNDARY` when the check judged scenarios (their ``_LAUNCH``
+    variants on the last wave)."""
 
     rt: AgentRuntime
     runner: TwoZoneGateRunner
@@ -101,6 +107,7 @@ class WaveBuildCheck:
     max_fix_attempts: int = 3
     profile: VerificationProfile | None = None
     check_scenarios: bool = True
+    check_launch: bool = True
     # The engineering node's difficulty -> tier table (escalation picks local tickets).
     ticket_tiers: Mapping[Any, str] | None = None
     fix_policy: FixPolicy = FixPolicy()  # noqa: RUF009 - frozen, so a shared default is safe
@@ -136,8 +143,20 @@ class WaveBuildCheck:
             return frozenset()
         return scope
 
+    def _boundary(self, state: FactoryState, scenarios: frozenset[str]) -> tuple[str, bool]:
+        """(the boundary this check judges, whether it launches the app): the last
+        wave's check (no wave left to build) also runs the Launch gate."""
+        launch = self.check_launch and not self._unbuilt_waves(state)
+        if scenarios:
+            return (BUILD_TEST_LAUNCH_BOUNDARY if launch else BUILD_TEST_BOUNDARY), launch
+        return (BUILD_LAUNCH_BOUNDARY if launch else BUILD_BOUNDARY), launch
+
     def _check(
-        self, state: FactoryState, config: RunnableConfig, scenarios: frozenset[str]
+        self,
+        state: FactoryState,
+        config: RunnableConfig,
+        scenarios: frozenset[str],
+        launch: bool = False,
     ) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
             return run_build_gate(
@@ -150,12 +169,13 @@ class WaveBuildCheck:
                 workdir=Path(tmp),
                 profile=self.profile,
                 scenarios=scenarios,
+                launch=launch,
             )
 
     def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         scenarios = self._scenarios(state)
-        out = self._check(state, config, scenarios)
-        boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
+        boundary, launch = self._boundary(state, scenarios)
+        out = self._check(state, config, scenarios, launch)
         # Escalation and the no-progress note judge this pass, not a restored tree.
         own: list[GateResult] = list(out.get("gates") or ())
         window = fix_window(state, boundary, scenarios)
@@ -170,7 +190,7 @@ class WaveBuildCheck:
             rt=self.rt,
             resolve=self.resolve,
             resolve_blob=self.resolve_blob,
-            rerun=lambda s: self._check(s, config, scenarios),
+            rerun=lambda s: self._check(s, config, scenarios, launch),
             policy=self._policy,
             unbuilt_waves=unbuilt,
             carried=frozenset(base.failing) if base else frozenset(),
@@ -359,7 +379,7 @@ class WaveBuildCheck:
         if pending_splits(state):
             return HALT
         scenarios = self._scenarios(state)
-        boundary = BUILD_TEST_BOUNDARY if scenarios else BUILD_BOUNDARY
+        boundary, _ = self._boundary(state, scenarios)
         decision = self._route(state, config, boundary)
         if self._advances(
             state, decision, fix_window(state, boundary, scenarios), self._unbuilt_waves(state)

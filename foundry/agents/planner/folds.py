@@ -13,6 +13,7 @@ from foundry.agents.planner.checks import (
     _goal_of,
     _goal_rows,
     _undeclared_type_users,
+    _web_stack,
 )
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
@@ -821,6 +822,111 @@ def _wire_entrypoint(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]
         f"Ticket {entry.id}: added dependencies on feature ticket(s) {', '.join(added)} "
         "so the entrypoint wires every feature in."
     ]
+
+
+_ROUTE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[^\s,;`'\"()]*)")
+_PATH_PARAM = re.compile(r"\{[^}/]*\}|<[^>/]*>|\[[^\]/]*\]|:[\w]+")
+_TEMPLATE_SUFFIXES = frozenset(
+    {
+        ".html", ".htm", ".jinja", ".jinja2", ".j2", ".ejs", ".hbs", ".handlebars",
+        ".mustache", ".erb", ".njk", ".pug", ".twig", ".tmpl", ".gohtml", ".liquid",
+        ".cshtml", ".heex", ".eex",
+    }
+)  # fmt: skip
+_CLIENT_SUFFIXES = frozenset({".jsx", ".tsx", ".vue", ".svelte"})
+_CLIENT_DIRS = frozenset({"static", "public", "assets", "client", "frontend", "www"})
+_CLIENT_FRAMEWORK = re.compile(
+    r"(?i)\b(react|preact|vue|svelte|angular|solid|htmx|next(\.js)?|nuxt|ember|lit)\b"
+)
+FORM_METHODS_NOTE = "HTML forms send only GET and POST"
+
+
+def _has_ui(capabilities: Collection[str]) -> bool:
+    return any(c.strip().lower() in ("ui", "frontend", "web-ui") for c in capabilities)
+
+
+def _route_key(path: str) -> str:
+    return _PATH_PARAM.sub("*", path.lower()).rstrip("/") or "/"
+
+
+def _js_client(tickets: Sequence[Ticket], stack: StackDecision) -> bool:
+    """The plan ships browser code that can send PUT/PATCH/DELETE itself."""
+    if _CLIENT_FRAMEWORK.search(stack.framework):
+        return True
+    for t in tickets:
+        for f in t.files:
+            p = PurePosixPath(f)
+            if p.suffix in _CLIENT_SUFFIXES or (
+                p.suffix in {".js", ".mjs", ".ts"} and _CLIENT_DIRS.intersection(p.parts[:-1])
+            ):
+                return True
+    return False
+
+
+def _form_method_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
+    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
+    browser edit and delete forms can only POST, so they got 405. Note on the ticket
+    owning each such route (its http contract's implementer, else the entrypoint)
+    that it also serves a POST route the forms submit to."""
+    if stack is None or not _web_stack(stack):
+        return list(tickets), []
+    templated = any(PurePosixPath(f).suffix in _TEMPLATE_SUFFIXES for t in tickets for f in t.files)
+    if not (ui or templated) or _js_client(tickets, stack):
+        return list(tickets), []
+    owner_of: dict[tuple[str, str], str] = {}
+    routes: dict[tuple[str, str], str] = {}
+    implementers = {n: t.id for t in tickets for n in t.implements}
+    for text, owner in (
+        *((r, None) for r in stack.interface),
+        *(
+            (f"{c.name}\n{c.signature}", implementers.get(c.name))
+            for c in interfaces
+            if c.kind == "http"
+        ),
+    ):
+        for method, path in _ROUTE.findall(text):
+            key = (method, _route_key(path))
+            routes.setdefault(key, f"{method} {path}")
+            if owner is not None:
+                owner_of.setdefault(key, owner)
+    posts = [p for m, p in routes if m == "POST"]
+    unformed = [
+        k
+        for k in routes
+        if k[0] in ("PUT", "PATCH", "DELETE")
+        and not any(p == k[1] or p.startswith(k[1].rstrip("/") + "/") for p in posts)
+    ]
+    entry = next((t.id for t in _features(tickets) if t.entrypoint), None)
+    by_owner: dict[str, list[str]] = {}
+    for k in unformed:
+        if (owner := owner_of.get(k, entry)) is not None:
+            by_owner.setdefault(owner, []).append(routes[k])
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = by_owner.get(t.id)
+        if not mine or FORM_METHODS_NOTE in t.description:
+            out.append(t)
+            continue
+        aliases = ", ".join(
+            f"POST {r.split(' ', 1)[1].rstrip('/')}{'/delete' if r.startswith('DELETE') else ''}"
+            f" for {r}"
+            for r in mine
+        )
+        note = (
+            f"{FORM_METHODS_NOTE}: the pages' forms cannot call {', '.join(mine)}, so "
+            f"also serve each as a POST route running the same handler ({aliases}) and "
+            "point every edit and delete form at it; keep the declared routes."
+        )
+        out.append(t.model_copy(update={"description": f"{t.description}\n\n{note}".lstrip()}))
+        concerns.append(f"Ticket {t.id}: noted POST form routes for {', '.join(mine)}.")
+    return out, concerns
 
 
 def _drop_orphan_scenarios(

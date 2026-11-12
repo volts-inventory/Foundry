@@ -124,6 +124,7 @@ from foundry.agents.planner.folds import (
     _add_read_deps,
     _drop_self_consumes,
     _fold_test_bindings,
+    _has_ui,
     _one_step_module_per_ticket,
     _own_scenario_bindings,
     _own_stack_files,
@@ -706,6 +707,7 @@ def make_planner_node(
             ),
             contracts_file=_str(raw_stack.get("contracts_file")).strip()
             or _DEFAULT_CONTRACTS_FILE.get(language, ""),
+            ui=_has_ui(_strs(_section(payload, "prd").get("required_capabilities"))),
         )
         return _Draft(
             payload=payload,
@@ -989,7 +991,7 @@ def make_planner_node(
         constraints = _build_constraints(
             [
                 *_objs(payload.get("pinned_constraints")),
-                *_stack_constraints(draft.frame.stack, payload),
+                *_stack_constraints(draft.frame.stack, payload, tickets),
                 *(
                     app_check_constraints(draft.frame.stack.language, NODE_ID)
                     if draft.frame.stack is not None
@@ -1249,6 +1251,7 @@ def make_planner_node(
             base=base,
             ceilings=ceilings,
             keep=_kept_ids(state, rt),
+            ui=_has_ui(state.get("required_capabilities") or ()),
         )
 
     def _patch_replan(

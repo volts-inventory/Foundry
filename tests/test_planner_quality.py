@@ -403,11 +403,126 @@ def test_the_first_plan_runs_at_medium_and_a_cut_delta_goes_straight_to_the_repa
 def test_the_sqlite_constraints_default_to_a_file_database() -> None:
     from foundry.agents.planner.constraints import _stack_constraints
 
-    pcs = _stack_constraints(StackDecision(language="python"), {"x": "SQLAlchemy over SQLite"})
+    pcs = _stack_constraints(
+        StackDecision(language="python", framework="SQLAlchemy over SQLite"), {}
+    )
     memory, alchemy = (
         next(pc["text"] for pc in pcs if pc["id"] == i)
         for i in ("PC-python-sqlite-memory", "PC-python-sqlalchemy-sqlite")
     )
     assert "a FILE whose path comes from an environment variable" in memory
-    assert "check_same_thread=False" in memory
+    assert "one per thread" in memory
     assert "sqlite:///app.db" in alchemy
+
+
+_WEB = StackDecision(language="python", framework="flask", kind="http")
+
+
+def test_a_web_app_contract_holding_one_db_connection_is_a_finding() -> None:
+    # The notes bench: a service built once with one sqlite3 connection in the app
+    # factory failed 3 of 30 concurrent POSTs (InterfaceError, 'no transaction active').
+    from foundry.agents.planner.checks import _held_connection_findings
+
+    service = _iface(
+        "NoteService",
+        "class",
+        "class NoteService:\n"
+        "    def __init__(self, conn: sqlite3.Connection) -> None: ...\n"
+        "    def add(self, title: str) -> int: ...",
+    )
+    factory = _iface("create_app", "function", "def create_app(conn: sqlite3.Connection) -> Flask")
+    record = _iface("Deps", "type", "@dataclass\nclass Deps:\n    db: Optional[psycopg.Connection]")
+    java = _iface("Repo", "class", "class Repo {\n  Repo(Connection conn) {}\n}")
+    entry = _iface("main", "function", "func main(conn *sql.Conn)")
+    tickets = [_ticket("app", entrypoint=True, implements=("main",))]
+    found = _held_connection_findings(_WEB, tickets, [service, factory, record, java, entry])
+    assert [f.split()[1] for f in found] == ["NoteService", "create_app", "Deps", "Repo", "main"]
+    assert "`conn: sqlite3.Connection`" in found[0] and "one connection per request" in found[0]
+    assert {finding_kind(f) for f in found} == {"db-shared-connection"}
+    # Not a web app: a CLI holds its one connection for the process, which is fine.
+    cli = StackDecision(language="python", kind="cli")
+    assert _held_connection_findings(cli, tickets, [service, factory]) == ()
+
+
+def test_a_per_call_connection_or_a_connection_factory_is_no_finding() -> None:
+    from foundry.agents.planner.checks import _held_connection_findings
+
+    fine = [
+        # A function taking the request's connection per call.
+        _iface("add_note", "function", "def add_note(conn: sqlite3.Connection, t: str) -> int"),
+        # A factory, a path or a pool held for the app's life.
+        _iface(
+            "Store",
+            "class",
+            "class Store:\n"
+            "    def __init__(self, connect: Callable[[], sqlite3.Connection]) -> None: ...\n"
+            "    def get(self, conn: sqlite3.Connection, id: int) -> str: ...",
+        ),
+        _iface("make_app", "function", "def make_app(db_path: str) -> Flask"),
+        _iface("Server", "class", "type Server struct {\n\tdb *sql.DB\n}"),
+        _iface("get_db", "function", "def get_db() -> sqlite3.Connection"),
+        _iface("Client", "class", "class Client:\n    def __init__(self, c: HTTPConnection): ..."),
+    ]
+    assert _held_connection_findings(_WEB, [], fine) == ()
+
+
+def _form_plan() -> tuple[list[Ticket], StackDecision, list[InterfaceContract]]:
+    tickets = [
+        _ticket(
+            "notes", files=("notes/routes.py", "templates/note.html"), implements=("delete_note",)
+        ),
+        _ticket("app", "notes", files=("app.py",), entrypoint=True, description="Wire it."),
+    ]
+    web = StackDecision(
+        language="python",
+        framework="flask",
+        kind="http",
+        interface=("GET /notes", "POST /notes", "PUT /notes/<int:id>"),
+    )
+    delete = _iface("delete_note", "http", "DELETE /notes/{id} -> 302")
+    return tickets, web, [delete]
+
+
+def test_a_server_rendered_app_gets_post_routes_for_its_form_actions() -> None:
+    # The notes bench: PUT/DELETE routes behind HTML forms, so browser edit and delete
+    # returned 405.
+    from foundry.agents.planner.folds import FORM_METHODS_NOTE, _form_method_routes
+
+    tickets, web, ifaces = _form_plan()
+    out, concerns = _form_method_routes(tickets, web, ifaces, ui=False)
+    by_id = {t.id: t for t in out}
+    # The http contract's implementer owns DELETE; the entrypoint owns the stack's PUT.
+    assert "POST /notes/{id}/delete for DELETE /notes/{id}" in by_id["notes"].description
+    assert "PUT" not in by_id["notes"].description
+    assert "POST /notes/<int:id> for PUT /notes/<int:id>" in by_id["app"].description
+    assert by_id["app"].description.startswith("Wire it.")
+    assert len(concerns) == 2
+    # Idempotent: a second pass adds nothing.
+    assert _form_method_routes(out, web, ifaces, ui=False) == (out, [])
+    assert all(FORM_METHODS_NOTE in t.description for t in out)
+
+
+def test_form_routes_are_left_alone_with_a_post_alias_or_a_js_client_or_no_ui() -> None:
+    from foundry.agents.planner.folds import _form_method_routes
+
+    tickets, web, ifaces = _form_plan()
+    aliased = web.model_copy(
+        update={"interface": (*web.interface, "POST /notes/<id>", "POST /notes/<id>/delete")}
+    )
+    assert _form_method_routes(tickets, aliased, ifaces, ui=False)[1] == []
+    client = [*tickets, _ticket("ui", files=("static/app.js",))]
+    assert _form_method_routes(client, web, ifaces, ui=True)[1] == []
+    htmx = web.model_copy(update={"framework": "flask + htmx"})
+    assert _form_method_routes(tickets, htmx, ifaces, ui=False)[1] == []
+    # A JSON API with no templates and no ui capability: no forms at all.
+    api = [t.model_copy(update={"files": ("notes/routes.py",)}) for t in tickets]
+    assert _form_method_routes(api, web, ifaces, ui=False)[1] == []
+    # ...unless the PRD declares a ui capability.
+    assert len(_form_method_routes(api, web, ifaces, ui=True)[1]) == 2
+    assert _form_method_routes(tickets, None, ifaces, ui=True)[1] == []
+
+
+def test_the_sop_says_html_forms_send_only_get_and_post() -> None:
+    from foundry.agents.planner.schema import SOP
+
+    assert "HTML forms send only GET and POST" in SOP

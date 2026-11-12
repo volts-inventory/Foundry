@@ -585,6 +585,91 @@ def _run_findings(stack: StackDecision) -> tuple[str, ...]:
     )
 
 
+def _web_stack(stack: StackDecision | None) -> bool:
+    return stack is not None and (
+        stack.kind == "http" or bool(_WEB_FRAMEWORK.search(stack.framework))
+    )
+
+
+# ONE database connection, not a pool, engine or factory: sqlite3.Connection,
+# psycopg.Connection, java.sql.Connection, rusqlite::Connection, Go's *sql.Conn.
+_DB_CONN = r"(?:&\s*(?:mut\s+)?|\*)?(?:\w+(?:\.|::))*(?:Connection|Conn)"
+_ANNOTATED_CONN = re.compile(
+    rf"^(?:(?:private|public|protected|readonly)\s+)*[\w$]+\??\s*:\s*(?:Optional\[\s*{_DB_CONN}\s*\]|{_DB_CONN})"
+    r"\s*(?:\|\s*None\s*)?(?:=.*)?,?$"
+)
+# `Connection conn` (Java, C#) or `conn *sql.Conn` (Go).
+_TYPED_CONN = re.compile(rf"^(?:final\s+)?{_DB_CONN}\s+\w+$|^\w+\s+{_DB_CONN}$")
+_CTOR = re.compile(r"\b(?:__init__|constructor|fn\s+new|new)\s*\(")
+_APP_FACTORY = re.compile(r"(?i)^(?:create|make|build|new)_?app$|^app_?factory$")
+_FUNC_NAME = re.compile(r"\b(?:def|function|fn|func)\s+(\w+)\s*\(")
+_FIELD = re.compile(r"^\s+([\w$]+\??\s*:[^(\n]*)$", re.MULTILINE)
+_MODULE_VAR = re.compile(r"^(?:export\s+)?(?:(?:const|let|var|static)\s+)?([\w$]+\s*:[^(\n]*)$")
+
+
+def _is_conn(param: str) -> bool:
+    p = " ".join(param.split())
+    return bool(_ANNOTATED_CONN.match(p) or _TYPED_CONN.match(p))
+
+
+def _param_lists(signature: str, opener: re.Pattern[str]) -> list[list[str]]:
+    """The parameters of each call ``opener`` matches (up to its open paren)."""
+    out: list[list[str]] = []
+    for m in opener.finditer(signature):
+        depth = 0
+        for i in range(m.end(), len(signature)):
+            ch = signature[i]
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>" and depth:
+                depth -= 1
+            elif ch == ")":
+                out.append([p for p in _split_top(signature[m.end() : i]) if p.strip()])
+                break
+    return out
+
+
+def _held_connection_findings(
+    stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+) -> tuple[str, ...]:
+    """A web app's contract that keeps ONE database connection for the app's life: a
+    class or record constructed with (or holding) one, the app factory or an
+    entrypoint function taking one, or a module-level one. Concurrent requests then
+    share its one transaction (3 of 30 parallel POSTs failed: InterfaceError, 'no
+    transaction active'). A function taking the connection per call is fine, as is
+    a factory, pool, engine or database path: only a bare connection type counts."""
+    if not _web_stack(stack):
+        return ()
+    entry = {n for t in tickets if t.entrypoint for n in t.implements}
+    out: list[str] = []
+    for c in interfaces:
+        if c.kind not in CODE_CONTRACT_KINDS:
+            continue
+        sig = textwrap.dedent(c.signature)
+        # A Java/C# constructor is named after its class.
+        cls = re.escape(c.name.rpartition(".")[2])
+        ctor = re.compile(rf"{_CTOR.pattern}|\b{cls}\s*\(") if c.kind == "class" else _CTOR
+        candidates = [p for ps in _param_lists(sig, ctor) for p in ps]
+        candidates += [m.group(1) for ln in sig.splitlines() if (m := _MODULE_VAR.match(ln))]
+        if c.kind in ("class", "type"):
+            candidates += _FIELD.findall(sig)
+        names = {c.name, *_FUNC_NAME.findall(sig)}
+        if c.kind == "function" and (c.name in entry or any(map(_APP_FACTORY.match, names))):
+            candidates += _params(sig)
+        if held := [h for h in candidates if _is_conn(h)]:
+            shown = ", ".join(sorted({" ".join(h.split()).rstrip(",") for h in held}))
+            out.append(
+                f"Contract {c.name} holds one database connection for the web app's "
+                f"lifetime (`{shown}`): concurrent requests then share its one "
+                "transaction and fail. Take a connection per call, or a connection "
+                "factory or database path, and open one connection per request (closed "
+                "at request teardown) or per thread."
+            )
+    return tuple(out)
+
+
 _BDD_REPORT_SINGLE_QUOTED = re.compile(
     r"(?<![^\s=:])'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'"
 )
@@ -864,6 +949,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"has user roles but no ticket owns", "roles-unowned"),
         (r"^stack\.run is empty", "run-missing"),
         (r"starts the server, which never exits", "run-server"),
+        (r"holds one database connection for the web app", "db-shared-connection"),
         (r"^stack\.bdd ", "bdd-command"),
         (r"^Stack command file \S+ is written by no ticket", "stack-file-unowned"),
         (r"exceed the (per-epic )?cap of", "overflow"),

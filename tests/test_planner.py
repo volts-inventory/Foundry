@@ -116,7 +116,12 @@ PLAN: dict[str, Any] = {
     ],
     "stack": PYTHON_STACK,
     "interfaces": [
-        {"name": "TodoStore.add", "spec": "add(todo) -> id", "consumers": ["api"]},
+        {
+            "name": "TodoStore.add",
+            "spec": "add(todo) -> id",
+            "errors": ["sqlite3.IntegrityError on a duplicate id"],
+            "consumers": ["api"],
+        },
         {"name": "TodoStore.list", "spec": "list() -> [todo]", "consumers": ["api"]},
     ],
     "tickets": [
@@ -295,7 +300,8 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
     # Distinct ADRs get distinct handles (content_identity, not body digest).
     assert len({a.uri for a in artifacts if a.kind == "adr"}) == 2
     assert writes["scope_tier"].tier.value == "standard"
-    # PLAN persists in SQLite on Python: the planner pins the :memory: footgun itself.
+    # PLAN's contract raises sqlite3 errors on Python: the planner pins the :memory:
+    # footgun itself.
     assert {c.id for c in writes["pinned_constraints"]} == {
         "PC-001",
         "PC-002",

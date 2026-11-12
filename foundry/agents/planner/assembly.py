@@ -14,6 +14,7 @@ from foundry.agents.planner.checks import (
     _contract_findings,
     _coverage_findings,
     _entrypoint_findings,
+    _held_connection_findings,
     _offline_scenario_findings,
     _property_findings,
     _redeclared_findings,
@@ -34,6 +35,7 @@ from foundry.agents.planner.folds import (
     _ensure_security_scenario,
     _fix_covers,
     _fold_test_bindings,
+    _form_method_routes,
     _lift_described_properties,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
@@ -79,6 +81,7 @@ class _Frame:
     design: str = ""  # the design body and ADR texts
     constraints: tuple[tuple[str, str], ...] = ()  # the plan's pinned (id, text)
     contracts_file: str = ""  # where the contract data types go
+    ui: bool = False  # the PRD declares a 'ui' capability
 
 
 @dataclass(frozen=True)
@@ -172,6 +175,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_assign_shared_types.__name__, more)
     tickets, more = _drop_dangling_refs(tickets, base.files if base is not None else ())
     concerns += fold(_drop_dangling_refs.__name__, more)
+    tickets, more = _form_method_routes(tickets, frame.stack, frame.interfaces, frame.ui)
+    concerns += fold(_form_method_routes.__name__, more)
     type_findings, type_concerns = _type_contract_findings(
         tickets, frame.interfaces, frame.declared, types, frame.contracts_file, frame.design
     )
@@ -184,6 +189,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *type_findings,
         *_entrypoint_findings(tickets, frame.interfaces),
         *_property_findings(tickets, interfaces),
+        *_held_connection_findings(frame.stack, tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),

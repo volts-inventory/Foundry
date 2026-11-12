@@ -4,6 +4,7 @@ content-addressed artifacts on ``state``."""
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import tempfile
 from importlib import metadata as _im
@@ -348,6 +349,23 @@ _DEV_TOOLS = frozenset(
 )
 
 
+def _imported_modules(dest: Path, py_files: list[Path] | None = None) -> set[str]:
+    """The top-level module names the tree's ``.py`` files import (absolute imports)."""
+    imported: set[str] = set()
+    for path in dest.rglob("*.py") if py_files is None else py_files:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".", 1)[0])
+    return imported
+
+
 def _python_third_party_requirements(dest: Path) -> list[str] | None:
     """Requirement lines derived from the tree's real imports, or ``None`` when
     ``dest`` is not a Python tree (no ``.py`` — nothing to scaffold here).
@@ -366,18 +384,7 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     local = {p.name for p in dest.iterdir() if p.is_dir()}
     local |= {p.stem for p in dest.glob("*.py")}
     stdlib = sys.stdlib_module_names  # guaranteed on the pinned floor (requires-python >=3.11)
-    imported: set[str] = set()
-    for path in py_files:
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imported.add(alias.name.split(".", 1)[0])
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                imported.add(node.module.split(".", 1)[0])
+    imported = _imported_modules(dest, py_files)
     third_party = {
         n for n in imported if n and n not in stdlib and n not in local and n not in _DEV_TOOLS
     }
@@ -415,6 +422,29 @@ def _scaffold_manifest(dest: Path) -> None:
     )
     body = "".join(f"{line}\n" for line in reqs)
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
+
+
+_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+
+def _declare_property_library(dest: Path) -> None:
+    """The property tests' library in the shipped ``requirements.txt``: a tree whose
+    tests import hypothesis gets ``hypothesis==<Foundry's pin>`` appended when its
+    manifest omits it. The gates run Foundry's own hypothesis, so a manifest without
+    it passes every gate yet ships a project whose tests cannot run."""
+    manifest = dest / "requirements.txt"
+    if not manifest.is_file():
+        return  # none (the scaffold derives one from imports) or pyproject-only
+    text = manifest.read_text(encoding="utf-8")
+    declared = {
+        m.group(1).lower().replace("_", "-")
+        for line in text.splitlines()
+        if (m := _REQ_NAME.match(line))
+    }
+    if "hypothesis" in declared or "hypothesis" not in _imported_modules(dest):
+        return
+    sep = "" if not text or text.endswith("\n") else "\n"
+    manifest.write_text(f"{text}{sep}{_pin('hypothesis')}\n", encoding="utf-8")
 
 
 # ---- gate-owned contract files (the wave-0 contracts ticket) -----------------
@@ -596,6 +626,7 @@ def _gated_tree_sha(dest: Path, state: FactoryState) -> str:
     stack = state.get("stack")
     if stack is None or stack.language == "python":
         _scaffold_manifest(dest)
+        _declare_property_library(dest)
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.

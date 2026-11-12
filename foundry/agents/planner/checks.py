@@ -819,6 +819,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"exceed the (per-epic )?cap of", "overflow"),
         (r"^criterion \S+: missing/empty", "criterion-incomplete"),
         (r"^criterion \S+: scenario has no", "scenario-steps-missing"),
+        (r"but no contract in the plan has properties", "contract-no-properties"),
         (r"security/abuse|security_abuse", "security-gap"),
     )
 )
@@ -829,3 +830,77 @@ def finding_kind(finding: str) -> str:
     The Spec gate's ``contract fit:`` / ``coverage:`` prefixes are looked through."""
     text = re.sub(r"^(contract fit|coverage): ", "", finding.strip())
     return next((kind for pattern, kind in _FINDING_KINDS if pattern.search(text)), "other")
+
+
+# A parameter of a parsed or computed-on kind: text, bytes, a number, a collection.
+_DOMAIN_TYPE = re.compile(
+    r"(?i)(?<![\w.])(?:&?str|string|bytes|bytearray|int|float|decimal|number|double|long"
+    r"|bigint|[iu](?:8|16|32|64|128|size)|f32|f64|list|tuple|set|frozenset|dict|sequence"
+    r"|iterable|mapping|vec|array|map|slice)\b|\[\]"
+)
+_SELF_PARAM = re.compile(r"^\s*(?:&\s*(?:mut\s+)?)?(?:self|cls|this)\b")
+
+
+def _params(signature: str) -> list[str]:
+    """Every parameter of every call signature in ``signature``: the depth-0
+    comma-separated parts of a parenthesis opened right after a name (a return
+    tuple, ``-> (A, B)``, is no parameter list)."""
+    out: list[str] = []
+    for m in re.finditer(r"\w\s*\(", signature):
+        depth, start = 0, m.end()
+        for i in range(start, len(signature)):
+            ch = signature[i]
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>" and depth:
+                depth -= 1
+            elif ch == ")":
+                out += [p for p in _split_top(signature[start:i]) if p.strip()]
+                break
+    return out
+
+
+def _split_top(text: str) -> list[str]:
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth = max(depth - 1, 0)
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [*parts, cur]
+
+
+def _property_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """A plan with no contract property at all while a free function some feature
+    ticket implements takes text, bytes, a number or a collection (what a parser or
+    calculator computes on): one finding per such function. Conservative on purpose,
+    since it costs a repair call: a method (a store's CRUD), a class and the
+    entrypoint's functions (main(argv), create_app(config)) are never judged, and
+    any property in the plan silences it, so a repair adding one never loops."""
+    if any(c.properties for c in interfaces):
+        return ()
+    implemented = {n for t in tickets if not t.entrypoint for n in t.implements}
+    entry = {n for t in tickets if t.entrypoint for n in t.implements}
+    out: list[str] = []
+    for c in interfaces:
+        if c.kind != "function" or "." in c.name or c.name not in implemented - entry:
+            continue
+        params = _params(c.signature)
+        if any(_SELF_PARAM.match(p) for p in params):
+            continue
+        if args := sorted({p.strip() for p in params if _DOMAIN_TYPE.search(p)}):
+            out.append(
+                f"Contract {c.name} takes {', '.join(args)} but no contract in the plan "
+                "has properties[]: give it 1-4 properties (PR1, ...) that hold for every "
+                "valid generated input, over combinations of its input's features (mixed "
+                "operators, multiple terms), not one case; its implementing ticket "
+                "proves each with a property-based test."
+            )
+    return tuple(out)

@@ -8,13 +8,19 @@ from collections.abc import Collection, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from foundry.agents.planner.checks import _goal_of, _goal_rows, _shared_type_users
+from foundry.agents.planner.checks import (
+    _declaration_only,
+    _goal_of,
+    _goal_rows,
+    _shared_type_users,
+)
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
 from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
 from foundry.gates.profiles import ONE_TYPE_PER_FILE, SOURCE_SUFFIXES, pytest_bdd_binds
+from foundry.schemas.architecture import PROPERTY_KINDS
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     Difficulty,
@@ -870,3 +876,100 @@ def _ensure_security_scenario(
         [*criteria, added],
         [f"Added security scenario {cid} to ticket {owner.id}: no scenario covered misuse."],
     )
+
+
+# "PR3: for any ..." / "- PR3 — ...": a contract property written into prose.
+_PROPERTY_MARK = re.compile(r"(?<![A-Za-z0-9])PR(\d+)\s*(?::|\u2014|\u2013|-)\s*")
+_PROPERTY_LABEL = re.compile(r"(?i)[\s*•-]*(?:contract\s+)?(?:propert(?:y|ies)\b[^:\n]*:)?\s*")
+
+
+def _described_properties(description: str) -> tuple[list[tuple[str, str]], str]:
+    """The ``PRn: text`` properties in ``description`` (each runs to the next one or
+    the end of its line) and the description with them taken out: a line left
+    holding only a bullet or a "Properties:" label is dropped."""
+    found: list[tuple[str, str]] = []
+    lines: list[str] = []
+    for line in description.splitlines():
+        marks = list(_PROPERTY_MARK.finditer(line))
+        if not marks:
+            lines.append(line)
+            continue
+        for m, nxt in zip(marks, [*marks[1:], None], strict=True):
+            text = line[m.end() : nxt.start() if nxt else len(line)].strip().rstrip(";,").strip()
+            if text:
+                found.append((f"PR{m.group(1)}", text))
+        head = line[: marks[0].start()]
+        if not _PROPERTY_LABEL.fullmatch(head):
+            lines.append(head.rstrip())
+    if found:  # a "Properties:" heading line over them goes with them
+        lines = [
+            ln for ln in lines if not ("propert" in ln.lower() and _PROPERTY_LABEL.fullmatch(ln))
+        ]
+    return found, "\n".join(lines).strip()
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _lift_described_properties(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[list[Ticket], list[InterfaceContract], list[str]]:
+    """Contract properties the planner wrote into a ticket's description (the ticket
+    schema has no field for them) move onto a function/class contract the ticket
+    implements, else one a ticket it depends on implements (a paired test ticket):
+    the one the text names, else the first. Only a contract's properties reach the
+    packet rule and the Test gate. A property a contract already states is just
+    dropped from the prose; a taken id is renumbered past every id in the plan. No
+    repair call."""
+    by_name = {c.name: c for c in interfaces}
+    by_id = {t.id: t for t in tickets}
+
+    def code(names: Sequence[str]) -> list[InterfaceContract]:
+        return [
+            c
+            for n in names
+            if (c := by_name.get(n)) is not None
+            and c.kind in PROPERTY_KINDS
+            and not _declaration_only(c)
+        ]
+
+    carried = {_norm(p.partition(": ")[2]) for c in interfaces for p in c.properties}
+    taken = {p.partition(":")[0] for c in interfaces for p in c.properties}
+    added: dict[str, list[str]] = {}
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        found, rest = _described_properties(t.description)
+        owners = code(t.implements) or code(
+            [n for d in t.depends_on if d in by_id for n in by_id[d].implements]
+        )
+        if not found or not owners:
+            out.append(t)
+            continue
+        for pid, text in found:
+            if _norm(text) in carried:
+                continue
+            named = [
+                c for c in owners if re.search(rf"\b{re.escape(c.name.rsplit('.', 1)[-1])}\b", text)
+            ]
+            owner = (named or owners)[0]
+            if pid in taken:
+                pid = next(f"PR{n}" for n in range(1, len(taken) + 2) if f"PR{n}" not in taken)
+            taken.add(pid)
+            carried.add(_norm(text))
+            added.setdefault(owner.name, []).append(f"{pid}: {text}")
+            concerns.append(
+                f"Ticket {t.id}: property {pid} moved from its description onto "
+                f"contract {owner.name}."
+            )
+        out.append(t.model_copy(update={"description": rest}))
+    if not added:
+        return list(tickets), list(interfaces), []
+    lifted = [
+        c.model_copy(update={"properties": (*c.properties, *added[c.name])})
+        if c.name in added
+        else c
+        for c in interfaces
+    ]
+    return out, lifted, concerns

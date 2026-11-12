@@ -349,7 +349,10 @@ def property_rule(properties: Sequence[str], stack: StackDecision | None) -> str
         f"{lib.usage}. Put the property id (PR1, ...) in the test's name. Each test "
         "generates its inputs across the whole domain the property states (every "
         "feature of the input and their combinations, never a fixed example list) and "
-        "calls the real function you implement, never a copy or a mock of it"
+        "calls the real function you implement, never a copy or a mock of it. Import "
+        f"{lib.library} unconditionally: never behind a try/except ImportError, an "
+        "optional or dynamic import, or a skip when it is missing (the gate counts a "
+        "guarded test as no test)"
         + (f"; declare {lib.dependency} if no ticket has yet" if lib.dependency else "")
         + ". A failing property is a bug in the code: fix the code, never weaken the "
         "property. Properties: " + "; ".join(properties)

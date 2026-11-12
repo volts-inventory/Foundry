@@ -4,7 +4,9 @@ The planner gives function/class contracts ``properties`` ("PR1: for any valid
 notation the total lies within [min, max]"); the implementing ticket writes one
 property-based test per property with its language's library, carrying the id in
 the test's name. This check reads the tree (nothing runs): a property is covered
-when a source file that uses the library (the profile's ``marker``) names its id.
+when a source file that uses the library (the profile's ``marker``) names its id,
+and does not import it only optionally (the profile's ``guard``: a test that skips
+when the library is missing proves nothing).
 The tests themselves run in the stack's own test command, so a broken invariant
 FAILs the Test gate there; :func:`property_findings` names the property a failing
 output line carries so the fix loop sees which invariant broke.
@@ -67,12 +69,25 @@ def property_findings(
     if lib is None or not properties:
         return {}, ()
     files = _library_files(workdir, language, re.compile(lib.marker, re.MULTILINE))
+    guard = re.compile(lib.guard) if lib.guard else None
+    guarded = {p for p, text in files.items() if guard is not None and guard.search(text)}
     status: dict[str, str] = {}
     findings: list[str] = []
     fail_lines = [ln.strip() for ln in output.splitlines() if _FAILED.search(ln)]
     for pid, what in sorted(properties.items()):
         pat = _id_pattern(pid)
-        where = [p for p, text in files.items() if pat.search(text)]
+        named = [p for p, text in files.items() if pat.search(text)]
+        where = [p for p in named if p not in guarded]
+        if named and not where:
+            status[pid] = "missing"
+            findings.append(
+                f"property {pid} not covered ({', '.join(named)}): {what} — the test "
+                f"imports {lib.library} optionally (try/except ImportError, or a skip "
+                "when it is missing), so it can pass without running. Import it "
+                "unconditionally at the top of the test module"
+                + (f" and declare {lib.dependency}." if lib.dependency else ".")
+            )
+            continue
         if not where:
             status[pid] = "missing"
             findings.append(

@@ -28,6 +28,7 @@ import re
 import shlex
 import sys
 from dataclasses import dataclass, field
+from importlib import metadata as _im
 
 from foundry.schemas.implementation import StackDecision
 
@@ -307,13 +308,16 @@ def bdd_runner_hint(language: str) -> str:
 class PropertyTesting:
     """A language's property-based testing library: what a contract property's test
     uses, the pinned dev dependency that provides it ("" = the gate environment or
-    the standard library already does), how to write one, and ``marker``: a regex a
-    test file matches when it uses the library (the Test gate's evidence)."""
+    the standard library already does), how to write one, ``marker``: a regex a
+    test file matches when it uses the library (the Test gate's evidence), and
+    ``guard``: a regex a file matches when it imports the library only optionally
+    (a skip when it is missing), so its tests prove nothing ("" = never)."""
 
     library: str
     dependency: str
     usage: str
     marker: str
+    guard: str = ""
 
 
 _FAST_CHECK = PropertyTesting(
@@ -327,12 +331,14 @@ _FAST_CHECK = PropertyTesting(
     marker=r"""['"]fast-check['"]""",
 )
 
+_HYPOTHESIS = _im.version("hypothesis")  # Foundry's own, pinned by uv.lock
+
 PROPERTY_TESTING: dict[str, PropertyTesting] = {
     "python": PropertyTesting(
         library="hypothesis",
-        # The gate harness runs Foundry's own uv.lock-pinned hypothesis (as it does
-        # pytest-bdd), and pydeps never reinstalls what Foundry provides.
-        dependency="",
+        # The gate harness runs Foundry's own uv.lock-pinned hypothesis, but the
+        # shipped project must declare it too, at that same pin, to run its tests.
+        dependency=f"hypothesis=={_HYPOTHESIS} in the project's dependency manifest",
         usage=(
             "a pytest test function decorated with hypothesis `@given(...)` (strategies "
             "from `hypothesis.strategies`: st.integers(), st.text(), st.from_regex(...), "
@@ -341,6 +347,10 @@ PROPERTY_TESTING: dict[str, PropertyTesting] = {
             "module"
         ),
         marker=r"^\s*(from|import)\s+hypothesis\b",
+        guard=(
+            r"\bexcept\b[^:\n]*\b(ImportError|ModuleNotFoundError)\b"
+            r"|importorskip\(\s*['\"]hypothesis"
+        ),
     ),
     "javascript": _FAST_CHECK,
     "typescript": _FAST_CHECK,

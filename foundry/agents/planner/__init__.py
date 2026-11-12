@@ -915,7 +915,7 @@ def make_planner_node(
         payload, brief, interfaces, epics = (
             draft.payload,
             draft.brief,
-            draft.interfaces,
+            draft.fit.interfaces or draft.interfaces,
             draft.epics,
         )
         per_epic, fit, tickets_seq = draft.per_epic, draft.fit, seqs["tickets"]

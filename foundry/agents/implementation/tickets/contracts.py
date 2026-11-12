@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping, Sequence
+import textwrap
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,11 +21,17 @@ from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
 from foundry.agents.plan_contracts import SOURCE_SUFFIXES, top_symbols
 from foundry.execution.adapter_contract import AdapterResult
 from foundry.schemas.gates import GateTriage
-from foundry.schemas.implementation import CONTRACTS_TICKET_ID, FeatureDiff
+from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
+    FeatureDiff,
+    Ticket,
+)
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from foundry.execution.sandbox import Sandbox
+    from foundry.schemas.architecture import InterfaceContract
 
 
 class ContractDriftError(RuntimeError):
@@ -290,18 +297,50 @@ def _is_test_source(path: str) -> bool:
     )
 
 
+# Names every entry module and blueprint defines for itself: a shared one is no copy.
+_ENTRY_NAMES = frozenset(
+    {"app", "application", "cli", "create_app", "index", "main", "make_app", "run", "serve"}
+    | {"server", "setup", "start"}
+)
+
+
+def dependency_symbols(
+    entry: Ticket, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> frozenset[str]:
+    """The top-level names the contracts of ``entry``'s (transitive, planned)
+    dependencies declare, less the common entry names: what the entrypoint must
+    import rather than define again."""
+    deps = {t.id: t.depends_on for t in tickets}
+    by_id = {t.id: t for t in tickets}
+    seen: set[str] = set()
+    todo = list(entry.depends_on)
+    while todo:
+        if (tid := todo.pop()) not in seen:
+            seen.add(tid)
+            todo.extend(deps.get(tid, ()))
+    return frozenset(
+        n
+        for did in seen - {CONTRACTS_TICKET_ID, HARNESS_TICKET_ID}
+        if (dep := by_id.get(did)) is not None
+        for name in dep.implements
+        if (c := contracts.get(name)) is not None and c.kind in ("function", "class", "type")
+        for n in top_symbols(textwrap.dedent(c.signature))
+        if n not in _ENTRY_NAMES
+    )
+
+
 def entrypoint_redefinitions(
-    own: Mapping[str, str | None], others: Mapping[str, str | None]
+    own: Mapping[str, str | None], others: Mapping[str, str | None], guarded: Collection[str]
 ) -> tuple[str, ...]:
     """One finding per source file of the entrypoint ticket (``own``) that defines a
-    public top-level function or class another source file of the tree (``others``,
-    tests excluded) already defines: the entrypoint must import and wire that
-    module, and a second copy ships while the tested one is dead code."""
+    ``guarded`` name (:func:`dependency_symbols`) another source file of the tree
+    (``others``, tests excluded) already defines: the entrypoint must import and
+    wire that module, and a second copy ships while the tested one is dead code."""
     defined: dict[str, str] = {}
     for path, text in sorted(others.items()):
         if path in own or not text or not path.endswith(SOURCE_SUFFIXES) or _is_test_source(path):
             continue
-        for name in top_symbols(text):
+        for name in top_symbols(text) & set(guarded):
             defined.setdefault(name, path)
     out: list[str] = []
     for path, text in sorted(own.items()):
@@ -338,13 +377,19 @@ def _tree_sources(root: Path, skip: Sequence[str]) -> dict[str, str | None]:
 
 
 def _flag_entrypoint_redefinitions(
-    result: AdapterResult, sandbox: Sandbox, files: Sequence[str], task_id: str
+    result: AdapterResult,
+    sandbox: Sandbox,
+    files: Sequence[str],
+    task_id: str,
+    guarded: Collection[str],
 ) -> AdapterResult:
     """The post-build half of the planner's entrypoint check: a note (handed to the
-    fix loop) when the entrypoint ticket's files redefine what the tree defines."""
+    fix loop) when the entrypoint ticket's files redefine what a dependency built."""
+    if not guarded:
+        return result
     written = _written_sources(result, sandbox, task_id)
     own = {p: t for p, t in written.items() if p in files}
-    findings = entrypoint_redefinitions(own, _tree_sources(Path(sandbox.worktree), files))
+    findings = entrypoint_redefinitions(own, _tree_sources(Path(sandbox.worktree), files), guarded)
     if not findings:
         return result
     note = GateTriage(

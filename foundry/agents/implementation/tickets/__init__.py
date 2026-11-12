@@ -84,6 +84,7 @@ from foundry.agents.implementation.tickets.contracts import (
     _flag_contract_duplicates,
     contract_duplicates,
     contract_members,
+    dependency_symbols,
 )
 from foundry.agents.implementation.tickets.escalation import (
     _escalated_packet,
@@ -195,6 +196,7 @@ from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
     SKELETON_TASK_ID,
     FeatureDiff,
     Task,
@@ -632,6 +634,11 @@ def make_engineering_node(
             checks,
             shared,
             carried,
+            {
+                task_id_for_ticket(t.id): dependency_symbols(t, tickets, contracts)
+                for t in wave
+                if t.entrypoint
+            },
         )
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
@@ -718,9 +725,15 @@ def make_engineering_node(
                     spec = _ticket_check(
                         base, state, resolve, tasks[tid], ticket, criteria, contract_files, owned
                     )
-                    if not (own or requested or restarts or tid in carried or tid in already):
-                        # A first build on the integrated tree the opening check judges:
-                        # green there with its files built, there is nothing to do.
+                    if (
+                        ticket.id in (CONTRACTS_TICKET_ID, HARNESS_TICKET_ID)
+                        and not state.get("base_dir")
+                        and not (own or requested or restarts or tid in carried or tid in already)
+                    ):
+                        # Only a generated ticket's first build, whose files the planner
+                        # pre-wrote, is done when green there with its files built. A
+                        # planned ticket green on a file an earlier wave (or a change
+                        # build's base) built still has its own change to make.
                         spec = dataclasses.replace(spec, skip_green=True)
                     checks[tid] = spec
                 if extra := stub_rules(ticket, skeleton, contracts):

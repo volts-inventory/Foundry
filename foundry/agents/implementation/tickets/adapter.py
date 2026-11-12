@@ -46,6 +46,7 @@ class _ScopedAdapter:
         checks: Mapping[str, CheckSpec] | None = None,
         shared: Mapping[str, frozenset[str]] | None = None,
         carried: Mapping[str, Mapping[str, str]] | None = None,
+        guarded: Mapping[str, frozenset[str]] | None = None,
     ) -> None:
         assert rt.adapter is not None
         self._rt = rt
@@ -63,6 +64,8 @@ class _ScopedAdapter:
         self._shared = dict(shared or {})
         # Task id -> the failed attempt's files its sandbox was seeded with.
         self._carried = dict(carried or {})
+        # Entrypoint task id -> the dependency contract names it must not redefine.
+        self._guarded = dict(guarded or {})
         # Task id -> the files a failed attempt wrote, for its retry to start from.
         self.carry: dict[str, dict[str, str]] = {}
         # Task id -> each carryable attempt this pass (an escalation re-runs one in
@@ -108,7 +111,9 @@ class _ScopedAdapter:
             raise
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         if packet.task.get("entrypoint"):
-            result = _flag_entrypoint_redefinitions(result, sandbox, files, tid)
+            result = _flag_entrypoint_redefinitions(
+                result, sandbox, files, tid, self._guarded.get(tid, ())
+            )
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
 

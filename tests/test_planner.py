@@ -616,7 +616,8 @@ def test_one_bad_field_does_not_kill_the_plan() -> None:
     }
     rt, _ = runtime_for(_plan(tickets=[bad], sprint_plan={"usd_cap_microusd": None}))
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 1
+    # The kept scenario plus the security one code adds ("the list is empty" is no misuse).
+    assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 2
     assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 1
 
 

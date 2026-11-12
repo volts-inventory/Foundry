@@ -1119,16 +1119,27 @@ def make_fixer_node(
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
-        from foundry.agents.implementation.tickets.constants import ENTRYPOINT_DUP_TRIAGE
-        from foundry.agents.implementation.tickets.contracts import entrypoint_redefinitions
+        from foundry.agents.implementation.tickets.constants import (
+            CONTRACT_KIND,
+            ENTRYPOINT_DUP_TRIAGE,
+        )
+        from foundry.agents.implementation.tickets.contracts import (
+            dependency_symbols,
+            entrypoint_redefinitions,
+        )
+        from foundry.agents.implementation.tickets.packet import _newest_by
+        from foundry.schemas.architecture import InterfaceContract
 
+        tickets = read_tickets(state, resolve)
+        planned = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
         redefined = tuple(
             finding
-            for t in read_tickets(state, resolve)
+            for t in tickets
             if t.entrypoint
             for finding in entrypoint_redefinitions(
                 {f: overlay.get(f) for f in t.files},
                 {f: text for f, text in overlay.items() if f not in t.files},
+                dependency_symbols(t, tickets, planned),
             )
         )
         if redefined:

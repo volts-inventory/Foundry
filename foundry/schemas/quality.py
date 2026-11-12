@@ -102,3 +102,16 @@ class ReviewedTree(FrozenModel):
     verdict_seq: Seq
     snapshot_uri: str
     complete: bool = False
+
+
+class ReviewFindings(FrozenModel):
+    """The review verdict ``verdict_seq``'s findings, split by whether they could
+    block: ``blocking`` cite a failing check or a differing reproduction, ``advisory``
+    cite neither (the proxy keeps the verdict PASS for those). Recorded so the build
+    manifest lists the advisory ones instead of dropping them with the verdict."""
+
+    verdict_seq: Seq
+    run_against: str
+    status: str
+    blocking: tuple[str, ...] = ()
+    advisory: tuple[str, ...] = ()

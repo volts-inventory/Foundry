@@ -13,7 +13,7 @@ from foundry.agents.planner.schema import (
     CODE_CONTRACT_KINDS,
 )
 from foundry.base_tree import BaseView
-from foundry.gates.profiles import bdd_runner_hint, stack_install
+from foundry.gates.profiles import bdd_runner_hint, property_testing, stack_install
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import (
     BDD_REPORT_ENV,
@@ -244,6 +244,14 @@ def _generated_tickets(
                     "declare no build target at a source file you do not write; any "
                     "file you create outside your files is discarded."
                     + " Write no step definitions: the test tickets do."
+                    + (
+                        f" The contracts' property-based tests use {lib.library}: declare "
+                        f"{lib.dependency}."
+                        if any(i.properties for i in interfaces)
+                        and (lib := property_testing(language)) is not None
+                        and lib.dependency
+                        else ""
+                    )
                     + (f" {hint}" if (hint := bdd_runner_hint(language)) else "")
                     + (
                         " "

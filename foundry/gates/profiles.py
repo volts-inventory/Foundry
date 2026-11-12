@@ -35,7 +35,9 @@ __all__ = [
     "BDD_RUNNERS",
     "DEFAULT_INSTALL",
     "PROFILES",
+    "PROPERTY_TESTING",
     "SOURCE_SUFFIXES",
+    "PropertyTesting",
     "VerificationProfile",
     "bdd_runner_hint",
     "installed_profiles",
@@ -44,6 +46,7 @@ __all__ = [
     "profile_examples",
     "profile_for_request",
     "profile_language",
+    "property_testing",
     "pytest_bdd_binds",
     "stack_install",
     "stack_profile",
@@ -297,6 +300,87 @@ def bdd_runner_hint(language: str) -> str:
     """How ``language``'s standard Cucumber runner writes $FOUNDRY_BDD_REPORT ("" for
     a language with no Cucumber runner the gate reads: Python uses pytest-bdd)."""
     return BDD_RUNNERS.get(language, "")
+
+
+@dataclass(frozen=True, slots=True)
+class PropertyTesting:
+    """A language's property-based testing library: what a contract property's test
+    uses, the pinned dev dependency that provides it ("" = the gate environment or
+    the standard library already does), how to write one, and ``marker``: a regex a
+    test file matches when it uses the library (the Test gate's evidence)."""
+
+    library: str
+    dependency: str
+    usage: str
+    marker: str
+
+
+_FAST_CHECK = PropertyTesting(
+    library="fast-check",
+    dependency='"fast-check": "3.23.2" in package.json devDependencies',
+    usage=(
+        "`fc.assert(fc.property(<arbitraries>, (...args) => { ... }))` from "
+        "`import fc from 'fast-check'`, inside a test named after the id "
+        "(`test('PR1: ...', ...)`), run by the stack's test command"
+    ),
+    marker=r"""['"]fast-check['"]""",
+)
+
+PROPERTY_TESTING: dict[str, PropertyTesting] = {
+    "python": PropertyTesting(
+        library="hypothesis",
+        # The gate harness runs Foundry's own uv.lock-pinned hypothesis (as it does
+        # pytest-bdd), and pydeps never reinstalls what Foundry provides.
+        dependency="",
+        usage=(
+            "a pytest test function decorated with hypothesis `@given(...)` (strategies "
+            "from `hypothesis.strategies`: st.integers(), st.text(), st.from_regex(...), "
+            "st.builds(...), composed with @st.composite for structured input), named "
+            "test_<id>_<what> (e.g. test_pr1_total_within_bounds) in a tests/test_*.py "
+            "module"
+        ),
+        marker=r"^\s*(from|import)\s+hypothesis\b",
+    ),
+    "javascript": _FAST_CHECK,
+    "typescript": _FAST_CHECK,
+    "go": PropertyTesting(
+        library="testing/quick",
+        dependency="",
+        usage=(
+            "`quick.Check(func(<generated args>) bool { ... }, nil)` from the standard "
+            'library\'s "testing/quick" (a custom input type implements quick.Generator), '
+            "in a `func TestPR1<What>(t *testing.T)` of a _test.go file, failing with "
+            "t.Error(err)"
+        ),
+        marker=r'"testing/quick"|"github\.com/leanovate/gopter',
+    ),
+    "rust": PropertyTesting(
+        library="proptest",
+        dependency='proptest = "1.5.0" under [dev-dependencies] in Cargo.toml',
+        usage=(
+            "`proptest! { #[test] fn pr1_<what>(x in <strategy>) { prop_assert!(...); } }` "
+            "under tests/ or a #[cfg(test)] module"
+        ),
+        marker=r"\bproptest\b",
+    ),
+    "java": PropertyTesting(
+        library="jqwik",
+        dependency="net.jqwik:jqwik:1.9.0 as a test-scoped dependency in pom.xml",
+        usage="a jqwik `@Property void pr1<What>(@ForAll ... )` method under src/test/java",
+        marker=r"\bnet\.jqwik\b",
+    ),
+    "csharp": PropertyTesting(
+        library="FsCheck",
+        dependency="the FsCheck 2.16.6 package in the test project",
+        usage="an FsCheck `Prop.ForAll(...)` property in a test method named PR1_<What>",
+        marker=r"\bFsCheck\b",
+    ),
+}
+
+
+def property_testing(language: str) -> PropertyTesting | None:
+    """``language``'s property-testing library (None: no library is defined)."""
+    return PROPERTY_TESTING.get(language)
 
 
 def pytest_bdd_binds(stack: StackDecision | None) -> bool:

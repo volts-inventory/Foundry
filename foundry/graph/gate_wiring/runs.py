@@ -364,6 +364,7 @@ def run_build_test_gates(
             pyenv=pyenv,
             launch=launch_gate(state, resolve, profile, runner.seal_key, pyenv),
             owned=owned_paths(state, resolve),
+            properties=planned_properties(state, resolve),
         )
 
 
@@ -383,6 +384,30 @@ def owned_paths(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str
     return frozenset(owned)
 
 
+def planned_properties(state: FactoryState, resolve: ArtifactResolver) -> dict[str, str]:
+    """property id -> "<contract>: <statement>" for the properties of every newest
+    contract a live ticket implements (a dropped ticket's contract proves nothing)."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
+    from foundry.schemas.architecture import InterfaceContract
+
+    implemented = {name for t in read_tickets(state, resolve) for name in t.implements}
+    newest: dict[str, InterfaceContract] = {}
+    for a in sorted(
+        (a for a in state.get("artifacts") or () if a.kind == CONTRACT_KIND), key=lambda a: a.seq
+    ):
+        body = resolve(a)
+        if isinstance(body, InterfaceContract):
+            newest[body.name] = body
+    out: dict[str, str] = {}
+    for c in newest.values():
+        if c.name in implemented:
+            for p in c.properties:
+                pid, _, text = p.partition(": ")
+                out[pid] = f"{c.name}: {text}"
+    return out
+
+
 def _build_test_smoke(
     state: FactoryState,
     config: RunnableConfig,
@@ -397,6 +422,7 @@ def _build_test_smoke(
     pyenv: PythonBuildEnv | None,
     launch: GateImpl,
     owned: frozenset[str] | None = None,
+    properties: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
@@ -425,6 +451,8 @@ def _build_test_smoke(
             profile_name=profile.name if profile is not None else "",
             pyenv=pyenv,
             step_lint=profile.step_lint if profile is not None else "",
+            properties=properties,
+            language=profile_language(profile),
         )
     # Every run carries a smoke verdict: the stack's own run command, else an
     # attested "not pinned" PASS (the boundary is always build/test/smoke).

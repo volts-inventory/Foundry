@@ -695,12 +695,13 @@ def run(
         result = replace(
             result, resume_from=resume_boundary(final_state, resolve), resumable=durable is not None
         )
+    shipped_sha = ""
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
         # terminal gates ran against) and write the real source files to disk.
         # A HALTED run writes a best-effort DRAFT instead (see the elif below).
-        output_root = output._write_output_tree(
+        output_root, shipped_sha = output._write_shipped_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
@@ -734,6 +735,7 @@ def run(
                 state=final_state,
                 rt=rt,
                 passed=result.passed,
+                tree_sha=shipped_sha,
             )
         except Exception as exc:
             print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)

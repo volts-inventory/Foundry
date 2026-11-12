@@ -66,6 +66,7 @@ from foundry.execution.adapter_contract import (
 )
 from foundry.execution.adapters.claude_check import CheckRelay, check_note, open_check
 from foundry.execution.sandbox import Sandbox, SandboxResult
+from foundry.proxy.cli_transports import cost_usage
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
 
@@ -425,6 +426,7 @@ class ClaudeCodeAdapter:
         # Per-session token usage, read into the BUILD-MANIFEST: coding sessions are
         # most of a run's spend and never pass through the proxy's per-call records.
         self.usage: list[dict[str, int]] = []
+        self.served_models: set[str] = set()
         # Per-run token cap shared with the proxy; None = uncapped.
         self.token_meter: TokenMeter | None = None
 
@@ -532,6 +534,9 @@ class ClaudeCodeAdapter:
             summary = raw if isinstance(raw, str) else ""
 
         u = envelope.get("usage")
+        observed = _observed_model(envelope)
+        if observed:
+            self.served_models.add(observed)
         if isinstance(u, dict):
             self.usage.append(
                 {
@@ -543,6 +548,7 @@ class ClaudeCodeAdapter:
                         "cache_creation_input_tokens",
                     )
                 }
+                | cost_usage(envelope)
             )
             if self.token_meter is not None:
                 self.token_meter.charge(self.usage[-1])

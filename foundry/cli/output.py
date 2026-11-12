@@ -32,6 +32,20 @@ def _write_output_tree(
     resolve_blob: BlobResolver,
     best: FixPass | None = None,
 ) -> str:
+    """:func:`_write_shipped_tree`'s root alone."""
+    return _write_shipped_tree(
+        final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob, best=best
+    )[0]
+
+
+def _write_shipped_tree(
+    final_state: FactoryState,
+    output_dir: str,
+    *,
+    resolve: ArtifactResolver,
+    resolve_blob: BlobResolver,
+    best: FixPass | None = None,
+) -> tuple[str, str]:
     """Materialize the FINAL accepted integrated tree and write the source files.
     With ``best`` (a halted run's draft), write that fix pass's tree instead.
 
@@ -41,7 +55,8 @@ def _write_output_tree(
     never a parallel re-render). The materialization happens in a throwaway temp
     dir; the real source files (everything except the Spec gate's ``criteria.json``
     input) are then copied into ``output_dir`` on disk. Returns the resolved
-    absolute path written.
+    absolute path written and the ``tree_sha`` of the tree written (empty for a
+    ``best`` draft, which no single gate run attests).
 
     ``output_dir`` is operator-supplied, but the per-file relative paths come
     from agent-influenced diff bodies; ``materialize_workdir`` already rejects an
@@ -55,12 +70,15 @@ def _write_output_tree(
     out_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="foundry-cli-out-") as staging:
         stage_root = Path(staging)
+        sha = ""
         if best is not None:
             materialize_best(
                 final_state, stage_root, best, resolve=resolve, resolve_blob=resolve_blob
             )
         else:
-            materialize_workdir(final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob)
+            sha = materialize_workdir(
+                final_state, stage_root, resolve=resolve, resolve_blob=resolve_blob
+            )
         for src in sorted(stage_root.rglob("*")):
             if not src.is_file():
                 continue
@@ -76,7 +94,7 @@ def _write_output_tree(
                 raise ValueError(f"source path escapes output dir: {str(rel)!r}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(src.read_bytes())
-    return str(out_root)
+    return str(out_root), sha
 
 
 def _draft_best(final_state: FactoryState, resolve: ArtifactResolver) -> Any:

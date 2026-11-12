@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundry.schemas.base import FrozenModel
+from foundry.schemas.gates import GateStatus
 
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
@@ -106,6 +107,9 @@ class BuildManifest(FrozenModel):
     passed: bool
     phase: str
     tree_sha: str = ""
+    # Whether a passing gate verdict ran against exactly the shipped tree (None:
+    # nothing shipped). False means the bytes in out/ are not the ones the gates judged.
+    tree_attested: bool | None = None
     artifacts: tuple[ArtifactRef, ...] = ()
     gates: tuple[GateRef, ...] = ()
     model_usage: ModelUsageSummary = ModelUsageSummary()
@@ -215,10 +219,23 @@ def build_manifest(
     proxy_manifest: Sequence[Mapping[str, Any]] = (),
     drift_events: int = 0,
     agent_usage: Sequence[Mapping[str, int]] = (),
+    agent_models: Sequence[str] = (),
     tree_sha: str = "",
     estimated_cost_microusd: int = 0,
 ) -> BuildManifest:
-    """Consolidate a finished run's outputs into a :class:`BuildManifest`."""
+    """Consolidate a finished run's outputs into a :class:`BuildManifest`. Cost is
+    the budget ledger's spend, else what the backends reported per call/session."""
+    reported = sum(int(r.get("usage", {}).get("cost_microusd", 0)) for r in proxy_manifest)
+    reported += sum(int(a.get("cost_microusd", 0)) for a in agent_usage)
+    usage = _usage_summary(proxy_manifest, drift_events, agent_usage)
+    if agent_models:
+        models = tuple(sorted({*usage.served_models, *agent_models}))
+        usage = usage.model_copy(update={"served_models": models})
+    attested = (
+        any(g.run_against == tree_sha and g.status is GateStatus.PASS for g in gates)
+        if tree_sha
+        else None
+    )
     return BuildManifest(
         request=request,
         thread_id=thread_id,
@@ -226,10 +243,11 @@ def build_manifest(
         passed=passed,
         phase=phase,
         tree_sha=tree_sha,
+        tree_attested=attested,
         artifacts=_artifact_refs(artifacts),
         gates=_gate_refs(gates),
-        model_usage=_usage_summary(proxy_manifest, drift_events, agent_usage),
-        estimated_cost_microusd=estimated_cost_microusd,
+        model_usage=usage,
+        estimated_cost_microusd=estimated_cost_microusd or reported,
     )
 
 
@@ -243,7 +261,10 @@ def render_manifest_md(m: BuildManifest) -> str:
         f"- **Run:** `{m.thread_id}`",
         f"- **Generated:** {m.generated_at}",
         f"- **Result:** {'PASS' if m.passed else 'HALTED'} (phase: {m.phase})",
-        f"- **Tree:** `{m.tree_sha or 'n/a'}`",
+        f"- **Tree:** `{m.tree_sha or 'n/a'}`"
+        + {True: " (gated)", False: " (**NOT the tree the gates passed**)", None: ""}[
+            m.tree_attested
+        ],
         f"- **Estimated cost:** ${m.estimated_cost_microusd / 1_000_000:.4f}",
         *(
             [
@@ -364,6 +385,7 @@ def write_manifest(
     state: FactoryState,
     rt: AgentRuntime,
     passed: bool,
+    tree_sha: str = "",
 ) -> BuildManifest:
     """Build the manifest for a finished run and write BUILD-MANIFEST.{json,md}."""
     manifest = _with_plan(
@@ -378,6 +400,8 @@ def write_manifest(
             proxy_manifest=rt.proxy.manifest,
             drift_events=len(rt.proxy.drift_events),
             agent_usage=getattr(rt.adapter, "usage", ()),
+            agent_models=tuple(getattr(rt.adapter, "served_models", ())),
+            tree_sha=tree_sha,
             estimated_cost_microusd=_budget_spend(state),
         ),
         state,

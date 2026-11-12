@@ -169,7 +169,8 @@ def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> N
     adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
     with Sandbox(source_dir) as sb:
         adapter.run(make_packet(sb.worktree), sb)
-    assert adapter.usage == [usage]
+    # The envelope's own total_cost_usd (0 here) rides along for the manifest's cost.
+    assert adapter.usage == [usage | {"cost_microusd": 0}]
 
 
 def test_progress_logs_each_agent_session(

@@ -61,6 +61,9 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     assert manifest["passed"] is True
     assert manifest["model_usage"]["model_calls"] > 0
     assert "## Model usage (observed)" in (out / "BUILD-MANIFEST.md").read_text()
+    # The shipped tree is the one a passing gate verdict ran against.
+    assert manifest["tree_sha"]
+    assert manifest["tree_attested"] is True
 
 
 def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
@@ -221,3 +224,24 @@ def test_a_run_stopped_before_any_code_says_why_it_left_no_draft(
         run("build a tiny URL-shortener service", thread_id="cli-out-early", output_dir=str(out))
 
     assert any("no DRAFT written" in n for n in getattr(caught.value, "__notes__", ()))
+
+
+def test_manifest_cost_and_models_come_from_what_the_backends_reported() -> None:
+    from foundry.manifest import build_manifest
+
+    manifest = build_manifest(
+        request="r",
+        thread_id="t",
+        generated_at="now",
+        passed=True,
+        phase="done",
+        artifacts=(),
+        gates=(),
+        proxy_manifest=[{"served_model": "claude-opus", "usage": {"cost_microusd": 1500}}],
+        agent_usage=[{"input_tokens": 3, "cost_microusd": 250}],
+        agent_models=["claude-haiku"],
+        tree_sha="abc",
+    )
+    assert manifest.estimated_cost_microusd == 1750
+    assert manifest.model_usage.served_models == ("claude-haiku", "claude-opus")
+    assert manifest.tree_attested is False

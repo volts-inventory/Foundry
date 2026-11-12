@@ -123,6 +123,10 @@ class TieredAdapter:
         return list(getattr(self.cloud, "usage", ()))
 
     @property
+    def served_models(self) -> set[str]:
+        return set(getattr(self.cloud, "served_models", ()))
+
+    @property
     def token_meter(self) -> Any:
         return getattr(self.cloud, "token_meter", None)
 

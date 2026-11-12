@@ -1159,11 +1159,19 @@ def make_fixer_node(
         )
         if redefined:
             failures = (*failures, f"[{ENTRYPOINT_DUP_TRIAGE}]", *redefined)
+        from foundry.agents.implementation.tickets import upstream_defect_context
+
+        defects, defect_files = upstream_defect_context(state, tickets)
+        failures = (*failures, *defects)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
 
         focus = _fix_focus(state, resolve)
         contracts = contract_paths(state, resolve)
         fix_files = _fix_files(state, resolve, overlay)
+        if fix_files and defect_files:
+            # A defect's owning files join the fence: the session that found it could
+            # not write them, and this pass is where it gets fixed.
+            fix_files = tuple(dict.fromkeys((*fix_files, *defect_files)))
         # Numbered by the fixes so far, not the attempt counter: that resets per wave
         # and on a resume, and a reused id would collide with the earlier fix's notes.
         fixes = {

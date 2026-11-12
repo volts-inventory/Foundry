@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -24,12 +25,13 @@ from foundry.agents.implementation.tickets.rules import (
     verify_rules,
 )
 from foundry.execution.adapter_contract import TaskPacket
-from foundry.gates.bdd_scaffold import step_module, step_scaffold
+from foundry.gates.bdd_scaffold import is_helper_module, step_module, step_scaffold
 from foundry.gates.profiles import property_testing, pytest_bdd_binds
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
     FEATURE_DIR,
     HARNESS_TICKET_ID,
     Specialty,
@@ -131,8 +133,12 @@ def _ticket_context(
     ticket: Ticket,
     criteria: Mapping[str, AcceptanceCriterion],
     contracts: Mapping[str, InterfaceContract],
+    tickets: Sequence[Ticket] = (),
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """(spans, feature files): the ticket's scenarios and its contracts, verbatim."""
+    """(spans, feature files): the ticket's scenarios and its contracts, verbatim,
+    then the signature of each contract a dependency ticket implements that it does
+    not name (sessions otherwise opened turns reading the dependency's files, or a
+    contracts module that never existed, to learn them)."""
     spans: list[str] = []
     features: set[str] = set()
     for cid in ticket.scenario_ids:
@@ -150,6 +156,19 @@ def _ticket_context(
             contract = contracts.get(name)
             body = _contract_body(rt, contract) if contract else "(not in the plan)"
             spans.append(f"INTERFACE CONTRACT {name} ({role}):\n{body}")
+    named = {*ticket.implements, *ticket.consumes}
+    by_id = {t.id: t for t in tickets}
+    for dep in ticket.depends_on:
+        for name in by_id[dep].implements if dep in by_id else ():
+            contract = contracts.get(name)
+            if name in named or contract is None:
+                continue
+            named.add(name)
+            body = contract.signature or _contract_body(rt, contract)
+            spans.append(
+                f"INTERFACE CONTRACT {name} (ticket {dep}, which this ticket depends on, "
+                f"implements it — call it exactly as signed):\n{body}"
+            )
     return tuple(spans), tuple(sorted(features))
 
 
@@ -369,7 +388,7 @@ def _is_test_path(path: str) -> bool:
     )
 
 
-def _inline_rule(spans: Sequence[str]) -> str:
+def _inline_rule(spans: Sequence[str], blocked: Sequence[str] = ()) -> str:
     """Where the packet already carries what a session would otherwise open turns
     re-reading: its scenarios, contracts and dependency notes."""
     has = [
@@ -383,8 +402,9 @@ def _inline_rule(spans: Sequence[str]) -> str:
         if has
         else f"This ticket owns no scenario: do not read {FEATURE_DIR}/*.feature"
     )
+    tests = " or test/step module" if any(not p.endswith(".feature") for p in blocked) else ""
     return (
-        f"{carried}, nor another ticket's feature file (not your spec). Do not re-read "
+        f"{carried}, nor another ticket's feature file{tests} (not your spec). Do not re-read "
         "requirements.txt or another manifest unless it is one of the paths you write "
         "(the check installs what it declares). Read a file only for content this "
         "packet does not carry, then write."
@@ -393,6 +413,35 @@ def _inline_rule(spans: Sequence[str]) -> str:
 
 def _foreign_feature(path: str, own: Sequence[str]) -> bool:
     return path.startswith(f"{FEATURE_DIR}/") and path.endswith(".feature") and path not in own
+
+
+def blocked_reads(
+    ticket: Ticket, tickets: Sequence[Ticket], feature_files: Sequence[str]
+) -> tuple[str, ...]:
+    """The files a ticket session may not read: other tickets' feature files and
+    their test and step modules — not its spec, and a local session opened each
+    ticket with reads of them. Shared helpers (conftest.py, fixtures, utils) and the
+    contracts and BDD harness tickets' files stay readable; the harness ticket
+    itself reads anything."""
+    if ticket.id == HARNESS_TICKET_ID:
+        return ()
+    own = set(ticket.files)
+    out: list[str] = []
+    for t in tickets:
+        if t.id in (ticket.id, CONTRACTS_TICKET_ID, HARNESS_TICKET_ID):
+            continue
+        if _foreign_feature(path := feature_path(t.id), feature_files):
+            out.append(path)
+        out += [
+            f
+            for f in t.files
+            if f not in own
+            and not f.endswith("/")
+            and _is_test_path(f)
+            and f.rsplit("/", 1)[-1] not in ("conftest.py", "__init__.py")
+            and not (f.endswith(".py") and is_helper_module(f))
+        ]
+    return tuple(dict.fromkeys(out))
 
 
 def _ticket_packet(
@@ -409,13 +458,15 @@ def _ticket_packet(
     contract_files: Sequence[str] = (),
     scenarios: Mapping[str, Sequence[str]] | None = None,
     properties: Sequence[str] = (),
+    tickets: Sequence[Ticket] = (),
 ) -> TaskPacket:
     scenarios = scenarios or {}
+    blocked = blocked_reads(ticket, tickets, feature_files)
     rules = [
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
-        _inline_rule(spans),
+        _inline_rule(spans, blocked),
         *_check_rules(task, ticket, stack, contract_files, scenarios),
     ]
     if ticket.files:
@@ -431,6 +482,7 @@ def _ticket_packet(
         rules.append(PRODUCTION_WIRING_RULE)
     if rule := property_rule(properties, stack):
         rules.append(rule)
+    extra: dict[str, Any] = {"blocked_reads": list(blocked)} if blocked else {}
     return TaskPacket(
         task={
             "id": task.id,
@@ -446,13 +498,18 @@ def _ticket_packet(
             "criterion_ids": list(task.criterion_ids),
             "depends_on": list(task.depends_on),
             "files": list(ticket.files),
-            "reads": [r for r in ticket.reads if not _foreign_feature(r, feature_files)],
+            "reads": [
+                r
+                for r in ticket.reads
+                if not _foreign_feature(r, feature_files) and r not in blocked
+            ],
             "feature_files": list(feature_files),
             "rules": rules,
             "verify": {
                 **verify_commands(stack),
                 **scenario_verify(ticket.files, scenarios, stack, ticket.id),
             },
+            **extra,
         },
         persona=persona_for(ticket.specialty.value, stack, harness=ticket.id == HARNESS_TICKET_ID),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
@@ -464,6 +521,38 @@ def _ticket_packet(
         cost_budget_microusd=cost_budget_microusd,
         proxy_endpoint=None,
     )
+
+
+def upstream_defect_context(
+    state: FactoryState, tickets: Sequence[Ticket]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(failure lines, files) a fixer pass gets for the upstream defects ticket
+    sessions reported: each report under a header, and every file of each ticket
+    owning a file a report names, for the pass's write fence. A session may not
+    write another ticket's file, so the fixer is where such a bug gets fixed;
+    ``((), ())`` when none was reported."""
+    from foundry.manifest import upstream_defects
+
+    reports = upstream_defects(state)
+    if not reports:
+        return (), ()
+    files: list[str] = []
+    for t in tickets:
+        if any(_names(f, r) for f in t.files for r in reports):
+            files.extend(t.files)
+    lines = (
+        "[upstream-defect] a dependent ticket's session found these bugs in a file it "
+        "may not write, and kept its test as a real client calls it: confirm each still "
+        "reproduces, then fix it in the named file (not by changing the caller's test)",
+        *reports,
+    )
+    return lines, tuple(dict.fromkeys(files))
+
+
+def _names(path: str, text: str) -> bool:
+    """Whether ``text`` names ``path`` as a whole path (``app.py`` is not in
+    ``webapp.py``)."""
+    return re.search(rf"(?<![\w/.-]){re.escape(path.rstrip('/'))}(?![\w-])", text) is not None
 
 
 def _failure_notes(

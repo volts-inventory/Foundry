@@ -22,6 +22,7 @@ from foundry.execution.adapters.tiered import (
     DIGEST_TRIAGE,
     SPEC_CONFLICT_TRIAGE,
     STOPPED_DIGEST,
+    UPSTREAM_DEFECT_TRIAGE,
     session_stop_reason,
 )
 from foundry.execution.sandbox import Sandbox
@@ -96,6 +97,106 @@ def test_a_spec_conflict_reported_at_done_gets_its_own_triage_record(tmp_path: P
     [conflict] = [t for t in result.triage if t.name == SPEC_CONFLICT_TRIAGE]
     assert conflict.explanation == "PC-001 says sides >= 2 but scenario 1d1 -> 1"
     assert conflict.run_against == "task/t-1"
+
+
+def _ticket_packet(worktree: Path, **task: Any) -> TaskPacket:
+    packet = make_packet(worktree)
+    return packet.model_copy(update={"task": {**packet.task, "files": ["app.py"], **task}})
+
+
+def test_an_upstream_defect_reported_at_done_gets_its_own_triage_record(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    note = (
+        "upstream-defect: web/routes.py: DELETE /notes/1 is answered 405 before "
+        "before_request runs; repro: client.delete('/notes/1')"
+    )
+    actions = iter([{"action": "done", "summary": "entrypoint", "triage": [note]}])
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree), sb)
+    assert "upstream-defect:" in seen[0] and "never adapt your code or test away" in seen[0]
+    [defect] = [t for t in result.triage if t.name == UPSTREAM_DEFECT_TRIAGE]
+    assert defect.explanation.startswith("web/routes.py: DELETE /notes/1")
+    assert "repro: client.delete" in defect.explanation and defect.run_against == "task/t-1"
+
+
+def test_a_fixer_is_not_told_to_report_upstream_defects(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        return "{}", {"action": "done", "summary": "x"}
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree, fix_files=["a.py"]), sb)
+    assert "upstream-defect:" not in seen[0]
+
+
+def test_reads_of_another_tickets_test_and_feature_files_are_refused(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "tests" / "test_store.py").write_text("def test_x(): pass\n")
+    (src / "tests" / "conftest.py").write_text("X = 1\n")
+    seen: list[str] = []
+    actions = iter(
+        [
+            {"action": "read_file", "path": "tests/test_store.py"},
+            {"action": "read_file", "path": "./features/store.feature"},
+            {"action": "read_file", "path": "tests/conftest.py"},
+            {"action": "done", "summary": "x"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    blocked = ["tests/test_store.py", "features/store.feature"]
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree, blocked_reads=blocked), sb)
+    assert seen[1].startswith("OBSERVATION:\nNOT READ: tests/test_store.py belongs to another")
+    assert "def test_x" not in seen[1]
+    assert seen[2].startswith("OBSERVATION:\nNOT READ: features/store.feature")
+    assert "X = 1" in seen[3]  # a shared helper stays readable
+
+
+def test_a_read_of_a_missing_file_lists_the_files_that_exist(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "notes").mkdir(parents=True)
+    (src / "notes" / "contract.py").write_text("X = 1\n")
+    (src / "notes" / "store.py").write_text("Y = 1\n")
+    (src / "app.py").write_text("Z = 1\n")
+    seen: list[str] = []
+    actions = iter(
+        [
+            {"action": "read_file", "path": "notes/contracts.py"},
+            {"action": "read_file", "path": "lib/models.py"},
+            {"action": "done", "summary": "x"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+    missing, no_dir = seen[1], seen[2]
+    assert "notes/contracts.py does not exist. Closest existing: notes/contract.py" in missing
+    assert "Files in notes/: notes/contract.py, notes/store.py." in missing
+    assert "lib/models.py does not exist." in no_dir
+    assert "(lib/ has none)" in no_dir and "app.py" in no_dir
 
 
 def test_each_action_reports_one_activity_line(tmp_path: Path) -> None:

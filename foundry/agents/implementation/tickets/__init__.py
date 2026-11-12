@@ -111,6 +111,7 @@ from foundry.agents.implementation.tickets.packet import (
     bdd_scaffold_spans,
     ticket_properties,
     ticket_signature_map,
+    upstream_defect_context,
 )
 from foundry.agents.implementation.tickets.restart import (
     _land_reset,
@@ -260,6 +261,7 @@ __all__ = [
     "trim_to_write_scope",
     "unbuilt_task_ids",
     "unwritten_ticket_files",
+    "upstream_defect_context",
     "verify_commands",
     "verify_rules",
 ]
@@ -672,7 +674,7 @@ def make_engineering_node(
         ):
             for ticket in _round_robin(wave):
                 tid = task_id_for_ticket(ticket.id)
-                spans, features = _ticket_context(rt, ticket, criteria, contracts)
+                spans, features = _ticket_context(rt, ticket, criteria, contracts, tickets)
                 owned = _ticket_scenarios(ticket, criteria)
                 sigmap = ticket_signature_map(ticket, tickets, overlay, contract_files)
                 spans = (
@@ -722,6 +724,7 @@ def make_engineering_node(
                     contract_files=contract_files,
                     scenarios=owned,
                     properties=ticket_properties(ticket, tickets, contracts),
+                    tickets=tickets,
                 )
                 if base is not None:
                     spec = _ticket_check(

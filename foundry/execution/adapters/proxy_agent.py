@@ -32,6 +32,7 @@ then on; other tiers keep their tools.
 from __future__ import annotations
 
 import contextlib
+import difflib
 import hashlib
 import json
 import os
@@ -67,6 +68,7 @@ from foundry.execution.adapters.tiered import (
     DIGEST_TRIAGE,
     SPEC_CONFLICT_TRIAGE,
     STOPPED_DIGEST,
+    UPSTREAM_DEFECT_TRIAGE,
 )
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
@@ -147,6 +149,17 @@ _SPEC_CONFLICT_RULE = (
     "or another scenario), never special-case that example or rewrite its input to "
     "dodge the rule: implement the general rule, and list in done's triage an entry "
     f"starting '{_SPEC_CONFLICT_PREFIX}' that quotes both statements."
+)
+UPSTREAM_DEFECT_PREFIX = "upstream-defect:"
+# A downstream session once diagnosed a route bug in a dependency's file, then
+# rewrote its own test to a different HTTP method, and the bug shipped.
+_UPSTREAM_DEFECT_RULE = (
+    "If a file you may not write (another ticket's) is wrong, never adapt your code "
+    "or test away from the interface a real client uses (its HTTP method, route, CLI "
+    "flag, function signature) to get green, and never copy or patch around it: leave "
+    "the test as a real client would call it, and list in done's triage an entry "
+    f"'{UPSTREAM_DEFECT_PREFIX} <file>: <symptom>; repro: <the call that fails>'. "
+    "done is accepted with it while the gate is red; the fix goes to that file's ticket."
 )
 
 
@@ -276,6 +289,8 @@ CHECK_UNVERIFIED = "unverified"
 CHECK_OVERRIDDEN = "done accepted with the gate still red"
 # The note of a session whose done came on its last turn, red, with no turn left to refuse it.
 CHECK_RED_LAST_TURN = "done on the last turn with the gate red"
+# The note of a session whose red done was accepted on its reported upstream defect.
+CHECK_UPSTREAM = "done accepted with the gate red on a reported upstream defect"
 _DIGEST_PATHS = 12
 _DIGEST_ACTIONS = 5
 _DIGEST_LINES = 4
@@ -314,6 +329,10 @@ GREEN_AUTO_DONE = "done automatically: the gate check passed and the session mad
 PENDING_GREEN_DONE = (
     "done automatically: the opening check was green and stayed green once the "
     "ticket's missing files were written"
+)
+WRITE_GREEN_DONE = (
+    "done automatically: the gate check run after a write that left all the ticket's "
+    "files built passed"
 )
 # Chars of unchanged-file reads kept verbatim past masking, not counting the
 # always-kept tail; over it, the oldest are elided down to half, so the cap
@@ -420,6 +439,11 @@ class _Loop:
     green_turn: int = 0
     # A green-opened session's files still unbuilt (``_unbuilt``); None = not one.
     pending: tuple[str, ...] | None = None
+    # A write this turn may have left every ticket file built: the check runs once
+    # the turn's actions have (``_auto_check``).
+    autocheck: bool = False
+    # Other tickets' feature, test and step files (packet.task["blocked_reads"]).
+    blocked: frozenset[str] = frozenset()
     # Normalized environment error line -> the run/check observations showing it.
     env_errors: dict[str, int] = field(default_factory=dict)
     masked_at: int = 0  # the turn of the last elision pass
@@ -540,6 +564,7 @@ class ProxyAgentAdapter:
             owned=tuple(str(f) for f in owned) if isinstance(owned, list) and owned else None,
             label=str(packet.task.get("id", "")),
             pending=pending or None,
+            blocked=frozenset(str(b) for b in packet.task.get("blocked_reads") or ()),
         )
         turns = 0
         while turns < st.budget and not st.stopped:
@@ -581,7 +606,9 @@ class ProxyAgentAdapter:
             elif last is not None and last.red and st.done:
                 # Not a stop: the wave check judges the tree; the record says why it ended.
                 how = (
-                    f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s)"
+                    CHECK_UPSTREAM
+                    if _defects(st.triage)
+                    else f"{CHECK_OVERRIDDEN} after {st.check_refusals} refused done(s)"
                     if st.check_refusals
                     else CHECK_RED_LAST_TURN
                 )
@@ -626,6 +653,8 @@ class ProxyAgentAdapter:
         ]
         if conflicts:
             heads.append((SPEC_CONFLICT_TRIAGE, "; ".join(conflicts)))
+        if defects := _defects(st.triage):
+            heads.append((UPSTREAM_DEFECT_TRIAGE, " | ".join(defects)))
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -694,6 +723,11 @@ class ProxyAgentAdapter:
         if out is None:
             return
         observation, read = out
+        if st.autocheck:
+            auto = _auto_check(st)
+            if auto is None:
+                return
+            observation += auto
         content = f"OBSERVATION:\n{observation}{_countdown(st)}"
         messages.append({"role": "user", "content": content})
         st.verbatim.append(_Kept(len(messages) - 1, _summarize(act), len(content), read))
@@ -746,6 +780,13 @@ class ProxyAgentAdapter:
                 st.verbatim.append(
                     _Kept(idx, _summarize(act), len(observation), read, len(results) - 1)
                 )
+        # After the turn's last call, not each write: a turn editing two files is
+        # checked once, on both.
+        if st.autocheck:
+            auto = _auto_check(st)
+            if auto is None:
+                return
+            results[-1] = {**results[-1], "content": f"{results[-1]['content']}{auto}"}
         if note := _countdown(st):
             results[-1] = {**results[-1], "content": f"{results[-1]['content']}{note}"}
         messages.append({"role": "user", "content": results})
@@ -765,7 +806,7 @@ class ProxyAgentAdapter:
                 return refusal, None
             if refusal := _undeclared_done(st):
                 return refusal, None
-            if refusal := _red_done(st):
+            if not _defects(items) and (refusal := _red_done(st)):
                 return refusal, None
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
@@ -819,7 +860,9 @@ class ProxyAgentAdapter:
         read: _Read | None = None
         guard = _fence_snapshot(st) if action == "run" else None
         try:
-            if action == "read_file":
+            if action == "read_file" and (refused := _blocked_read(st, act)):
+                observation = refused
+            elif action == "read_file":
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
             elif action == "check":
                 observation = _check(st)
@@ -843,10 +886,9 @@ class ProxyAgentAdapter:
             st.green = False
             st.green_idle = 0
         if action == "write_file" and not observation.startswith("ERROR"):
-            finished = _finish_pending(st)
-            if finished is None:
-                return None
-            observation += finished
+            st.autocheck = True
+        elif action == "check":
+            st.autocheck = False
         if action in ("run", "check"):
             # A check's pre-existing failures are not the session's to fix: an error
             # there repeats on every check whatever the session does.
@@ -1358,6 +1400,9 @@ def _opening(
     else:
         epilogue = _CHECK_EPILOGUE
     epilogue = f"{epilogue} {_SPEC_CONFLICT_RULE}"
+    if packet.task.get("files") and not packet.task.get("fix_files"):
+        # A ticket session only: a fixer may change any file it gives a reason for.
+        epilogue = f"{epilogue} {_UPSTREAM_DEFECT_RULE}"
     if check:
         epilogue = f"{check}\n\n{epilogue}"
     if listing:
@@ -1440,21 +1485,46 @@ def _pending_note(pending: tuple[str, ...]) -> str:
     )
 
 
-def _finish_pending(st: _Loop) -> str | None:
-    """After a write in a green-opened session: once none of its files is unbuilt,
-    the check, run now. Green ends the session as done (None); red appends its
-    report and the session goes on as any other."""
-    pending = st.pending
-    if not pending or not all(_built(st.worktree, f) for f in pending):
+def _auto_check(st: _Loop) -> str | None:
+    """After a turn that wrote a file: once every one of the ticket's files is
+    built, the check, run now without asking the model. Green ends the session as
+    done with a summary of its own (None); red is appended to the observation as if
+    the model had called check, and the session goes on. ``""``: no check ran (a
+    file still unbuilt, no files named, a fixer, or no check left)."""
+    st.autocheck = False
+    c = st.checker
+    if c is None or not st.files or st.fence is not None:
         return ""
-    st.pending = None
+    if not all(_built(st.worktree, f) for f in st.files):
+        return ""
+    if c.left <= 0 and c.cached(*_changes(st)) is None:
+        return ""
+    pending, st.pending = st.pending, None
     report = _check(st)
-    if st.green:
+    st.last_check = f"check: {_head(report)}"
+    if not st.green:
+        return f"\n\nCHECK (run by itself: your files are all written):\n{report}"
+    if pending:
         st.summary = st.summary or f"wrote {', '.join(pending)}; the gate check passed"
         st.triage.append(PENDING_GREEN_DONE)
-        st.stopped = st.done = True
-        return None
-    return f"\n\nCHECK (run by itself: your files are all written):\n{report}"
+    else:
+        written = sorted(_changes(st)[0])
+        st.summary = st.summary or (
+            f"wrote {', '.join(written[:_DIGEST_PATHS]) or 'no file'}; the gate check "
+            "run after the last write passed"
+        )
+        st.triage.append(WRITE_GREEN_DONE)
+    st.stopped = st.done = True
+    return None
+
+
+def _defects(triage: Iterable[Any]) -> list[str]:
+    """The upstream-defect reports among done's triage items, prefix stripped."""
+    return [
+        t[len(UPSTREAM_DEFECT_PREFIX) :].strip()
+        for t in (str(x).strip() for x in triage)
+        if t.lower().startswith(UPSTREAM_DEFECT_PREFIX) and t[len(UPSTREAM_DEFECT_PREFIX) :].strip()
+    ]
 
 
 def _failing_count(verdict: CheckVerdict) -> int:
@@ -1957,10 +2027,62 @@ def _mypy_advisory(sandbox: Sandbox, rel: str, flags: Sequence[str]) -> str:
     )
 
 
+def _blocked_read(st: _Loop, act: dict[str, Any]) -> str | None:
+    """The refusal of a read of another ticket's feature, test or step file."""
+    raw = str(act.get("path", ""))
+    rel = PurePosixPath(raw).as_posix().removeprefix("./") if raw else raw
+    if rel not in st.blocked:
+        return None
+    return (
+        f"NOT READ: {rel} belongs to another ticket (its scenarios or tests), not your "
+        "spec. Your scenarios, contracts and the interfaces already built are in this "
+        "packet: write your files from them."
+    )
+
+
+# Paths listed beside a missing file: those close to its name, then its directory's.
+_MISSING_CLOSE = 5
+_MISSING_SIBLINGS = 30
+
+
+def _missing(worktree: Path, rel: str) -> str:
+    """The answer to a read of a file that does not exist: the existing files
+    closest to its name and those in its directory (else the tree's), so a
+    session guessing a path (a contracts.py no ticket wrote) learns the real ones
+    in this one turn."""
+    root = worktree.resolve()
+    skip = _SEARCH_SKIP_DIRS | _TREE_SKIP_DIRS
+    paths: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in skip)
+        base = Path(dirpath).relative_to(root).as_posix()
+        paths += [n if base == "." else f"{base}/{n}" for n in sorted(filenames)]
+    want = PurePosixPath(rel)
+    close = difflib.get_close_matches(rel, paths, n=_MISSING_CLOSE, cutoff=0.5)
+    close += [p for p in paths if PurePosixPath(p).name == want.name and p not in close]
+    parent = want.parent.as_posix()
+    siblings = [p for p in paths if PurePosixPath(p).parent.as_posix() == parent]
+    where = f"in {parent}/" if parent != "." else "at the top level"
+    if not siblings:
+        siblings, where = paths, f"in the worktree ({parent}/ has none)"
+    more = len(siblings) - _MISSING_SIBLINGS
+    out = f"{rel} does not exist."
+    if close:
+        out += " Closest existing: " + ", ".join(close[:_MISSING_CLOSE]) + "."
+    if siblings:
+        out += (
+            f" Files {where}: "
+            + ", ".join(siblings[:_MISSING_SIBLINGS])
+            + (f" (+{more} more)" if more > 0 else "")
+            + "."
+        )
+    return out
+
+
 def _read_file(worktree: Path, rel: str, act: dict[str, Any]) -> tuple[str, _Read | None]:
     target = _contained(worktree, rel)
     if not target.is_file():
-        return f"{rel} does not exist", None
+        return _missing(worktree, rel), None
     key = _file_key(worktree, rel)
     text = target.read_text(encoding="utf-8", errors="replace")
     obs, lo, hi = _read_range(rel, text, act.get("start_line"), act.get("end_line"))

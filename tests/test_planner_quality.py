@@ -18,7 +18,10 @@ from foundry.agents.implementation.tickets.contracts import (
 from foundry.agents.implementation.tickets.packet import (
     ENTRYPOINT_RULE,
     PRODUCTION_WIRING_RULE,
+    _ticket_context,
     _ticket_packet,
+    blocked_reads,
+    upstream_defect_context,
 )
 from foundry.agents.planner import make_planner_node
 from foundry.agents.planner.checks import (
@@ -246,6 +249,110 @@ def test_the_packet_says_its_scenarios_are_inline_and_lists_no_foreign_feature()
     assert "features/*.feature" in rule and "requirements.txt" in rule
     harness = _packet_rules(_ticket("bdd-harness", files=("requirements.txt",)))
     assert any(r.startswith("This ticket owns no scenario: do not read") for r in harness)
+
+
+def test_the_packet_blocks_reads_of_other_tickets_tests_steps_and_features() -> None:
+    store = _ticket(
+        "store",
+        files=("store.py", "tests/test_store.py", "tests/conftest.py", "tests/helpers.py"),
+    )
+    api = _ticket("api", files=("api.py", "tests/steps/test_api_steps.py"))
+    harness = _ticket("bdd-harness", files=("tests/test_harness.py",))
+    web = _ticket(
+        "web",
+        "store",
+        "api",
+        files=("app.py", "tests/test_web.py"),
+        reads=("store.py", "tests/test_store.py"),
+    )
+    tickets = (store, api, harness, web)
+    task = Task(
+        id="task-web",
+        ticket_id="web",
+        spec_uri="cas://s",
+        criterion_ids=(),
+        branch="task/web",
+        seq=_SEQ,
+    )
+    packet = _ticket_packet(
+        task,
+        web,
+        (),
+        spans=("SCENARIO S1 [web]:\n  Given g",),
+        feature_files=("features/web.feature",),
+        prior_failures=(),
+        turn_budget=10,
+        cost_budget_microusd=0,
+        tickets=tickets,
+    )
+    assert packet.task["blocked_reads"] == [
+        "features/store.feature",
+        "tests/test_store.py",
+        "features/api.feature",
+        "tests/steps/test_api_steps.py",
+    ]
+    assert packet.task["reads"] == ["store.py"]
+    [rule] = [r for r in packet.task["rules"] if "inline in this packet" in r]
+    assert "another ticket's feature file or test/step module" in rule
+    assert blocked_reads(harness, tickets, ()) == ()  # the harness reads anything
+
+
+def test_the_packet_inlines_the_contracts_its_dependencies_implement() -> None:
+    contracts = {
+        "Store": _iface("Store", "class", "class Store:\n    def add(self, text: str) -> int"),
+        "Note": _iface("Note", "type", "class Note(TypedDict):\n    id: int"),
+        "Web": _iface("Web", "http", "GET /notes"),
+    }
+    store = _ticket("store", files=("store.py",), implements=("Store", "Note"))
+    web = _ticket("web", "store", files=("app.py",), implements=("Web",), consumes=("Note",))
+    spans, _ = _ticket_context(_NoCas(), web, {}, contracts, (store, web))
+    heads = [s.split("\n", 1)[0] for s in spans]
+    assert heads == [
+        "INTERFACE CONTRACT Web (this ticket IMPLEMENTS it — match it exactly):",
+        "INTERFACE CONTRACT Note (this ticket CALLS it — code against it exactly):",
+        "INTERFACE CONTRACT Store (ticket store, which this ticket depends on, implements "
+        "it — call it exactly as signed):",
+    ]
+    assert spans[-1].endswith("def add(self, text: str) -> int")
+
+
+class _NoCas:
+    cas = None
+
+
+def test_an_upstream_defect_reaches_the_fixer_with_its_owning_tickets_files() -> None:
+    from foundry.execution.adapters.tiered import UPSTREAM_DEFECT_TRIAGE
+    from foundry.manifest import build_manifest, render_manifest_md, upstream_defects
+    from foundry.schemas.gates import GateTriage
+
+    note = GateTriage(
+        name=UPSTREAM_DEFECT_TRIAGE,
+        run_against="task/web",
+        explanation="web/routes.py: DELETE /notes/1 is a 405; repro: client.delete('/notes/1')",
+        produced_by="proxy-agent",
+        seq=_SEQ,
+    )
+    state: Any = {"gate_triage": [note]}
+    routes = _ticket("routes", files=("web/routes.py", "web/forms.py"))
+    other = _ticket("cli", files=("routes.py",))  # a bare name in a path is not this file
+    lines, files = upstream_defect_context(state, (routes, other))
+    assert lines[0].startswith("[upstream-defect]")
+    assert lines[1:] == (
+        "task/web: web/routes.py: DELETE /notes/1 is a 405; repro: client.delete('/notes/1')",
+    )
+    assert files == ("web/routes.py", "web/forms.py")
+    assert upstream_defect_context({"gate_triage": []}, (routes,)) == ((), ())
+    manifest = build_manifest(
+        request="r",
+        thread_id="t",
+        generated_at="now",
+        passed=True,
+        phase="done",
+        artifacts=(),
+        gates=(),
+    ).model_copy(update={"upstream_defects": upstream_defects(state)})
+    md = render_manifest_md(manifest)
+    assert "## Upstream defects" in md and "- task/web: web/routes.py: DELETE" in md
 
 
 def test_the_entrypoint_packet_wires_dependencies_and_tests_use_production_wiring() -> None:

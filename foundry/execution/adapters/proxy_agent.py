@@ -65,6 +65,7 @@ from foundry.execution.adapters.tiered import (
     CHECK_SCORE_TRIAGE,
     DIGEST_CAP,
     DIGEST_TRIAGE,
+    SPEC_CONFLICT_TRIAGE,
     STOPPED_DIGEST,
 )
 from foundry.execution.sandbox import Sandbox
@@ -179,6 +180,13 @@ _NATIVE_CHECK_EPILOGUE = (
     f"in order. {_CHECK_CLOSE}"
 )
 _NUDGE = "Call a tool to make progress, or call done when the task is finished."
+_SPEC_CONFLICT_PREFIX = "spec-conflict:"
+_SPEC_CONFLICT_RULE = (
+    "If the spec contradicts itself (a scenario's example breaks a pinned constraint "
+    "or another scenario), never special-case that example or rewrite its input to "
+    "dodge the rule: implement the general rule, and list in done's triage an entry "
+    f"starting '{_SPEC_CONFLICT_PREFIX}' that quotes both statements."
+)
 
 
 def _tool(name: str, description: str, required: tuple[str, ...], **props: Any) -> dict[str, Any]:
@@ -609,6 +617,13 @@ class ProxyAgentAdapter:
         heads = [] if st.done else [(DIGEST_TRIAGE, _digest(st, authored, deleted))]
         if score is not None:
             heads.append((CHECK_SCORE_TRIAGE, str(score)))
+        conflicts = [
+            t[len(_SPEC_CONFLICT_PREFIX) :].strip()
+            for t in st.triage
+            if t.lower().startswith(_SPEC_CONFLICT_PREFIX)
+        ]
+        if conflicts:
+            heads.append((SPEC_CONFLICT_TRIAGE, "; ".join(conflicts)))
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -1335,6 +1350,7 @@ def _opening(
         epilogue = _NATIVE_CHECK_EPILOGUE
     else:
         epilogue = _CHECK_EPILOGUE
+    epilogue = f"{epilogue} {_SPEC_CONFLICT_RULE}"
     if check:
         epilogue = f"{check}\n\n{epilogue}"
     if listing:

@@ -7,7 +7,8 @@ import collections.abc
 import re
 import textwrap
 import typing
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import Any
 
 from foundry.agents.plan_contracts import (
@@ -18,6 +19,7 @@ from foundry.agents.plan_contracts import (
 from foundry.agents.planner.readers import _str, _strs
 from foundry.agents.planner.schema import _GENERATED_TICKETS, CODE_CONTRACT_KINDS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.agents.planner.spec_text import with_referenced
 from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import BDD_REPORT_ENV, Specialty, StackDecision, Ticket
@@ -714,12 +716,25 @@ def _shared_type_users(
     interfaces: Sequence[InterfaceContract],
     declared: Collection[str],
 ) -> dict[str, list[str]]:
-    """A data type two tickets' contracts name that the contracts file does not
-    declare -> those tickets, in plan order: each would write its own copy (a
-    parser's and an evaluator's ``Expression``) and the values of one are not the
-    other. A name is accounted for when the contracts file declares it (``declared``)
-    or any contract defines it: by name, or in its signature (a class one ticket
-    implements, imported from there; a declaration-only signature's extra records)."""
+    return {
+        name: ids
+        for name, ids in _undeclared_type_users(tickets, interfaces, declared).items()
+        if len(ids) > 1
+    }
+
+
+def _undeclared_type_users(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+) -> dict[str, list[str]]:
+    """A data type tickets' contracts name that the contracts file does not
+    declare -> those tickets, in plan order; with two (``_shared_type_users``) each
+    would write its own copy (a parser's and an evaluator's ``Expression``) and the
+    values of one are not the other. A name is accounted for when the contracts
+    file declares it (``declared``) or any contract defines it: by name, or in its
+    signature (a class one ticket implements, imported from there; a
+    declaration-only signature's extra records)."""
     by_name = {i.name: i for i in interfaces}
     known = set(declared)
     for i in interfaces:
@@ -735,7 +750,7 @@ def _shared_type_users(
                 names |= _type_names(c.signature)
         for name in sorted(names - known):
             users.setdefault(name, []).append(t.id)
-    return {name: ids for name, ids in users.items() if len(ids) > 1}
+    return users
 
 
 def _shared_type_findings(
@@ -753,6 +768,39 @@ def _shared_type_findings(
         for name, ids in _shared_type_users(tickets, interfaces, declared).items()
         if name not in owned
     )
+
+
+def _type_contract_findings(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    types: Mapping[str, str],
+    contracts_file: str,
+    design: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(findings, concerns): the design names the contracts file and defines data
+    types for it that tickets' contracts use, yet no contract declares a data type,
+    so no contracts ticket writes them. Blocking when two or more tickets use them
+    (each would invent its own fields); with one, the shared-type fold's field list
+    covers it and this is a concern."""
+    if (
+        not contracts_file
+        or not types
+        or any(i.kind in CODE_CONTRACT_KINDS and _declaration_only(i) for i in interfaces)
+        or (contracts_file not in design and PurePosixPath(contracts_file).name not in design)
+    ):
+        return (), ()
+    users = _undeclared_type_users(tickets, interfaces, declared)
+    names = with_referenced((n for n in types if n in users), types)
+    if not names:
+        return (), ()
+    ids = {i for n in names for i in users.get(n, ())}
+    text = (
+        f"The design defines {', '.join(names)} for {contracts_file}, but no interface "
+        "contract declares them: add a kind=type contract for each, with its fields, so "
+        "the contracts ticket writes them once and every ticket imports them."
+    )
+    return ((text,), ()) if len(ids) > 1 else ((), (text,))
 
 
 def _redeclared_findings(
@@ -798,6 +846,8 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"after a builtin its own annotations use", "contract-builtin-method"),
         (r"already exists in the base tree", "contract-redeclared"),
         (r"^Type \S+ is used by the contracts of tickets", "type-undeclared"),
+        (r"^The design defines .* but no interface contract declares", "type-contract-missing"),
+        (r"^Scenario \S+ uses .* but pinned constraint", "scenario-constraint-conflict"),
         (r"declares no way to receive them", "contract-unwired"),
         (r"^Contract \S.* does not compile", "contract-compile"),
         (r"more \S+ error\(s\)\.$", "contract-compile"),

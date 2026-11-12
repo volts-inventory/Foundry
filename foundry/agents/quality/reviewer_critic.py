@@ -311,6 +311,12 @@ _SOP = (
     "(4) Persistence: one database connection shared across server threads (sqlite3 "
     "without check_same_thread, or no lock), an in-memory database holding data "
     "that must persist, and multi-step writes that are not one transaction. "
+    "(5) Spec workarounds: code that special-cases one of the spec's literal examples "
+    "(a branch or input rewrite keyed on that exact value) or works around a "
+    "contradiction in the spec instead of implementing the general rule is a "
+    "BLOCKING finding even when every check passes. Reproduce it: a neighbouring "
+    "input the workaround breaks (expected vs actual), or a grep for the special-cased "
+    "literal (expected: no match; actual: the file and line). "
     "Report at most 10 findings, most important first, each in a sentence or two; "
     "never repeat a finding."
 )

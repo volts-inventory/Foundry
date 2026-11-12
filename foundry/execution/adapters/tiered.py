@@ -75,6 +75,9 @@ ALREADY_GREEN_TRIAGE = "already-green"
 # A session's own failing-line count at its last gate check (the explanation, an
 # int): what keep-best ranks a ticket's attempts by.
 CHECK_SCORE_TRIAGE = "self-check-failing"
+# A session's report that the spec contradicts itself (a scenario's example breaks a
+# pinned constraint): surfaced in the build manifest, not worked around in code.
+SPEC_CONFLICT_TRIAGE = "spec-conflict"
 
 
 def session_stop_reason(triage: Iterable[Any]) -> str | None:

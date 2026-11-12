@@ -170,6 +170,7 @@ from foundry.agents.planner.prompt import (
 )
 from foundry.agents.planner.readers import _int, _newest_by_id, _objs, _section, _str, _strs
 from foundry.agents.planner.schema import (
+    _DEFAULT_CONTRACTS_FILE,
     DELIVERABLES,
     DELTA_SCHEMA,
     DELTA_SOP,
@@ -692,6 +693,19 @@ def make_planner_node(
             stack_findings=_stack_command_findings(decided),
             ceilings=ceilings,
             keep=_kept_ids(state, rt),
+            design="\n".join(
+                _str(x)
+                for x in (
+                    _section(payload, "design").get("body"),
+                    *(a.get(k) for a in _objs(payload.get("adrs")) for k in ("decision", "body")),
+                )
+            ),
+            constraints=tuple(
+                (_str(c.get("id"), f"PC-{i:03d}"), _str(c.get("text")))
+                for i, c in enumerate(_objs(payload.get("pinned_constraints")))
+            ),
+            contracts_file=_str(raw_stack.get("contracts_file")).strip()
+            or _DEFAULT_CONTRACTS_FILE.get(language, ""),
         )
         return _Draft(
             payload=payload,

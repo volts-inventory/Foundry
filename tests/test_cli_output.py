@@ -245,3 +245,45 @@ def test_manifest_cost_and_models_come_from_what_the_backends_reported() -> None
     assert manifest.estimated_cost_microusd == 1750
     assert manifest.model_usage.served_models == ("claude-haiku", "claude-opus")
     assert manifest.tree_attested is False
+
+
+def test_manifest_keeps_the_stack_list_fields_as_json_lists() -> None:
+    from foundry.manifest import plan_fields
+    from foundry.schemas.implementation import StackDecision
+
+    stack = StackDecision(language="python", run="python -m dice", interface=("--seed", "roll"))
+    fields = plan_fields({"stack": stack}, None)
+    assert fields["stack"]["interface"] == ["--seed", "roll"]
+    assert fields["stack"]["run"] == "python -m dice"
+
+
+def test_manifest_surfaces_the_spec_conflicts_sessions_reported() -> None:
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+    from foundry.manifest import build_manifest, render_manifest_md, spec_conflicts
+    from foundry.schemas.gates import GateTriage
+    from foundry.state.seq import Seq
+
+    def note(name: str, text: str) -> GateTriage:
+        return GateTriage(
+            name=name,
+            run_against="task/T-002",
+            explanation=text,
+            produced_by="proxy-agent",
+            seq=Seq("r", 0, 0, "n", 0),
+        )
+
+    state = {
+        "gate_triage": [note("adapter-report", "built"), note(SPEC_CONFLICT_TRIAGE, "1d1 vs >=2")]
+    }
+    conflicts = spec_conflicts(state)
+    assert conflicts == ("task/T-002: 1d1 vs >=2",)
+    manifest = build_manifest(
+        request="r",
+        thread_id="t",
+        generated_at="now",
+        passed=True,
+        phase="done",
+        artifacts=(),
+        gates=(),
+    ).model_copy(update={"spec_conflicts": conflicts})
+    assert "- task/T-002: 1d1 vs >=2" in render_manifest_md(manifest)

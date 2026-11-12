@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import re
 import shlex
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
-from foundry.agents.planner.checks import _goal_of, _goal_rows, _shared_type_users
+from foundry.agents.planner.checks import _goal_of, _goal_rows, _undeclared_type_users
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.agents.planner.spec_text import with_referenced
 from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
 from foundry.gates.profiles import ONE_TYPE_PER_FILE, SOURCE_SUFFIXES, pytest_bdd_binds
@@ -637,18 +638,81 @@ def _drop_self_consumes(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[s
     return out, concerns
 
 
+def _drop_dangling_refs(
+    tickets: Sequence[Ticket], existing: Collection[str] = ()
+) -> tuple[list[Ticket], list[str]]:
+    """Drop each reads[] entry no ticket writes and the tree will not hold (not a
+    base file, a gate-written feature file, a directory or a glob), and each
+    depends_on naming no ticket: a ticket reading a contracts file no contracts
+    ticket writes codes against types it can only guess."""
+    ids = {t.id for t in tickets}
+    written = {f for t in tickets for f in t.files} | set(existing)
+
+    def kept(path: str) -> bool:
+        return (
+            path in written
+            or path.endswith((".feature", "/"))
+            or any(ch in path for ch in "*?[")
+            or any(f.startswith(path.rstrip("/") + "/") for f in written)
+        )
+
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        reads = tuple(p for p in t.reads if kept(p))
+        deps = tuple(d for d in t.depends_on if d in ids)
+        if reads != t.reads:
+            concerns.append(
+                f"Ticket {t.id}: dropped reads {', '.join(p for p in t.reads if p not in reads)}, "
+                "which no ticket writes."
+            )
+        if deps != t.depends_on:
+            concerns.append(
+                f"Ticket {t.id}: dropped depends_on "
+                f"{', '.join(d for d in t.depends_on if d not in ids)}, which no ticket has."
+            )
+        out.append(
+            t.model_copy(update={"reads": reads, "depends_on": deps})
+            if (reads, deps) != (t.reads, t.depends_on)
+            else t
+        )
+    return out, concerns
+
+
 def _assign_shared_types(
     tickets: Sequence[Ticket],
     interfaces: Sequence[InterfaceContract],
     declared: Collection[str],
     language: str,
+    types: Mapping[str, str] | None = None,
 ) -> tuple[list[Ticket], list[str], set[str]]:
     """Give each data type several tickets' contracts name, but the contracts file
     does not declare, one owner: the first such ticket none of the others precede.
     It defines the type in its first source file (in its own file beside it where
     the language wants one public type per file); the others depend on it and
     import it from there. No repair call: a local re-plan for this cost ~30 min,
-    and the build's duplicate-type check still catches a second copy."""
+    and the build's duplicate-type check still catches a second copy.
+
+    ``types`` are the data types the design prose defines with their fields
+    (``spec_text.design_types``): a type found there carries its field list, and
+    the types those fields name, in every note, and a design type only one
+    ticket's contracts use gets its fields on that ticket. Without them the owner
+    invents the fields, and a type only the prose names goes unused."""
+    types = types or {}
+    users = _undeclared_type_users(tickets, interfaces, declared)
+    shared = {n: ids for n, ids in users.items() if len(ids) > 1}
+
+    def fields(name: str, define: bool) -> str:
+        extra = [
+            n
+            for n in with_referenced([name], types)
+            if n == name or (n not in shared and n not in declared)
+        ]
+        if not extra:
+            return ""
+        how = " (define the types they use beside it)" if define and len(extra) > 1 else ""
+        return f" Its fields, from the design{how}: " + "; ".join(types[n] for n in extra) + "."
+
     suffixes = SOURCE_SUFFIXES.get(language, ())
     by_id = {t.id: t for t in tickets}
     deps = {t.id: t.depends_on for t in tickets}
@@ -657,7 +721,8 @@ def _assign_shared_types(
     new_files: dict[str, list[str]] = {}
     concerns: list[str] = []
     owned: set[str] = set()
-    for name, ids in _shared_type_users(tickets, interfaces, declared).items():
+    covered: set[str] = set()  # defined by a shared type's owner beside it
+    for name, ids in shared.items():
         owner = next(
             (
                 i
@@ -675,15 +740,16 @@ def _assign_shared_types(
             if home not in by_id[owner].files:
                 new_files.setdefault(owner, []).append(home)
         owned.add(name)
+        covered.update(with_referenced([name], types))
         others = [i for i in ids if i != owner]
         notes.setdefault(owner, []).append(
             f"Define the shared data type {name} in {home}; tickets "
-            f"{', '.join(others)} import it from there."
+            f"{', '.join(others)} import it from there." + fields(name, define=True)
         )
         for i in others:
             notes.setdefault(i, []).append(
                 f"Import the shared data type {name} from {home} (ticket {owner}); "
-                "never define your own copy."
+                "never define your own copy." + fields(name, define=False)
             )
             if owner not in _ancestors(deps, i):
                 added.setdefault(i, []).append(owner)
@@ -691,6 +757,12 @@ def _assign_shared_types(
         concerns.append(
             f"Shared type {name}: owned by {owner} in {home}, imported by {', '.join(others)}."
         )
+    for name, ids in users.items():
+        if len(ids) == 1 and name in types and name not in covered:
+            notes.setdefault(ids[0], []).append(
+                f"Define the data type {name}." + fields(name, define=True)
+            )
+            concerns.append(f"Type {name}: ticket {ids[0]} defines it with the design's fields.")
     out = [
         t.model_copy(
             update={

@@ -19,6 +19,7 @@ from foundry.agents.planner.checks import (
     _role_findings,
     _shared_type_findings,
     _size_findings,
+    _type_contract_findings,
     _unused_contracts,
     _wiring_findings,
 )
@@ -26,6 +27,7 @@ from foundry.agents.planner.folds import (
     _add_contract_deps,
     _add_read_deps,
     _assign_shared_types,
+    _drop_dangling_refs,
     _drop_orphan_scenarios,
     _drop_self_consumes,
     _ensure_security_scenario,
@@ -39,6 +41,7 @@ from foundry.agents.planner.folds import (
     stack_files,
 )
 from foundry.agents.planner.sizing import ALL_CLOUD, Ceilings
+from foundry.agents.planner.spec_text import bound_conflicts, design_types
 from foundry.agents.planner.stack import _attach_generated, _python_deps_ticket
 from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
@@ -71,6 +74,9 @@ class _Frame:
     stack_findings: tuple[str, ...] = ()  # of a stack chosen this pass
     ceilings: Ceilings = field(default_factory=lambda: ALL_CLOUD)  # per-ticket size, by tier
     keep: frozenset[str] = frozenset()  # ids an earlier plan or built work owns: never folded
+    design: str = ""  # the design body and ADR texts
+    constraints: tuple[tuple[str, str], ...] = ()  # the plan's pinned (id, text)
+    contracts_file: str = ""  # where the contract data types go
 
 
 @dataclass(frozen=True)
@@ -153,15 +159,23 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_fix_covers.__name__, more)
     tickets, criteria, more = _ensure_security_scenario(tickets, criteria, frame.criteria_seq)
     concerns += fold(_ensure_security_scenario.__name__, more)
+    types = design_types(frame.design)
     tickets, more, owned_types = _assign_shared_types(
-        tickets, frame.interfaces, frame.declared, frame.language
+        tickets, frame.interfaces, frame.declared, frame.language, types
     )
     concerns += fold(_assign_shared_types.__name__, more)
+    tickets, more = _drop_dangling_refs(tickets, base.files if base is not None else ())
+    concerns += fold(_drop_dangling_refs.__name__, more)
+    type_findings, type_concerns = _type_contract_findings(
+        tickets, frame.interfaces, frame.declared, types, frame.contracts_file, frame.design
+    )
+    concerns += type_concerns
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
         *_wiring_findings(tickets, frame.interfaces),
         *_shared_type_findings(tickets, frame.interfaces, frame.declared, owned_types),
+        *type_findings,
         *_entrypoint_findings(tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
@@ -172,6 +186,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *stack_findings,
         *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
         *_offline_scenario_findings(criteria),
+        *bound_conflicts(frame.constraints, criteria),
         *_branch_findings(criteria, frame.brief),
         # A change build's base tree already owns its roles.
         *(_role_findings(tickets, frame.brief) if base is None else ()),

@@ -216,6 +216,38 @@ def _packet_rules(ticket: Ticket) -> list[str]:
     return list(packet.task["rules"])
 
 
+def test_the_packet_says_its_scenarios_are_inline_and_lists_no_foreign_feature() -> None:
+    ticket = _ticket(
+        "web",
+        files=("app.py",),
+        reads=("features/web.feature", "features/store.feature", "store.py"),
+    )
+    task = Task(
+        id="task-web",
+        ticket_id="web",
+        spec_uri="cas://s",
+        criterion_ids=(),
+        branch="task/web",
+        seq=_SEQ,
+    )
+    packet = _ticket_packet(
+        task,
+        ticket,
+        (),
+        spans=("SCENARIO S1 [web]:\n  Given g", "INTERFACE CONTRACT Store (...):\n{}"),
+        feature_files=("features/web.feature",),
+        prior_failures=(),
+        turn_budget=10,
+        cost_budget_microusd=0,
+    )
+    assert packet.task["reads"] == ["features/web.feature", "store.py"]
+    [rule] = [r for r in packet.task["rules"] if "inline in this packet" in r]
+    assert rule.startswith("Your scenarios and interface contracts are inline")
+    assert "features/*.feature" in rule and "requirements.txt" in rule
+    harness = _packet_rules(_ticket("bdd-harness", files=("requirements.txt",)))
+    assert any(r.startswith("This ticket owns no scenario: do not read") for r in harness)
+
+
 def test_the_entrypoint_packet_wires_dependencies_and_tests_use_production_wiring() -> None:
     entry = _ticket("web", files=("app.py", "tests/test_web.py"), entrypoint=True)
     rules = _packet_rules(entry)

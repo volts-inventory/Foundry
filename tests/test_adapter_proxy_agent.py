@@ -1610,7 +1610,7 @@ def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) 
     )
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
-        assert "reason" in schema["properties"]
+        assert any("reason" in b["properties"] for b in schema["anyOf"])
         seen.append(dict(messages[-1]))
         act = next(actions)
         return json.dumps(act), act
@@ -1782,3 +1782,33 @@ def test_each_call_logs_its_prompt_size_and_unchanged_prefix(
     first = int(logged[0].split("prompt ~")[1].split(" ")[0])
     assert f"(previous ~{first})" in logged[1]
     assert int(logged[1].rsplit("), ", 1)[1].split("%")[0]) > 50  # appended, not rewritten
+
+
+def _admits(schema: dict[str, Any], obj: dict[str, Any]) -> bool:
+    """The anyOf/const/required/additionalProperties subset of JSON-schema
+    validation the action schemas use."""
+    return any(
+        b["properties"]["action"]["const"] == obj.get("action")
+        and all(k in obj for k in b["required"])
+        and all(k in b["properties"] for k in obj)
+        for b in schema["anyOf"]
+    )
+
+
+def test_the_action_schema_rejects_a_write_without_its_path() -> None:
+    from foundry.execution.adapters.proxy_agent import _CHECK_SCHEMA, _FENCED_SCHEMAS
+
+    write = {"action": "write_file", "path": "a.py", "content": "X = 1\n"}
+    for schema in (ACTION_SCHEMA, _CHECK_SCHEMA, *_FENCED_SCHEMAS.values()):
+        assert schema["type"] == "object"
+        assert not _admits(schema, {"action": "write_file", "content": "X = 1\n"})
+        assert not _admits(schema, {"action": "read_file"})
+        assert not _admits(schema, {"action": "run"})
+        assert not _admits(schema, {"action": "read_file", "path": "a.py", "cmd": "ls"})
+        assert _admits(schema, write)
+        assert _admits(schema, {"action": "read_file", "path": "a.py", "end_line": 9})
+        assert _admits(schema, {"action": "done", "summary": "ok", "triage": []})
+    assert _admits(_CHECK_SCHEMA, {"action": "check"})
+    assert not _admits(ACTION_SCHEMA, {"action": "check"})
+    assert _admits(_FENCED_SCHEMAS[id(ACTION_SCHEMA)], {**write, "reason": "r"})
+    assert not _admits(ACTION_SCHEMA, {**write, "reason": "r"})

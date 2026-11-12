@@ -105,37 +105,6 @@ _EPILOGUE = (
     "failures before declaring done."
 )
 
-ACTION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "action": {
-            "type": "string",
-            "enum": ["write_file", "read_file", "delete_file", "run", "search", "done"],
-        },
-        "path": {"type": "string"},
-        "start_line": {"type": "integer", "minimum": 1},
-        "end_line": {"type": "integer", "minimum": 1},
-        "pattern": {"type": "string"},
-        "content": {"type": "string"},
-        "cmd": {"type": "string"},
-        "summary": {"type": "string"},
-        "triage": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["action"],
-    "additionalProperties": False,
-}
-
-# A session that can run the gates (``check``) offers it as one more action.
-_CHECK_SCHEMA: dict[str, Any] = {
-    **ACTION_SCHEMA,
-    "properties": {
-        **ACTION_SCHEMA["properties"],
-        "action": {
-            "type": "string",
-            "enum": [*ACTION_SCHEMA["properties"]["action"]["enum"], "check"],
-        },
-    },
-}
 _CHECK_LINE = (
     '  {"action": "check"}   # run the gates on a gate-shaped copy of this tree '
     "(build + your scenarios)\n"
@@ -151,14 +120,6 @@ _CHECK_EPILOGUE = (
     + _CHECK_CLOSE
 )
 
-
-def _with_reason(schema: dict[str, Any]) -> dict[str, Any]:
-    """``schema`` with the optional ``reason`` a fenced fixer's write outside its
-    target carries (``fix_files``)."""
-    return {**schema, "properties": {**schema["properties"], "reason": {"type": "string"}}}
-
-
-_FENCED_SCHEMAS = {id(s): _with_reason(s) for s in (ACTION_SCHEMA, _CHECK_SCHEMA)}
 
 _MAX_CALLS_PER_TURN = 8
 
@@ -260,6 +221,37 @@ def _reason_tools(tools: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ..
 
 
 _FENCED_TOOLS = {id(t): _reason_tools(t) for t in (TOOLS, _CHECK_TOOLS)}
+
+
+def _action_schema(tools: tuple[dict[str, Any], ...]) -> dict[str, Any]:
+    """The JSON-action schema for ``tools``: one branch per action, each requiring
+    its own fields, so a grammar-constrained decoder cannot emit a ``write_file``
+    without its ``path`` (a flat object requiring only ``action`` lets it)."""
+    return {
+        "type": "object",
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "const": t["name"]},
+                    **t["input_schema"]["properties"],
+                },
+                "required": ["action", *t["input_schema"]["required"]],
+                "additionalProperties": False,
+            }
+            for t in tools
+        ],
+    }
+
+
+ACTION_SCHEMA = _action_schema(TOOLS)
+# A session that can run the gates (``check``) offers it as one more action.
+_CHECK_SCHEMA = _action_schema(_CHECK_TOOLS)
+# A fenced fixer's write outside its target carries a ``reason`` (``fix_files``).
+_FENCED_SCHEMAS = {
+    id(ACTION_SCHEMA): _action_schema(_FENCED_TOOLS[id(TOOLS)]),
+    id(_CHECK_SCHEMA): _action_schema(_FENCED_TOOLS[id(_CHECK_TOOLS)]),
+}
 # Refusals of a red done per session: a failure the session cannot fix by editing
 # is reported, not looped on.
 _CHECK_REFUSALS = 2
@@ -311,6 +303,10 @@ ENV_LOOP = "env-loop"
 # is ended as done.
 _GREEN_IDLE_STOP = 2
 GREEN_AUTO_DONE = "done automatically: the gate check passed and the session made no edit since"
+PENDING_GREEN_DONE = (
+    "done automatically: the opening check was green and stayed green once the "
+    "ticket's missing files were written"
+)
 # Chars of unchanged-file reads kept verbatim past masking, not counting the
 # always-kept tail; over it, the oldest are elided down to half, so the cap
 # moves the cache prefix once per several reads rather than every turn.
@@ -414,6 +410,8 @@ class _Loop:
     green: bool = False
     green_idle: int = 0
     green_turn: int = 0
+    # A green-opened session's files still unbuilt (``_unbuilt``); None = not one.
+    pending: tuple[str, ...] | None = None
     # Normalized environment error line -> the run/check observations showing it.
     env_errors: dict[str, int] = field(default_factory=dict)
     masked_at: int = 0  # the turn of the last elision pass
@@ -510,10 +508,13 @@ class ProxyAgentAdapter:
         checker, checked = (
             opened[1] if opened is not None and opened[0] == id(packet) else _open_check(packet)
         )
-        if _already_green(packet, checker, worktree):
+        pending = _unbuilt(packet, checker, worktree)
+        if pending == ():
             return self._skipped(packet, sandbox)
         if checker is not None and checker.spec.rules:
             packet = _with_rules(packet, checker.spec.rules)
+        if pending and checked is not None:
+            checked = f"{checked}\n\n{_pending_note(pending)}"
         messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
         fence = packet.task.get("fix_files")
@@ -530,6 +531,7 @@ class ProxyAgentAdapter:
             fence=tuple(str(f) for f in fence) if isinstance(fence, list) and fence else None,
             owned=tuple(str(f) for f in owned) if isinstance(owned, list) and owned else None,
             label=str(packet.task.get("id", "")),
+            pending=pending or None,
         )
         turns = 0
         while turns < st.budget and not st.stopped:
@@ -825,6 +827,11 @@ class ProxyAgentAdapter:
         if action in ("write_file", "delete_file") or (st.tree != tree_then and action != "check"):
             st.green = False
             st.green_idle = 0
+        if action == "write_file" and not observation.startswith("ERROR"):
+            finished = _finish_pending(st)
+            if finished is None:
+                return None
+            observation += finished
         if action in ("run", "check"):
             # A check's pre-existing failures are not the session's to fix: an error
             # there repeats on every check whatever the session does.
@@ -1362,10 +1369,12 @@ def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
     return checker, render(verdict, left=checker.left, opening=True)
 
 
-def _already_green(packet: TaskPacket, checker: SessionCheck | None, worktree: Path) -> bool:
-    """Whether ``packet``'s session has nothing to do: its spec allows the skip, the
-    opening check was green, and every one of the ticket's files is built in the
-    starting tree (a typed stub still to fill is not)."""
+def _unbuilt(
+    packet: TaskPacket, checker: SessionCheck | None, worktree: Path
+) -> tuple[str, ...] | None:
+    """The ticket's files not yet built in ``worktree`` when its spec allows the
+    green skip and the opening check was green (``()``: nothing left to do, the
+    session is not run); ``None`` when the skip does not apply."""
     files = packet.task.get("files")
     if (
         checker is None
@@ -1376,23 +1385,60 @@ def _already_green(packet: TaskPacket, checker: SessionCheck | None, worktree: P
         or not files
         or packet.task.get("fix_files")
     ):
-        return False
+        return None
+    return tuple(str(f) for f in files if not _built(worktree, str(f)))
+
+
+def _built(worktree: Path, rel: str) -> bool:
+    """Whether ``rel`` (a file, or a ``/``-ended dir) holds real content: a typed
+    stub still to fill is not built."""
     from foundry.agents.implementation.stubs import is_stub
 
-    for f in files:
-        try:
-            path = _contained(worktree, str(f).rstrip("/"))
-        except ValueError:
-            return False
-        if str(f).endswith("/"):
-            if not path.is_dir() or not any(p.is_file() for p in path.rglob("*")):
-                return False
-            continue
-        if not path.is_file():
-            return False
-        if path.suffix == ".py" and is_stub(path.read_text(encoding="utf-8", errors="replace")):
-            return False
-    return True
+    try:
+        path = _contained(worktree, rel.rstrip("/"))
+    except ValueError:
+        return False
+    if rel.endswith("/"):
+        return path.is_dir() and any(p.is_file() for p in path.rglob("*"))
+    if not path.is_file():
+        return False
+    return not (
+        path.suffix == ".py" and is_stub(path.read_text(encoding="utf-8", errors="replace"))
+    )
+
+
+def _already_green(packet: TaskPacket, checker: SessionCheck | None, worktree: Path) -> bool:
+    """Whether ``packet``'s session has nothing to do: its spec allows the skip, the
+    opening check was green, and every one of the ticket's files is built in the
+    starting tree."""
+    return _unbuilt(packet, checker, worktree) == ()
+
+
+def _pending_note(pending: tuple[str, ...]) -> str:
+    return (
+        "The opening check is already green: this ticket is done once "
+        + ", ".join(pending)
+        + " exist. Write them now from this packet (its scenarios and rules are above; "
+        "no other file needs reading first). The check runs by itself once the last "
+        "one is written and ends the session when green."
+    )
+
+
+def _finish_pending(st: _Loop) -> str | None:
+    """After a write in a green-opened session: once none of its files is unbuilt,
+    the check, run now. Green ends the session as done (None); red appends its
+    report and the session goes on as any other."""
+    pending = st.pending
+    if not pending or not all(_built(st.worktree, f) for f in pending):
+        return ""
+    st.pending = None
+    report = _check(st)
+    if st.green:
+        st.summary = st.summary or f"wrote {', '.join(pending)}; the gate check passed"
+        st.triage.append(PENDING_GREEN_DONE)
+        st.stopped = st.done = True
+        return None
+    return f"\n\nCHECK (run by itself: your files are all written):\n{report}"
 
 
 def _failing_count(verdict: CheckVerdict) -> int:

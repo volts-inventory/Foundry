@@ -366,6 +366,32 @@ def _is_test_path(path: str) -> bool:
     )
 
 
+def _inline_rule(spans: Sequence[str]) -> str:
+    """Where the packet already carries what a session would otherwise open turns
+    re-reading: its scenarios, contracts and dependency notes."""
+    has = [
+        what
+        for what, head in (("scenarios", "SCENARIO "), ("interface contracts", "INTERFACE "))
+        if any(s.startswith(head) for s in spans)
+    ]
+    carried = (
+        f"Your {' and '.join(has)} are inline in this packet, verbatim: do not read "
+        f"{FEATURE_DIR}/*.feature to find them"
+        if has
+        else f"This ticket owns no scenario: do not read {FEATURE_DIR}/*.feature"
+    )
+    return (
+        f"{carried}, nor another ticket's feature file (not your spec). Do not re-read "
+        "requirements.txt or another manifest unless it is one of the paths you write "
+        "(the check installs what it declares). Read a file only for content this "
+        "packet does not carry, then write."
+    )
+
+
+def _foreign_feature(path: str, own: Sequence[str]) -> bool:
+    return path.startswith(f"{FEATURE_DIR}/") and path.endswith(".feature") and path not in own
+
+
 def _ticket_packet(
     task: Task,
     ticket: Ticket,
@@ -386,6 +412,7 @@ def _ticket_packet(
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
+        _inline_rule(spans),
         *_check_rules(task, ticket, stack, contract_files, scenarios),
     ]
     if ticket.files:
@@ -416,7 +443,7 @@ def _ticket_packet(
             "criterion_ids": list(task.criterion_ids),
             "depends_on": list(task.depends_on),
             "files": list(ticket.files),
-            "reads": list(ticket.reads),
+            "reads": [r for r in ticket.reads if not _foreign_feature(r, feature_files)],
             "feature_files": list(feature_files),
             "rules": rules,
             "verify": {

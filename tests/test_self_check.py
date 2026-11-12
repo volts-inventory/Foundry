@@ -29,6 +29,7 @@ from foundry.execution.adapters.proxy_agent import (
     CHECK_RED_LAST_TURN,
     CHECK_UNVERIFIED,
     GREEN_AUTO_DONE,
+    PENDING_GREEN_DONE,
     ProxyAgentAdapter,
 )
 from foundry.execution.adapters.tiered import (
@@ -374,7 +375,7 @@ def _scripted(actions: list[dict[str, Any]], seen: list[list[dict[str, Any]]]) -
     it = iter(actions)
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
-        assert "check" in schema["properties"]["action"]["enum"]
+        assert "check" in {b["properties"]["action"]["const"] for b in schema["anyOf"]}
         seen.append([dict(m) for m in messages])
         act = next(it)
         return json.dumps(act), act
@@ -669,7 +670,7 @@ def test_check_without_a_gate_context_is_unavailable(tmp_path: Path) -> None:
     actions = iter([{"action": "check"}, {"action": "done", "summary": "x"}])
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
-        assert "check" not in schema["properties"]["action"]["enum"]
+        assert "check" not in {b["properties"]["action"]["const"] for b in schema["anyOf"]}
         seen.append(list(messages))
         act = next(actions)
         return json.dumps(act), act
@@ -1003,6 +1004,57 @@ def test_a_green_opening_still_runs_a_session_with_work_left(
         start=start,
     )
     assert len(seen) == 1 and ALREADY_GREEN_TRIAGE not in _names(result)
+
+
+def test_a_green_opening_with_a_file_to_write_ends_once_it_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, str]] = []
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "X = 1\n"},
+            {"action": "read_file", "path": "app.py"},  # never asked for
+        ],
+        run=_red_unless("", calls),  # always green
+        skip_green=True,
+    )
+    assert len(seen) == 1 and result.turns_used == 1
+    assert "this ticket is done once app.py exist" in seen[0][0]["content"]
+    assert PENDING_GREEN_DONE in [t.explanation for t in result.triage]
+    assert session_stop_reason(result.triage) is None
+    assert len(calls) == 2  # the opening check, then the one after the write
+    assert ALREADY_GREEN_TRIAGE not in _names(result)
+
+
+def test_a_green_opening_whose_written_file_turns_it_red_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _run(spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()) -> Any:
+        if "app.py" in files and "OK" not in files["app.py"]:
+            return (GateOutcome("build", GateStatus.FAIL, ("app.py:1: error: bad",)),)
+        return (GateOutcome("build", GateStatus.PASS, ()),)
+
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "X = 1\n"},
+            {"action": "write_file", "path": "app.py", "content": "X = 1  # OK\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "fixed"},
+        ],
+        run=_run,
+        skip_green=True,
+    )
+    assert len(seen) == 4
+    assert (
+        "run by itself" in seen[1][-1]["content"]
+        and "app.py:1: error: bad" in (seen[1][-1]["content"])
+    )
+    assert "run by itself" not in seen[2][-1]["content"]  # only the first completing write
+    assert PENDING_GREEN_DONE not in [t.explanation for t in result.triage]
 
 
 def test_a_skipped_local_session_never_takes_the_local_slot(

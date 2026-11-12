@@ -319,9 +319,9 @@ def test_a_local_sessions_sandbox_gets_no_cloud_credential(tmp_path: Path) -> No
 
 def _agent_turn(schema: Any) -> bool:
     """A proxy-agent turn's action schema (with or without the `check` action)."""
-    action = schema.get("properties", {}).get("action") if isinstance(schema, dict) else None
-    return schema == ACTION_SCHEMA or (
-        isinstance(action, dict) and "check" in action.get("enum", ())
+    branches = schema.get("anyOf", ()) if isinstance(schema, dict) else ()
+    return schema == ACTION_SCHEMA or any(
+        b.get("properties", {}).get("action", {}).get("const") == "check" for b in branches
     )
 
 

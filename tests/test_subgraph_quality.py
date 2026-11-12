@@ -547,7 +547,15 @@ def test_the_review_sees_the_spec_contracts_launch_result_and_checklist(records:
     assert "- tip [function]: def tip(total: float) -> float" in prompt
     assert "launch gate" in prompt and "GET / returned 500" in prompt
     sop = reviewer_critic._SOP
-    for item in ("CSRF", "LIKE", "check_same_thread", "transaction", "'X or Y'", "dead modules"):
+    for item in (
+        "CSRF",
+        "LIKE",
+        "check_same_thread",
+        "transaction",
+        "'X or Y'",
+        "dead modules",
+        "special-cases one of the spec's literal examples",
+    ):
         assert item in sop
     assert request["max_tokens"] <= reviewer_critic._REVIEW_MAX_TOKENS
 

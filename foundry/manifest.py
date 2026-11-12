@@ -116,10 +116,12 @@ class BuildManifest(FrozenModel):
     estimated_cost_microusd: int = 0
     # What a later change build on this one needs: the stack it must keep and
     # the contracts it extends rather than redefines.
-    stack: dict[str, str] = {}  # noqa: RUF012 - pydantic deep-copies defaults
+    stack: dict[str, Any] = {}  # noqa: RUF012 - pydantic deep-copies defaults
     contracts: tuple[ContractRef, ...] = ()
     contracts_files: tuple[str, ...] = ()
     base: BaseRef | None = None  # set when this build is a change on a base
+    # Contradictions in the spec a coding session reported instead of coding around.
+    spec_conflicts: tuple[str, ...] = ()
 
 
 def _artifact_refs(artifacts: Sequence[Artifact]) -> tuple[ArtifactRef, ...]:
@@ -274,6 +276,12 @@ def render_manifest_md(m: BuildManifest) -> str:
             if m.base is not None
             else []
         ),
+        *(
+            ["", "## Spec conflicts (reported, not coded around)", ""]
+            + [f"- {c}" for c in m.spec_conflicts]
+            if m.spec_conflicts
+            else []
+        ),
         "",
         "## Gates",
         "",
@@ -331,7 +339,7 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
     update: dict[str, Any] = {}
     stack = state.get("stack")
     if stack is not None:
-        update["stack"] = {k: str(v) for k, v in stack.model_dump(mode="json").items() if v}
+        update["stack"] = {k: v for k, v in stack.model_dump(mode="json").items() if v}
     if resolve is None:
         return update
     from foundry.graph.gate_wiring import contract_paths
@@ -360,6 +368,17 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
     return update
 
 
+def spec_conflicts(state: FactoryState) -> tuple[str, ...]:
+    """Each ticket's reported spec contradiction, as ``task/<id>: <note>``."""
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    return tuple(
+        f"{t.run_against}: {t.explanation}"
+        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+        if t.name == SPEC_CONFLICT_TRIAGE
+    )
+
+
 def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
     """Record the stack, the contracts and, for a change build, its base."""
     from foundry.base_tree import base_digest, read_base
@@ -367,6 +386,7 @@ def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -
     update = plan_fields(state, rt.cas.resolve if rt.cas is not None else None)
     base_dir = state.get("base_dir")
     prior = read_base(base_dir) if base_dir else None
+    update["spec_conflicts"] = spec_conflicts(state)
     if prior is not None and base_dir:
         update["base"] = BaseRef(
             thread_id=prior.thread_id,

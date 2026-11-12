@@ -18,7 +18,12 @@ import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
-from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST, session_stop_reason
+from foundry.execution.adapters.tiered import (
+    DIGEST_TRIAGE,
+    SPEC_CONFLICT_TRIAGE,
+    STOPPED_DIGEST,
+    session_stop_reason,
+)
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy import ToolsUnsupported
 from foundry.state.reducers import union_triage
@@ -64,6 +69,33 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
     assert body == {"kind": "full-file-snapshot", "files": {"mod.py": "X = 1\n"}}
     assert result.turns_used == 3
     assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
+
+
+def test_a_spec_conflict_reported_at_done_gets_its_own_triage_record(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    actions = iter(
+        [
+            {
+                "action": "done",
+                "summary": "parser",
+                "triage": ["Spec-conflict: PC-001 says sides >= 2 but scenario 1d1 -> 1", "x"],
+            }
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+    assert "spec-conflict:" in seen[0] and "never special-case that example" in seen[0]
+    [conflict] = [t for t in result.triage if t.name == SPEC_CONFLICT_TRIAGE]
+    assert conflict.explanation == "PC-001 says sides >= 2 but scenario 1d1 -> 1"
+    assert conflict.run_against == "task/t-1"
 
 
 def test_each_action_reports_one_activity_line(tmp_path: Path) -> None:

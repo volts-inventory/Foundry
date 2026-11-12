@@ -32,10 +32,12 @@ from foundry.agents.planner import (
 )
 from foundry.agents.planner.checks import (
     _shared_type_findings,
+    _type_contract_findings,
     _wiring_findings,
     finding_kind,
 )
-from foundry.agents.planner.folds import _assign_shared_types
+from foundry.agents.planner.folds import _assign_shared_types, _drop_dangling_refs
+from foundry.agents.planner.spec_text import bound_conflicts, design_types, with_referenced
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -1108,6 +1110,163 @@ def test_a_shared_type_in_java_gets_its_own_file_in_the_owner_ticket() -> None:
     assert owned == {"Roll"}
     assert parser.files[-1] == "src/main/java/dice/Roll.java"
     assert "from src/main/java/dice/Roll.java" in evaluator.description
+
+
+_DICE_DESIGN = """Types live in contracts.py, all frozen dataclasses:
+
+```python
+@dataclass(frozen=True)
+class DiceTerm:
+    count: int  # how many dice
+    sides: int
+```
+
+ConstantTerm(value: int), SignedTerm(sign: int, term: DiceTerm | ConstantTerm) and
+RollExpression(terms: list[SignedTerm]). parse(text) returns a RollExpression.
+"""
+_ROLL_PARSE = _ifc("parse", "def parse(text: str) -> RollExpression: ...", "function")
+_ROLL_TOTAL = _ifc("total", "def total(expr: RollExpression) -> int: ...", "function")
+
+
+def _with_files(t: Ticket, *paths: str, reads: tuple[str, ...] = ()) -> Ticket:
+    return t.model_copy(update={"files": paths, "reads": reads})
+
+
+def test_design_types_reads_inline_and_block_definitions_in_any_language() -> None:
+    types = design_types(
+        _DICE_DESIGN
+        + "\ninterface Note {\n  id: number;\n  tags?: string[];\n  render(): string;\n}\n"
+        + "public record Point(int x, int y) {}\n"
+        + "A Helper(the input) is prose, not a type.\n"
+    )
+    assert types == {
+        "ConstantTerm": "ConstantTerm(value: int)",
+        "SignedTerm": "SignedTerm(sign: int, term: DiceTerm | ConstantTerm)",
+        "RollExpression": "RollExpression(terms: list[SignedTerm])",
+        "Point": "Point(int x, int y)",
+        "DiceTerm": "DiceTerm(count: int, sides: int)",
+        "Note": "Note(id: number, tags: string[])",
+    }
+    assert with_referenced(["RollExpression"], types) == [
+        "RollExpression",
+        "SignedTerm",
+        "DiceTerm",
+        "ConstantTerm",
+    ]
+
+
+def test_a_shared_type_the_design_defines_carries_its_fields_and_the_types_they_use() -> None:
+    # A local dice run: the design body gave RollExpression(terms: list[SignedTerm]) but
+    # no type contract, so the owner invented the fields and SignedTerm went unused.
+    tickets = [
+        _with_files(_t("PARSER", implements=("parse",)), "dice/parser.py"),
+        _with_files(_t("EVAL", implements=("total",)), "dice/evaluator.py"),
+    ]
+    types = design_types(_DICE_DESIGN)
+    (parser, evaluator), concerns, owned = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python", types
+    )
+    assert owned == {"RollExpression"}
+    assert (
+        "Its fields, from the design (define the types they use beside it): "
+        "RollExpression(terms: list[SignedTerm]); "
+        "SignedTerm(sign: int, term: DiceTerm | ConstantTerm); "
+        "DiceTerm(count: int, sides: int); ConstantTerm(value: int)."
+    ) in parser.description
+    assert "never define your own copy. Its fields, from the design: Roll" in (
+        evaluator.description
+    )
+    # A design type only one ticket's contracts use gets its fields there.
+    (alone,), concerns, owned = _assign_shared_types(
+        tickets[:1], [_ROLL_PARSE], frozenset(), "python", types
+    )
+    assert owned == set()
+    assert "Define the data type RollExpression. Its fields, from the design" in alone.description
+    assert concerns == ["Type RollExpression: ticket PARSER defines it with the design's fields."]
+    # No design definition: the notes stay as they were.
+    (bare, _), _, _ = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python"
+    )
+    assert "Its fields" not in bare.description
+
+
+def test_reads_of_files_no_ticket_writes_and_unknown_dependencies_are_dropped() -> None:
+    tickets = [
+        _with_files(
+            _t("PARSER", "contracts", "GONE"),
+            "dice/parser.py",
+            reads=("contracts.py", "dice/", "features/parser.feature", "docs/*.md", "README.md"),
+        ),
+        _with_files(_t("CLI", "PARSER"), "dice/cli.py", reads=("dice/parser.py",)),
+    ]
+    (parser, cli), concerns = _drop_dangling_refs(tickets, existing=("README.md",))
+    assert parser.reads == ("dice/", "features/parser.feature", "docs/*.md", "README.md")
+    assert parser.depends_on == ()
+    assert cli is tickets[1]
+    assert concerns == [
+        "Ticket PARSER: dropped reads contracts.py, which no ticket writes.",
+        "Ticket PARSER: dropped depends_on contracts, GONE, which no ticket has.",
+    ]
+
+
+def test_design_types_for_the_contracts_file_without_type_contracts_are_a_finding() -> None:
+    tickets = [_t("PARSER", implements=("parse",)), _t("EVAL", implements=("total",))]
+    ifcs = [_ROLL_PARSE, _ROLL_TOTAL]
+    types = design_types(_DICE_DESIGN)
+    (finding,), concerns = _type_contract_findings(
+        tickets, ifcs, frozenset(), types, "dice/contracts.py", _DICE_DESIGN
+    )
+    assert concerns == ()
+    assert finding.startswith(
+        "The design defines RollExpression, SignedTerm, DiceTerm, ConstantTerm for "
+        "dice/contracts.py, but no interface contract declares them"
+    )
+    assert finding_kind(finding) == "type-contract-missing"
+    # One ticket using them: the fold's field list covers it, a concern only.
+    assert _type_contract_findings(
+        tickets[:1], ifcs[:1], frozenset(), types, "contracts.py", _DICE_DESIGN
+    ) == ((), (finding.replace("dice/contracts.py", "contracts.py"),))
+    # A type contract exists, or the design never names the file: nothing.
+    record = _ifc("Other", "class Other:\n    x: int", "type")
+    assert _type_contract_findings(
+        tickets, [*ifcs, record], frozenset({"Other"}), types, "contracts.py", _DICE_DESIGN
+    ) == ((), ())
+    assert _type_contract_findings(
+        tickets, ifcs, frozenset(), types, "src/types.ts", _DICE_DESIGN
+    ) == ((), ())
+
+
+def _crit(cid: str, given: str, when: str, then: str, abuse: bool = False) -> AcceptanceCriterion:
+    return AcceptanceCriterion(
+        id=cid,
+        text=f"Given {given} When {when} Then {then}",
+        given=(given,),
+        when=(when,),
+        then=(then,),
+        security_abuse=abuse,
+        seq=_SEQ,
+    )
+
+
+def test_a_scenario_example_breaking_a_pinned_numeric_bound_is_a_finding() -> None:
+    one_side = _crit("AC-1", "a die with 1 side", "it is rolled", "the total is 1")
+    (finding,) = bound_conflicts([("PC-001", "Die sides must be ≥ 2.")], [one_side])
+    assert finding.startswith("Scenario AC-1 uses sides 1, but pinned constraint PC-001")
+    assert "requires sides ≥ 2" in finding
+    assert finding_kind(finding) == "scenario-constraint-conflict"
+    for text in ("at least 2 sides", "sides between 2 and 100", "sides >= 2"):
+        assert len(bound_conflicts([("PC-1", text)], [one_side])) == 1, text
+    ok = [
+        # The example satisfies the bound.
+        _crit("AC-2", "a die with 6 sides", "it is rolled", "the total is at most 6"),
+        # It proves the value is refused.
+        _crit("AC-3", "a die with 1 side", "it is rolled", "an error is printed"),
+        _crit("AC-4", "a die with 1 side", "it is rolled", "the total is 1", abuse=True),
+    ]
+    assert bound_conflicts([("PC-001", "sides ≥ 2")], ok) == ()
+    # Ambiguous bounds are never reported: conditional, generic noun, a unit after it.
+    for text in ("sides >= 2 unless the die is fudge", "value >= 2", "names at most 1 word"):
+        assert bound_conflicts([("PC-1", text)], [one_side]) == (), text
 
 
 def test_builtin_and_generic_names_are_never_shared_types() -> None:

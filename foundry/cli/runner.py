@@ -636,12 +636,9 @@ def run(
                     cancel=cancel,
                     meter=meter,
                 )
-            except ValueError as exc:
-                # main() reports a ValueError as a usage error (exit 2, no traceback);
-                # one raised inside the graph is a crash and must show where.
-                raise RunCrashed(f"the run crashed: {exc!r}") from exc
             except Exception as exc:
-                # A capped, stopped or unavailable run still hands back its best tree.
+                # A capped, stopped, unavailable or crashed run still hands back its
+                # best tree.
                 if output_dir is not None:
                     output._draft_on_stop(
                         app,
@@ -653,6 +650,14 @@ def run(
                         resolve=resolve,
                         resolve_blob=resolve_blob,
                     )
+                if isinstance(exc, ValueError):
+                    # main() reports a ValueError as a usage error (exit 2, no
+                    # traceback); one raised inside the graph is a crash and must
+                    # show where.
+                    crashed = RunCrashed(f"the run crashed: {exc!r}")
+                    for note in getattr(exc, "__notes__", ()):
+                        crashed.add_note(note)
+                    raise crashed from exc
                 raise
         finally:
             if run_dir is not None:

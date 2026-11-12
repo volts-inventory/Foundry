@@ -201,6 +201,7 @@ def _draft_on_stop(
     try:
         state = _latest_values(app, config)
         if not _has_draft_tree(state):
+            exc.add_note("no DRAFT written: the run stopped before any code was built")
             return
         draft, _ = _write_draft_on_halt(
             state,
@@ -210,7 +211,10 @@ def _draft_on_stop(
             resolve_blob=resolve_blob,
             stopped=str(exc).splitlines()[0][:300],
         )
-    except Exception:
+    except Exception as err:
+        exc.add_note(f"no DRAFT written: {err!r}")
         return
-    if draft is not None:
+    if draft is None:
+        exc.add_note("no DRAFT written: neither the best nor the latest tree materialized")
+    else:
         exc.add_note(f"DRAFT written to: {draft}  (held — see DRAFT-STATUS.md)")

@@ -188,3 +188,36 @@ def test_a_draft_tree_that_cannot_be_written_is_tried_once_without_a_best(
     )
     assert root is None and "held at the gate" in text.lower()
     assert calls == [None]
+
+
+def test_a_run_that_crashes_after_building_still_writes_its_latest_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.cli import RunCrashed
+
+    def crash(*_: object, **__: object) -> None:
+        raise ValueError("max() iterable argument is empty")
+
+    monkeypatch.setattr("foundry.agents.quality.reviewer.review", crash)
+    out = tmp_path / "generated"
+    with pytest.raises(RunCrashed) as caught:
+        run("build a tiny URL-shortener service", thread_id="cli-out-crash", output_dir=str(out))
+
+    assert "VALUE = 42" in (out / "app.py").read_text(encoding="utf-8")
+    assert any(str(out.resolve()) in n for n in getattr(caught.value, "__notes__", ()))
+
+
+def test_a_run_stopped_before_any_code_says_why_it_left_no_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.proxy.token_meter import TimeCapExceeded
+
+    def capped(*_: object, **__: object) -> None:
+        raise TimeCapExceeded("time cap reached")
+
+    monkeypatch.setattr("foundry.cli.invoke._invoke", capped)
+    out = tmp_path / "generated"
+    with pytest.raises(TimeCapExceeded) as caught:
+        run("build a tiny URL-shortener service", thread_id="cli-out-early", output_dir=str(out))
+
+    assert any("no DRAFT written" in n for n in getattr(caught.value, "__notes__", ()))

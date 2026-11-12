@@ -21,13 +21,22 @@ resolved here:
 
 from __future__ import annotations
 
+import enum
+import importlib
+import inspect
 import os
+import pkgutil
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
+from pydantic import BaseModel
+
+import foundry.schemas
 
 __all__ = ["FoundryCheckpointer", "make_checkpointer"]
 
@@ -48,6 +57,23 @@ class _SuperstepConnection(sqlite3.Connection):
         super().commit()
 
 
+@cache
+def checkpoint_serde() -> JsonPlusSerializer:
+    """A serializer that loads Foundry's own schema types from a checkpoint and
+    nothing else: LangGraph's permissive default warns on each and will block them."""
+    return JsonPlusSerializer(allowed_msgpack_modules=_schema_types())
+
+
+def _schema_types() -> tuple[type, ...]:
+    found: list[type] = []
+    for info in pkgutil.iter_modules(foundry.schemas.__path__, "foundry.schemas."):
+        module = importlib.import_module(info.name)
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj.__module__ == module.__name__ and issubclass(obj, (BaseModel, enum.Enum)):
+                found.append(obj)
+    return tuple(found)
+
+
 class FoundryCheckpointer:
     """Factory owning the ONE shared connection for the checkpoint.
 
@@ -64,7 +90,7 @@ class FoundryCheckpointer:
         )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.saver = SqliteSaver(self.conn)
+        self.saver = SqliteSaver(self.conn, serde=checkpoint_serde())
         # DDL (executescript ⇒ implicit COMMIT) must run OUTSIDE supersteps:
         self.saver.setup()
 

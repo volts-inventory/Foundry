@@ -56,6 +56,8 @@ def _stack_decision(
                 "test",
                 "bdd",
                 "run",
+                "kind",
+                "launch",
                 "notes",
             )
         },

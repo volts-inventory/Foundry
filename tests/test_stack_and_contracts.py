@@ -1257,3 +1257,12 @@ def test_typescript_typecheck_is_strict() -> None:
         StackDecision(language="typescript", test="npm test", typecheck="npx tsc --noEmit")
     )
     assert profile.build_cmd is not None and "npx tsc --strict --noEmit" in profile.build_cmd[2]
+
+
+def test_the_plans_stack_carries_what_the_app_is_and_how_a_user_starts_it() -> None:
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "python", "test": "pytest", "kind": "http", "launch": "python3 -m app"}
+    stack, _ = _stack_decision({"stack": raw}, ["python"])
+    assert stack is not None
+    assert (stack.kind, stack.launch) == ("http", "python3 -m app")

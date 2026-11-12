@@ -252,6 +252,12 @@ SOP = (
     "that starts the app on port 0, makes one request, stops it and exits 0 — never "
     "the bare server entry such as `node app.js`, `npm start`, `flask run` or "
     "`uvicorn ...`, which never exits; checked). "
+    "kind is what the user runs: 'cli', 'http' (a server) or '' (a library); launch "
+    "is the exact command a user starts it with from the repo root (e.g. `python3 -m "
+    "todo`, `node server.js`, `go run ./cmd/app`); an http app reads its port from "
+    "$PORT and host from $HOST. The gates start launch themselves and drive it, so "
+    "the app MUST have that real entry point (a __main__ / main / server start), "
+    "not only functions the tests call. "
     "contracts_file is the source file the contract data types and errors are "
     "written to (e.g. src/contracts.ts, contracts.py); harness_files are the package manifest and "
     "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
@@ -399,6 +405,8 @@ _STACK_SCHEMA: dict[str, Any] = {
         "test": {"type": "string"},
         "bdd": {"type": "string"},
         "run": {"type": "string"},
+        "kind": {"type": "string", "enum": ["cli", "http", ""]},
+        "launch": {"type": "string"},
         "notes": {"type": "string"},
         "contracts_file": {"type": "string"},
         "harness_files": _STR_ARRAY,
@@ -413,6 +421,8 @@ _STACK_SCHEMA: dict[str, Any] = {
         "test",
         "bdd",
         "run",
+        "kind",
+        "launch",
         "contracts_file",
         "harness_files",
     ],

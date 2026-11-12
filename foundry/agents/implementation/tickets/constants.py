@@ -52,6 +52,11 @@ SPLIT_CHILD_TRIAGE = "split-child"
 SKELETON_TRIAGE = "skeleton"
 # A failed attempt's written files its retry starts from (explanation: their snapshot blob).
 CARRY_TRIAGE = "ticket-carry"
+# The best carried attempt so far (explanation: "<failing lines|-> <snapshot blob>"):
+# a later carry is the better of it and the newest attempt, so a retry never starts
+# from a worse attempt than one it already had. Not prefixed by CARRY_TRIAGE, whose
+# readers match by prefix.
+CARRY_SCORE_TRIAGE = "carry-score"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2

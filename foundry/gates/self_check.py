@@ -232,6 +232,10 @@ class CheckSpec:
     smoke: bool = False
     own_smoke: bool = False
     rules: Mapping[str, str] = field(default_factory=dict)
+    # A green opening check with the session's files already built ends it unrun:
+    # set only where the starting tree's files are what the opening check judged
+    # (no carried attempt) and no failure of its own is pending (not a retry).
+    skip_green: bool = False
 
 
 # A ContextVar so concurrent pool workers each see their own session's spec.

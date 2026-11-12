@@ -18,7 +18,7 @@ import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
-from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
+from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST, session_stop_reason
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy import ToolsUnsupported
 from foundry.state.reducers import union_triage
@@ -295,7 +295,7 @@ def observations(msgs: list[dict[str, Any]]) -> list[str]:
 def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    n = 11
+    n = 20
     seen: list[list[dict[str, Any]]] = []
     runs = [{"action": "run", "cmd": f"echo body-{i}"} for i in range(n)]
     adapter = ProxyAgentAdapter(recording([*runs, {"action": "done"}], seen))
@@ -305,18 +305,19 @@ def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> N
         obs = observations(msgs)
         assert len(obs) == turn
         kept = [o for o in obs if "elided" not in o]
-        # Newest observations stay verbatim: at least min(3, all) and at most 6.
-        assert min(3, turn) <= len(kept) <= 6
+        # Newest observations stay verbatim: at least min(3, all) and at most 10.
+        assert min(3, turn) <= len(kept) <= 10
         assert kept == obs[len(obs) - len(kept) :]
-    # Prefix rewrites happen in batches (on the 7th and 11th observations), not on every turn.
+    # Prefix rewrites happen in batches (on the 11th and 19th observations, 8 turns
+    # apart), not on every turn.
     elided = [sum("elided" in o for o in observations(m)) for m in seen]
-    assert elided == [0] * 7 + [4] * 4 + [8]
+    assert elided == [0] * 11 + [8] * 8 + [16] * 2
     last = observations(seen[-1])
     assert last[0] == (
         "OBSERVATION: [output of run 'echo body-0' elided — re-run or re-read if needed]"
     )
     # Once elided, a placeholder is byte-identical on every later turn (prefix cache).
-    assert observations(seen[7])[:4] == last[:4]
+    assert observations(seen[11])[:8] == last[:8]
     # Assistant actions are never rewritten.
     assert [m["content"] for m in seen[-1] if m["role"] == "assistant"] == [
         json.dumps(a) for a in runs
@@ -784,7 +785,7 @@ def test_unchanged_file_reads_survive_masking(tmp_path: Path) -> None:
         {"action": "read_file", "path": "a.txt", "start_line": 3, "end_line": 4},
         {"action": "read_file", "path": "b.txt", "start_line": 1, "end_line": 2},
         {"action": "read_file", "path": "b.txt"},
-        *runs(8),
+        *runs(10),
         {"action": "done"},
     ]
     adapter = ProxyAgentAdapter(recording(actions, seen))
@@ -798,8 +799,8 @@ def test_unchanged_file_reads_survive_masking(tmp_path: Path) -> None:
         "OBSERVATION: [output of read_file b.txt lines 1-2 elided — re-run or re-read if needed]"
     )
     assert obs[3].endswith("b1\nb2\nb3\nb4\nb5\nb6\n")
-    assert all("elided" in o for o in obs[4:7])  # the run outputs still batch-elide
-    assert not any("elided" in o for o in obs[7:])
+    assert all("elided" in o for o in obs[4:11])  # the run outputs still batch-elide
+    assert not any("elided" in o for o in obs[11:])
 
 
 def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
@@ -810,7 +811,7 @@ def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
     actions = [
         {"action": "read_file", "path": "a.py"},
         {"action": "write_file", "path": "a.py", "content": "X = 1  # changed\n"},
-        *runs(6),
+        *runs(10),
         {"action": "done"},
     ]
     adapter = ProxyAgentAdapter(recording(actions, seen))
@@ -1158,13 +1159,13 @@ def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
     turns: list[Any] = [
-        [("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})] for i in range(5)
+        [("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})] for i in range(9)
     ]
     adapter = ProxyAgentAdapter(
         no_json, tool_complete_fn=tool_turns([*turns, [("done", {"summary": "ok"})]], seen)
     )
     with Sandbox(src) as sb:
-        adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+        adapter.run(make_packet(sb.worktree, turn_budget=10), sb)
     contents = [
         r["content"]
         for m in seen[-1]
@@ -1172,9 +1173,12 @@ def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
         for r in m["content"]
         if r.get("type") == "tool_result"
     ]
-    assert len(contents) == 10
+    assert len(contents) == 18
     assert contents[0] == "[output of run 'echo a-0' elided — re-run or re-read if needed]"
     assert all("elided" not in c for c in contents[-3:])
+    # Two results a turn pile up past the verbatim budget by turn 6, but the prefix
+    # is rewritten once, on turn 8, not on every turn after the budget is crossed.
+    assert rewrite_passes(seen) == 1
 
 
 def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: Path) -> None:
@@ -1683,3 +1687,61 @@ def test_native_tools_offer_the_reason_only_to_a_fenced_session(tmp_path: Path) 
     write = {t["name"]: t for t in offered[0]}["write_file"]
     assert "reason" in write["input_schema"]["properties"]
     assert offered[-1] is TOOLS
+
+
+# ---- repeated environment errors, prompt-size log ------------------------------------
+
+
+def test_one_environment_error_across_commands_nudges_at_three_and_stops_at_six(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    # Different commands, paths, line numbers and addresses; the same missing module.
+    cmds = [
+        f"echo 'File \"/tmp/run{i}/app_{i}.py\", line {i + 10}'; "
+        f"echo \"ModuleNotFoundError: No module named 'flask' (0x{i + 0xA0:x})\"; exit 1"
+        for i in range(7)
+    ]
+    adapter = ProxyAgentAdapter(recording([{"action": "run", "cmd": c} for c in cmds], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+    obs = observations(seen[-1])
+    assert len(seen) == 6 and len(obs) == 5  # the 6th run's error ended the session
+    assert not any("environment/dependency" in o for o in obs[:2])
+    assert obs[2].startswith("OBSERVATION:\nWARNING: this is an environment/dependency error")
+    stop = session_stop_reason(result.triage)
+    assert stop is not None and "env-loop" in stop and "No module named 'flask'" in stop
+
+
+def test_a_code_error_repeating_is_not_an_environment_loop(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    cmds = [f"echo 'AssertionError: expected 3 got {i}'; exit 1" for i in range(7)]
+    adapter = ProxyAgentAdapter(
+        scripted([*({"action": "run", "cmd": c} for c in cmds), {"action": "done"}])
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+    assert session_stop_reason(result.triage) is None
+
+
+def test_each_call_logs_its_prompt_size_and_unchanged_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry import progress
+
+    lines: list[str] = []
+    monkeypatch.setattr(progress, "log", lambda msg, **_: lines.append(msg))
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(scripted([*runs(2), {"action": "done"}]))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=4), sb)
+    logged = [ln for ln in lines if ln.startswith("proxy-agent t-1 turn ")]
+    assert len(logged) == 3
+    assert logged[0].endswith("(previous ~0), 0% an unchanged prefix")
+    first = int(logged[0].split("prompt ~")[1].split(" ")[0])
+    assert f"(previous ~{first})" in logged[1]
+    assert int(logged[1].rsplit("), ", 1)[1].split("%")[0]) > 50  # appended, not rewritten

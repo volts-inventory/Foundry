@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from foundry.execution.sandbox import Sandbox
 
 __all__ = [
+    "ALREADY_GREEN_TRIAGE",
+    "CHECK_SCORE_TRIAGE",
     "DIGEST_CAP",
     "DIGEST_TRIAGE",
     "ESCALATED_TRIAGE",
@@ -67,6 +69,12 @@ _STOP_MARKERS = ("stopped early:", "turn budget exhausted", "check budget exhaus
 DIGEST_TRIAGE = "session-digest"
 STOPPED_DIGEST = "stopped-early digest:"
 DIGEST_CAP = 1_500
+# A ticket whose opening gate check was green with its files already in the tree:
+# built without a session (its diff is empty).
+ALREADY_GREEN_TRIAGE = "already-green"
+# A session's own failing-line count at its last gate check (the explanation, an
+# int): what keep-best ranks a ticket's attempts by.
+CHECK_SCORE_TRIAGE = "self-check-failing"
 
 
 def session_stop_reason(triage: Iterable[Any]) -> str | None:
@@ -136,13 +144,16 @@ class TieredAdapter:
         if self.is_local(str(tier) if tier else None):
             from foundry.gates.self_check import local_session
 
-            # The session's opening gate check runs before it holds the local slot.
+            # The session's opening gate check runs before it holds the local slot, and
+            # a session it shows already done (``skips``) never takes the slot.
             prepared = getattr(self.local, "prepared", None)
-            with (
-                local_session(),
-                prepared(packet) if callable(prepared) else contextlib.nullcontext(),
-                self._local_slot(),
-            ):
+            skips = getattr(self.local, "skips", None)
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(local_session())
+                if callable(prepared):
+                    stack.enter_context(prepared(packet))
+                if not (callable(skips) and skips(packet, sandbox)):
+                    stack.enter_context(self._local_slot())
                 result: AdapterResult = self.local.run(packet, sandbox)
             return result
         cloud_result: AdapterResult = self.cloud.run(packet, sandbox)

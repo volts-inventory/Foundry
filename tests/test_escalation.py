@@ -912,3 +912,17 @@ def test_a_split_reads_this_waves_failures_not_an_earlier_checks(tmp_path: Path)
     )
     assert set(_diffs(out)) == {"T-001"}
     assert _split_asked(out) == {"T-002"}
+
+
+def test_after_an_escalation_the_better_of_local_and_cloud_is_carried() -> None:
+    from foundry.agents.implementation.tickets.adapter import best_attempt
+
+    # Oldest first: the local attempt, then its cloud re-run in the same pass.
+    assert best_attempt([(2, "local"), (5, "cloud")]) == (2, "local")
+    assert best_attempt([(5, "local"), (2, "cloud")]) == (2, "cloud")
+    # A cloud session with no check of its own ranks below any scored attempt...
+    assert best_attempt([(7, "local"), (None, "cloud")]) == (7, "local")
+    # ...and a tie, scored or not, goes to the newer attempt.
+    assert best_attempt([(3, "local"), (3, "cloud")]) == (3, "cloud")
+    assert best_attempt([(None, "local"), (None, "cloud")]) == (None, "cloud")
+    assert best_attempt([]) is None

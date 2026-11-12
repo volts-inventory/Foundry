@@ -1630,6 +1630,43 @@ def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) 
     )
 
 
+def test_a_fixer_cannot_create_a_module_no_ticket_owns(tmp_path: Path) -> None:
+    # A local dice fixer created parser.py beside the planned dice_parser.py.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "legacy.py").write_text("L = 1\n")
+    seen: list[dict[str, Any]] = []
+    actions = iter(
+        [
+            {"action": "write_file", "path": "parser.py", "content": "X = 1\n"},
+            {"action": "write_file", "path": "dice_parser.py", "content": "P = 1\n"},
+            {"action": "write_file", "path": "legacy.py", "content": "L = 2\n"},
+            {"action": "write_file", "path": "notes.md", "content": "n\n"},
+            {"action": "write_file", "path": "tests/__init__.py", "content": ""},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        packet = make_packet(sb.worktree)
+        task = {**packet.task, "owned_files": ["dice_parser.py", "tests/test_parse.py"]}
+        packet = packet.model_copy(update={"task": task, "prior_failures": ("x",)})
+        result = ProxyAgentAdapter(_complete).run(packet, sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert "parser.py would be a new module no ticket owns" in str(seen[1]["content"])
+    assert body["files"] == {
+        "dice_parser.py": "P = 1\n",
+        "legacy.py": "L = 2\n",
+        "notes.md": "n\n",
+        "tests/__init__.py": "",
+    }
+
+
 def test_a_fenced_fixers_run_cannot_edit_outside_its_target(tmp_path: Path) -> None:
     # `sed -i` / a redirect in a `run` would slip past the write_file fence.
     src = tmp_path / "src"

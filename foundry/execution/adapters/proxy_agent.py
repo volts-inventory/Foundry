@@ -404,6 +404,9 @@ class _Loop:
     fence: tuple[str, ...] | None = None
     # One note per file a fenced fixer changed outside its target, with its reason.
     outside: list[str] = field(default_factory=list)
+    # A fixer's ticket-owned files (packet.task["owned_files"]): it may not create a
+    # code file outside them. None = no plan to judge against.
+    owned: tuple[str, ...] | None = None
     label: str = ""
     turn: int = 0  # the current model call, from 1
     # The newest check passed and no file was written since; the turns since that
@@ -514,6 +517,7 @@ class ProxyAgentAdapter:
         messages = _opening(packet, native=native, listing=listing, check=checked)
         files = packet.task.get("files")
         fence = packet.task.get("fix_files")
+        owned = packet.task.get("owned_files")
         st = _Loop(
             worktree,
             _tree_state(worktree),
@@ -524,6 +528,7 @@ class ProxyAgentAdapter:
             origin=before,
             write_check=_write_check_flags(),
             fence=tuple(str(f) for f in fence) if isinstance(fence, list) and fence else None,
+            owned=tuple(str(f) for f in owned) if isinstance(owned, list) and owned else None,
             label=str(packet.task.get("id", "")),
         )
         turns = 0
@@ -801,7 +806,7 @@ class ProxyAgentAdapter:
                 observation, read = _read_file(worktree, str(act.get("path", "")), act)
             elif action == "check":
                 observation = _check(st)
-            elif fenced := _fenced(st, act):
+            elif fenced := _fenced(st, act) or _new_unowned(st, act):
                 observation = fenced
             else:
                 observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
@@ -1015,6 +1020,25 @@ def _fenced(st: _Loop, act: dict[str, Any]) -> str | None:
         + ", ".join(st.fence)
         + f". If the failure really needs {rel} changed, repeat the call with a "
         "`reason` saying why."
+    )
+
+
+def _new_unowned(st: _Loop, act: dict[str, Any]) -> str | None:
+    """The refusal of a fixer's write that creates a code file no ticket owns
+    (``st.owned``), else None. No ``reason`` escape: a fixer once created parser.py
+    and roller.py beside the planned dice_parser.py and dice_roller.py, and they
+    shipped as dead code."""
+    from foundry.gates.ownership import owns
+
+    if st.owned is None or act.get("action") != "write_file":
+        return None
+    raw = str(act.get("path", ""))
+    rel = PurePosixPath(raw).as_posix().removeprefix("./") if raw else raw
+    if not rel or owns(rel, st.owned) or _contained(st.worktree, rel).exists():
+        return None
+    return (
+        f"ERROR: not written — {rel} would be a new module no ticket owns. Put the code "
+        "in the owning ticket's file instead; the files tickets own: " + ", ".join(st.owned) + "."
     )
 
 

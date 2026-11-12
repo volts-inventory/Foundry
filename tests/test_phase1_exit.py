@@ -159,10 +159,10 @@ def test_exit_2_hidden_suite_actually_gates_the_pass() -> None:
     wrong_app_diff = (
         "--- /dev/null\n+++ b/app.py\n@@ -0,0 +1,1 @@\n+VALUE = 7\n"
         # own test only checks VALUE is an int -> would pass on its own:
-        "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,2 @@\n"
+        # (one module: the plan owns test_app.py, and a stray module FAILs the build)
+        "--- /dev/null\n+++ b/test_app.py\n@@ -0,0 +1,4 @@\n"
         "+def test_own():\n    import app\n    assert isinstance(app.VALUE, int)\n"
         # hidden held-out oracle pins the exact value -> FAILS against VALUE=7:
-        "--- /dev/null\n+++ b/test_hidden.py\n@@ -0,0 +1,2 @@\n"
         "+def test_hidden():\n    import app\n    assert app.VALUE == 42\n"
     )
     result = run(

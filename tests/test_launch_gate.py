@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +46,16 @@ class H(BaseHTTPRequestHandler):
 
 ThreadingHTTPServer((os.environ["HOST"], int(os.environ["PORT"])), H).serve_forever()
 """
+
+# The same server made safe: the one connection is shared, but only under a lock
+# (check_same_thread=False alone still races: fetchone() can return None).
+_LOCKED_SQLITE = _SHARED_SQLITE.replace(
+    'sqlite3.connect(":memory:")',
+    'sqlite3.connect(":memory:", check_same_thread=False)\nLOCK = __import__("threading").Lock()',
+).replace(
+    "            rows = DB.execute",
+    "            with LOCK:\n                rows = DB.execute",
+)
 
 _FORM_APP = """\
 import os
@@ -91,9 +102,7 @@ def test_a_threaded_server_sharing_one_sqlite_connection_fails(tmp_path: Path) -
 
 
 def test_a_working_server_passes_on_every_probed_path(tmp_path: Path) -> None:
-    good = _SHARED_SQLITE.replace(
-        'sqlite3.connect(":memory:")', 'sqlite3.connect(":memory:", check_same_thread=False)'
-    )
+    good = _LOCKED_SQLITE
     gate = _http(tmp_path, good, probes=(("GET", "/"), ("GET", "/notes")))
     obs = gate.execute(tmp_path)
     assert gate.decide(obs) is GateStatus.PASS, obs.findings
@@ -107,6 +116,173 @@ def test_the_form_a_page_serves_is_posted(tmp_path: Path) -> None:
     obs = bad.execute(tmp_path)
     assert bad.decide(obs) is GateStatus.FAIL
     assert any("POST /notes answered 500" in f for f in obs.findings)
+
+
+# A notes app behind sign-in, as a generated Flask app shapes it: CSRF tokens bound
+# to the session (rotated at login), signup -> login -> create, an edit form that
+# POSTs `_method=PUT`, a logout form. BREAK picks the defect under test.
+_NOTES_APP = """\
+import os, re, secrets, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
+
+BREAK = "{brk}"
+LOCK = threading.Lock()
+USERS, SESSIONS, NOTES = {{}}, {{}}, []
+BUSY = [False]
+PW = '<input type="password" name="password">'
+
+
+def csrf_field(tok):
+    return f'<input type="hidden" name="csrf_token" value="{{tok}}">'
+
+
+class H(BaseHTTPRequestHandler):
+    def _cookies(self):
+        raw = (self.headers.get("Cookie") or "").split(";")
+        return dict(p.strip().split("=", 1) for p in raw if "=" in p)
+
+    def _send(self, code, body=b"", headers=()):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body if isinstance(body, bytes) else body.encode())
+
+    def _session(self):
+        c = self._cookies()
+        sid = c.get("sid")
+        with LOCK:
+            if sid not in SESSIONS:
+                sid = secrets.token_hex(8)
+                SESSIONS[sid] = {{"csrf": secrets.token_hex(8), "user": None}}
+            return sid, SESSIONS[sid]
+
+    def do_GET(self):
+        sid, s = self._session()
+        hdr = [("Set-Cookie", f"sid={{sid}}; Path=/; HttpOnly")]
+        tok = csrf_field(s["csrf"])
+        if self.path == "/signup":
+            page = (
+                '<form method="post" action="/signup">' + tok + PW +
+                '<input type="email" name="email"><input type="password" name="confirm">'
+                "<button>Sign up</button></form>"
+            )
+        elif self.path == "/login":
+            page = (
+                '<a href="/signup">Sign up</a><form method="post" action="/login">' + tok + PW +
+                '<input name="email"><button>Log in</button></form>'
+            )
+        elif s["user"] is None:
+            return self._send(302, b"", hdr + [("Location", "/login")])
+        elif self.path == "/":
+            if BREAK == "race":
+                if BUSY[0]:
+                    return self._send(500, "sqlite3.ProgrammingError: shared connection in use")
+                BUSY[0] = True
+                time.sleep(0.2)
+                BUSY[0] = False
+            links = "".join(f'<a href="/notes/{{i}}">{{n}}</a>' for i, n in enumerate(NOTES))
+            page = (
+                links + '<form method="post" action="/notes">' + tok + '<input name="title">'
+                '<textarea name="body"></textarea><button>Add</button></form>'
+                '<form method="post" action="/logout">' + tok + "<button>Log out</button></form>"
+            )
+        elif re.fullmatch(r"/notes/\\d+", self.path):
+            page = (
+                f'<form method="post" action="{{self.path}}">' + tok +
+                '<input type="hidden" name="_method" value="PUT"><input name="title">'
+                "<button>Save</button></form>"
+            )
+        else:
+            return self._send(404, b"not found")
+        self._send(200, page, hdr)
+
+    def do_POST(self):
+        sid, s = self._session()
+        data = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
+        form = {{k: v[0] for k, v in parse_qs(data).items()}}
+        if form.get("csrf_token") != s["csrf"]:
+            return self._send(400, b"The CSRF token is missing or invalid.")
+        if self.path == "/signup":
+            if form.get("password") != form.get("confirm") or "@" not in form.get("email", ""):
+                return self._send(400, b"bad signup")
+            USERS[form["email"]] = form["password"]
+            return self._send(303, b"", [("Location", "/login")])
+        if self.path == "/login":
+            if USERS.get(form.get("email")) != form.get("password"):
+                return self._send(401, b"bad login")
+            s["user"], s["csrf"] = form["email"], secrets.token_hex(8)
+            return self._send(303, b"", [("Location", "/")])
+        if s["user"] is None:
+            return self._send(302, b"", [("Location", "/login")])
+        if self.path == "/notes":
+            if BREAK == "create":
+                return self._send(500, b"Traceback (most recent call last):\\nKeyError: 'tags'")
+            NOTES.append(form.get("title", ""))
+            return self._send(303, b"", [("Location", "/")])
+        if re.fullmatch(r"/notes/\\d+", self.path):
+            if BREAK == "method" or form.get("_method") != "PUT":
+                return self._send(405, b"Method Not Allowed")
+            return self._send(303, b"", [("Location", "/")])
+        if self.path == "/logout":
+            s["user"] = None
+            return self._send(303, b"", [("Location", "/login")])
+        self._send(404, b"not found")
+
+    def log_message(self, *a):
+        pass
+
+
+ThreadingHTTPServer((os.environ["HOST"], int(os.environ["PORT"])), H).serve_forever()
+"""
+
+
+def _notes(tmp_path: Path, brk: str = "") -> tuple[GateStatus, tuple[str, ...], dict[str, Any]]:
+    gate = _http(tmp_path, _NOTES_APP.format(brk=brk))
+    obs = gate.execute(tmp_path)
+    return gate.decide(obs), obs.findings, obs.structured["launch"]
+
+
+def _submitted(launch: dict[str, Any]) -> list[tuple[str, str, int]]:
+    return [(q["method"], q["path"], q["status"]) for q in launch["requests"] if q.get("form")]
+
+
+def test_a_correct_app_is_driven_through_signup_login_and_create(tmp_path: Path) -> None:
+    status, findings, launch = _notes(tmp_path)
+    assert status is GateStatus.PASS, findings
+    sent = _submitted(launch)
+    paths = [p for _, p, _ in sent]
+    assert paths.index("/signup") < paths.index("/login") < paths.index("/notes"), sent
+    assert paths[-1] == "/logout", sent
+    # Each submission's redirect landed on a page (the session and CSRF token held).
+    assert all(code == 200 for _, _, code in sent), sent
+    assert "/notes/0" in paths, "the edit form behind the created note was never submitted"
+    assert launch["burst"]["sent"] == 12 and launch["burst"]["failures"] == []
+    assert launch["sent"] <= 80
+
+
+def test_a_form_post_that_500s_behind_sign_in_fails(tmp_path: Path) -> None:
+    status, findings, _ = _notes(tmp_path, "create")
+    assert status is GateStatus.FAIL
+    bad = [f for f in findings if "POST /notes answered 500" in f]
+    assert bad and "KeyError: 'tags'" in bad[0], findings
+
+
+def test_a_rendered_form_whose_method_the_route_refuses_fails_405(tmp_path: Path) -> None:
+    status, findings, _ = _notes(tmp_path, "method")
+    assert status is GateStatus.FAIL
+    bad = [f for f in findings if "405 Method Not Allowed" in f]
+    assert bad and "POST /notes/0" in bad[0] and "_method=PUT" in bad[0], findings
+
+
+def test_shared_state_that_breaks_under_concurrent_requests_fails(tmp_path: Path) -> None:
+    status, findings, launch = _notes(tmp_path, "race")
+    assert status is GateStatus.FAIL, findings
+    assert all(q.get("status", 0) < 500 for q in launch["requests"]), "sequential probe raced"
+    bad = [f for f in findings if "concurrent requests" in f]
+    assert bad and all("answered 500" in f and "shared connection" in f for f in bad), findings
 
 
 def test_a_server_that_exits_before_listening_fails(tmp_path: Path) -> None:
@@ -271,9 +447,7 @@ def test_the_launch_runs_inside_the_gate_sandbox(
     if sandbox_backend() is None:
         pytest.skip("no gate sandbox on this host")
     monkeypatch.delenv("FOUNDRY_GATE_SANDBOX", raising=False)
-    good = _SHARED_SQLITE.replace(
-        'sqlite3.connect(":memory:")', 'sqlite3.connect(":memory:", check_same_thread=False)'
-    )
+    good = _LOCKED_SQLITE
     gate = _http(tmp_path, good)
     obs = gate.execute(tmp_path)
     assert gate.decide(obs) is GateStatus.PASS, obs.findings
@@ -396,9 +570,7 @@ def test_a_spec_subcommand_missing_from_the_cli_fails(tmp_path: Path) -> None:
 
 
 def test_a_spec_route_the_server_lacks_fails(tmp_path: Path) -> None:
-    good = _SHARED_SQLITE.replace(
-        'sqlite3.connect(":memory:")', 'sqlite3.connect(":memory:", check_same_thread=False)'
-    )
+    good = _LOCKED_SQLITE
     ok = _http(tmp_path, good, interface=("GET /notes", "DELETE /notes/{id}"))
     assert ok.decide(ok.execute(tmp_path)) is GateStatus.PASS
     # The stdlib handler has no do_POST: it answers 501 Unsupported method.

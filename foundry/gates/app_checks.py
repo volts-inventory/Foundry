@@ -19,8 +19,10 @@ import re
 import stat
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from .profiles import SOURCE_SUFFIXES
 
 if TYPE_CHECKING:
     from .profiles import VerificationProfile
@@ -30,6 +32,8 @@ __all__ = [
     "app_check_constraints",
     "app_check_findings",
     "app_check_language",
+    "has_app_source",
+    "is_app_source",
 ]
 
 APP_CHECKS_FAILED = (
@@ -50,9 +54,7 @@ _TEST_FILE = re.compile(
     r"^(test_.*\.py|.*_test\.py|conftest\.py|.*_test\.go|.*\.(test|spec)\.[cm]?[jt]sx?)$"
 )
 _SUFFIXES: dict[str, tuple[str, ...]] = {
-    "python": (".py",),
-    "javascript": (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx"),
-    "go": (".go",),
+    lang: SOURCE_SUFFIXES[lang] for lang in ("python", "javascript", "go")
 }
 _LANGUAGE_ALIASES = {"typescript": "javascript", "js": "javascript", "ts": "javascript"}
 
@@ -453,10 +455,9 @@ def app_check_language(profile: VerificationProfile | None) -> str:
         return "python"
     if profile.app_checks is not None:
         return profile.app_checks
-    from .profiles import _PROFILE_LANGUAGE
+    from .profiles import profile_language
 
-    name = profile.name
-    lang = name.split(":", 1)[1] if name.startswith("stack:") else _PROFILE_LANGUAGE.get(name, "")
+    lang = profile_language(profile)
     return _language(lang) if _language(lang) in _SCANNERS else ""
 
 
@@ -477,6 +478,22 @@ def _walk(root: Path) -> Iterator[Path]:
         dirnames[:] = sorted(d for d in dirnames if d not in _SKIP_DIRS and not d.startswith("."))
         for name in sorted(filenames):
             yield Path(dirpath) / name
+
+
+def is_app_source(rel: str, suffixes: tuple[str, ...]) -> bool:
+    """True iff the tree path ``rel`` is a non-test source file with one of
+    ``suffixes``, outside the test and harness directories this scan skips."""
+    parts = PurePosixPath(rel.removeprefix("./")).parts
+    return (
+        bool(parts)
+        and parts[-1].endswith(suffixes)
+        and not _TEST_FILE.match(parts[-1])
+        and not any(d in _SKIP_DIRS or d.startswith(".") for d in parts[:-1])
+    )
+
+
+def has_app_source(root: Path, suffixes: tuple[str, ...]) -> bool:
+    return any(is_app_source(p.relative_to(root).as_posix(), suffixes) for p in _walk(Path(root)))
 
 
 def _sources(root: Path, suffixes: tuple[str, ...]) -> Iterator[tuple[str, str]]:

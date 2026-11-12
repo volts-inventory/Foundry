@@ -444,6 +444,74 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted
 
 
+# A first wave that built only the BDD harness: feature files and step code, no app.
+_HARNESS_ONLY = {
+    "features/roll.feature": "Feature: roll\n  Scenario: one die\n    Given a d6\n",
+    "features/steps/test_roll_steps.py": "from dice.roll import roll\n",
+}
+_PLANNED = [*_HARNESS_ONLY, "dice/__init__.py", "dice/roll.py"]
+
+
+def _wave_check(tmp_path, rt, runner, monkeypatch, files: dict[str, str]):
+    import foundry.graph.gate_wiring.runs as runs
+    from foundry.graph.gate_wiring import run_build_gate
+    from foundry.schemas.implementation import StackDecision
+
+    monkeypatch.setattr(runs, "planned_files", lambda state, resolve: list(_PLANNED))
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), ((diff, uri, blob),))
+    # A build that, like a type checker given no files, exits non-zero on no source.
+    state["stack"] = StackDecision(
+        language="python", build="python3 -m compileall -q . && ls dice/*.py"
+    )
+    return run_build_gate(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "wave",
+        launch=True,
+    )["gates"]
+
+
+def test_a_harness_only_wave_check_does_not_fail_build_or_launch(
+    tmp_path, rt, runner, records, verifier, monkeypatch
+):
+    # The build's import check would fail the step file's unbuilt `dice` import.
+    build, launch = _wave_check(tmp_path, rt, runner, monkeypatch, _HARNESS_ONLY)
+    for gate in (build, launch):
+        assert gate.status is GateStatus.PASS
+        assert any("not applicable yet: no python source" in f for f in gate.findings)
+    assert merge_gates([build, launch], None)  # attested + admitted
+
+
+def test_a_wave_check_with_built_source_still_runs_the_build(
+    tmp_path, rt, runner, records, verifier, monkeypatch
+):
+    files = {**_HARNESS_ONLY, "dice/__init__.py": "", "dice/roll.py": "def roll(:\n"}
+    build, _launch = _wave_check(tmp_path, rt, runner, monkeypatch, files)
+    assert build.status is GateStatus.FAIL
+    assert not any("not applicable" in f for f in build.findings)
+
+
+def test_final_gates_still_fail_a_tree_with_no_source(tmp_path, rt, runner, records, verifier):
+    diff, uri, blob = _feature_diff(_HARNESS_ONLY)
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), ((diff, uri, blob),))
+    gates = run_build_test_gates(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "bt",
+    )["gates"]
+    assert any(g.status is GateStatus.FAIL for g in gates)
+    assert not any("not applicable" in f for g in gates for f in g.findings)
+
+
 # ---- 6. flake quarantine (N=2 split) does not fail the boundary -------------
 
 

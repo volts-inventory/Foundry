@@ -8,8 +8,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from foundry import telemetry
-from foundry.agents.implementation.tickets.contracts import entrypoint_redefinitions
+from foundry.agents.implementation.tickets.contracts import (
+    dependency_symbols,
+    entrypoint_redefinitions,
+)
 from foundry.agents.implementation.tickets.packet import (
     ENTRYPOINT_RULE,
     PRODUCTION_WIRING_RULE,
@@ -64,7 +69,7 @@ def _criterion(cid: str, tid: str, *covers: str, **extra: Any) -> AcceptanceCrit
     return AcceptanceCriterion(
         id=cid,
         text=f"scenario {cid}",
-        given=("g",),
+        given=extra.pop("given", ("g",)),
         when=extra.pop("when", ("w",)),
         then=extra.pop("then", ("t",)),
         ticket_id=tid,
@@ -147,11 +152,43 @@ def test_the_post_build_check_flags_an_entrypoint_copy_of_a_dependency_route() -
     )
     tests = "def list_notes():\n    pass\n"
     [finding] = entrypoint_redefinitions(
-        {"app.py": entry}, {"notes/routes.py": routes, "tests/test_app.py": tests}
+        {"app.py": entry}, {"notes/routes.py": routes, "tests/test_app.py": tests}, {"list_notes"}
     )
     assert finding.startswith("app.py redefines list_notes (defined in notes/routes.py)")
     clean = "from notes.routes import list_notes\n\ndef create_app():\n    ...\n"
-    assert entrypoint_redefinitions({"app.py": clean}, {"notes/routes.py": routes}) == ()
+    assert (
+        entrypoint_redefinitions({"app.py": clean}, {"notes/routes.py": routes}, {"list_notes"})
+        == ()
+    )
+
+
+def test_the_post_build_check_flags_only_a_dependencys_contract_symbols() -> None:
+    interfaces = {
+        "routes": _iface(
+            "routes", "function", "def list_notes() -> str: ...\ndef index() -> str: ..."
+        ),
+        "app": _iface("app", "function", "def create_app() -> object: ..."),
+    }
+    notes = _ticket("notes", files=("notes/routes.py",), implements=("routes",))
+    entry = _ticket("web", "notes", files=("app.py",), implements=("app",), entrypoint=True)
+    guarded = dependency_symbols(entry, [notes, entry], interfaces)
+    # A common entry name is every module's own, even when a dependency's contract has it.
+    assert guarded == {"list_notes"}
+    routes = (
+        "def list_notes():\n    return 'x'\n\ndef index():\n    return 'i'\n\n"
+        "def setup():\n    pass\n\ndef run():\n    pass\n"
+    )
+    # Shared names no dependency contract declares (index, run, setup, create_app)
+    # are no finding: an entry module and a blueprint both naturally define them.
+    entry_src = (
+        "def create_app():\n    ...\n\ndef index():\n    ...\n\n"
+        "def setup():\n    ...\n\ndef run():\n    ...\n"
+    )
+    others = {"notes/routes.py": routes, "other/app.py": "def create_app():\n    ...\n"}
+    assert entrypoint_redefinitions({"app.py": entry_src}, others, guarded) == ()
+    copied = entry_src + "\ndef list_notes():\n    ...\n"
+    [finding] = entrypoint_redefinitions({"app.py": copied}, others, guarded)
+    assert finding.startswith("app.py redefines list_notes (defined in notes/routes.py):")
 
 
 # ---- packet rules (5, 6) ---------------------------------------------------------
@@ -227,6 +264,33 @@ def test_a_misuse_scenario_is_flagged_when_none_is() -> None:
     assert "AC-2" in note
 
 
+def test_a_happy_path_scenario_with_misuse_words_is_not_flagged() -> None:
+    api = _ticket("api", entrypoint=True, scenario_ids=("AC-1", "AC-2", "AC-3", "AC-4"))
+    criteria = [
+        _criterion(
+            "AC-1",
+            "api",
+            given=("an empty list",),
+            when=('I add "milk"',),
+            then=("the list has 1 item",),
+        ),
+        _criterion("AC-2", "api", when=("I add a duplicate item",), then=("the list has 2 items",)),
+        _criterion("AC-3", "api", when=("I search an unknown tag",), then=("the result is empty",)),
+        # Bad input in Given only: the When/Then never show it refused.
+        _criterion(
+            "AC-4",
+            "api",
+            given=("an unauthorized visitor",),
+            when=("they open the home page",),
+            then=("the page shows the title",),
+        ),
+    ]
+    out, flagged, [note] = _ensure_security_scenario([api], criteria, _SEQ)
+    assert not any(c.security_abuse for c in flagged[:4])
+    assert flagged[-1].id.startswith("AC-ABUSE-") and flagged[-1].security_abuse
+    assert flagged[-1].id in out[0].scenario_ids and "Added security scenario" in note
+
+
 def test_a_security_scenario_is_added_to_the_entrypoint_when_none_covers_misuse() -> None:
     api = _ticket("api", entrypoint=True, scenario_ids=("AC-1",))
     steps = _ticket("api-tests", "api", specialty=Specialty.TEST, scenario_ids=("AC-1",))
@@ -249,9 +313,29 @@ def test_a_security_scenario_is_added_to_the_entrypoint_when_none_covers_misuse(
 def test_the_scaffold_pins_no_dev_or_test_tools(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text("import json\nimport mypy\n")
     (tmp_path / "tests").mkdir()
-    (tmp_path / "tests" / "test_app.py").write_text("import pytest\nimport hypothesis\n")
-    (tmp_path / "conftest.py").write_text("import pytest_bdd\n")
+    (tmp_path / "tests" / "test_app.py").write_text("import pytest\nimport xdist\nimport ruff\n")
+    (tmp_path / "conftest.py").write_text("import pytest_bdd\nimport pytest_cov\n")
     assert _python_third_party_requirements(tmp_path) == []
+
+
+def test_the_scaffold_keeps_a_test_helper_the_harness_does_not_provide(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.graph.gate_wiring.materialize as materialize
+
+    # The build/test venv installs from this file: a helper only tests import still
+    # has to be listed, or the suite dies on ModuleNotFoundError.
+    (tmp_path / "app.py").write_text("import yaml\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text("import pytest\nimport freezegun\n")
+    monkeypatch.setattr(
+        materialize._im,
+        "packages_distributions",
+        lambda: {"yaml": ["PyYAML", "types-PyYAML"], "pytest": ["pytest"]},
+    )
+    monkeypatch.setattr(materialize, "_pin", lambda d: d)
+    # A types-* stub distribution is the type checker's, not the app's.
+    assert _python_third_party_requirements(tmp_path) == ["PyYAML", "freezegun"]
 
 
 # ---- planner calls (22, 24) ------------------------------------------------------

@@ -300,6 +300,7 @@ def _graph_case(
     signature: str = _STORE_CONTRACT,
     max_fix_attempts: int = 3,
     consumed: bool = True,
+    **state: Any,
 ) -> tuple[dict, list[str], ArtifactStore]:
     store = ArtifactStore()
     contract = InterfaceContract(
@@ -334,6 +335,7 @@ def _graph_case(
         artifacts=extra,
         stack=stack,
         max_fix_attempts=max_fix_attempts,
+        **state,
     )
     return out, ran, store
 
@@ -807,5 +809,23 @@ def test_only_a_first_attempt_may_skip_as_already_green(tmp_path: Path) -> None:
         writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}, "T-001": {"store.py": renamed}}
     )
     _graph_case(tmp_path, rec)
-    # The retry carries its failed attempt's files, which the opening check never saw.
-    assert [s for tid, s in rec.skip if tid == "T-001"] == [True, False]
+    # Only the planner's generated tickets skip: a later ticket green on the tree an
+    # earlier wave built (sharing a file, or a contract it re-implements) still has
+    # its own change to make, and a retry carries files the opening check never saw.
+    assert rec.skip == [("contracts", True), ("T-001", False), ("T-001", False), ("T-002", False)]
+
+
+def test_a_change_build_never_skips_as_already_green(tmp_path: Path) -> None:
+    rec = _SpecRecorder(
+        writes={
+            "contracts": {"contracts.py": _GRAPH_CONTRACTS_PY},
+            "T-001": {"store.py": _GOOD_IMPL},
+        }
+    )
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "README.md").write_text("base\n")
+    _graph_case(tmp_path, rec, base_dir=str(base))
+    # The base tree's files exist and may already be green: the ticket's edit to them
+    # is the change, so a green opening check is no reason to skip it.
+    assert rec.skip and not any(s for _, s in rec.skip)

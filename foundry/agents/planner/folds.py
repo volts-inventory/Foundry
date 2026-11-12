@@ -718,15 +718,28 @@ def _fix_covers(
     return out, concerns
 
 
-# A scenario exercising misuse: bad input, a refused operation, an exhausted limit.
+# A misuse scenario's When/Then name bad input or access, and its Then refuses it.
+# Words a happy path uses too (empty, missing, unknown, limit, duplicate) are not
+# enough: flagging such a scenario would let it stand in for the Spec gate's abuse case.
 _MISUSE = re.compile(
-    r"\b(invalid|malformed|blank|empty|missing|wrong|bad|negative|non-numeric|"
+    r"\b(invalid|malformed|blank|negative|non-numeric|wrong type|"
     r"reject(?:s|ed)?|refuse[sd]?|unauthori[sz]ed|unauthenticated|forbidden|denied|"
-    r"not allowed|too (?:long|large|many|big)|exceed(?:s|ed|ing)?|oversized|limit|"
-    r"injection|escaped?|traversal|nonexistent|does not exist|unknown|duplicate|"
-    r"40[0-9]|413|422)\b",
+    r"not allowed|too (?:long|large|big)|oversized|injection|traversal|4\d\d)\b",
     re.I,
 )
+_REFUSED = re.compile(
+    r"\b(reject(?:s|ed|ion)?|refuse[sd]?|errors?|denied|forbidden|unauthori[sz]ed|"
+    r"not allowed|4\d\d)\b",
+    re.I,
+)
+
+
+def _is_misuse(c: AcceptanceCriterion) -> bool:
+    acts = " ".join((*c.when, *c.then))
+    outcome = " ".join(c.then)
+    if not acts:
+        acts = outcome = c.text
+    return bool(_MISUSE.search(acts) and _REFUSED.search(outcome))
 
 
 def _ensure_security_scenario(
@@ -740,7 +753,7 @@ def _ensure_security_scenario(
     if not criteria or any(c.security_abuse for c in criteria):
         return list(tickets), list(criteria), []
     misuse = sorted(
-        (c for c in criteria if _MISUSE.search(" ".join((*c.when, *c.then)) or c.text)),
+        (c for c in criteria if _is_misuse(c)),
         key=lambda c: c.criticality is not Criticality.HIGH_RISK,
     )
     if misuse:

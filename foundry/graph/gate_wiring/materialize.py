@@ -339,30 +339,22 @@ def _pin(dist: str) -> str:
         return dist
 
 
-# Dev and test tools: the gates bring their own, and a release manifest pins only
-# what the app imports at runtime.
+# What the gate harness provides (pytest, pytest-bdd and the plugins it runs them
+# with) and pure dev tools. A third-party helper the tests import (freezegun,
+# responses, hypothesis) is NOT here: the build/test venv installs from this file.
 _DEV_TOOLS = frozenset(
-    {"pytest", "pytest_bdd", "mypy", "ruff", "black", "flake8", "pylint", "hypothesis", "coverage"}
+    {"pytest", "_pytest", "pytest_bdd", "pluggy", "xdist", "pytest_cov", "coverage"}
+    | {"mypy", "mypy_extensions", "ruff", "black", "flake8", "pylint", "isort"}
 )
-
-
-def _is_test_source(path: Path, dest: Path) -> bool:
-    parts = path.relative_to(dest).parts
-    return (
-        path.name.startswith("test_")
-        or path.stem.endswith("_test")
-        or path.name == "conftest.py"
-        or any(p in ("tests", "test", FEATURE_DIR) for p in parts[:-1])
-    )
 
 
 def _python_third_party_requirements(dest: Path) -> list[str] | None:
     """Requirement lines derived from the tree's real imports, or ``None`` when
     ``dest`` is not a Python tree (no ``.py`` — nothing to scaffold here).
 
-    The third-party top-level modules the app imports at runtime (stdlib, in-tree
-    local modules, test files and dev tools excluded), mapped to their installed
-    distribution + pinned version when resolvable.
+    The third-party top-level modules the app and its tests import (stdlib, in-tree
+    local modules, what the gate harness provides and dev tools excluded), mapped
+    to their installed distribution + pinned version when resolvable.
     Deterministic (sorted, no clock) so the integrated ``tree_sha`` is stable
     across the repeated materializations of one run.
     """
@@ -376,8 +368,6 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     stdlib = sys.stdlib_module_names  # guaranteed on the pinned floor (requires-python >=3.11)
     imported: set[str] = set()
     for path in py_files:
-        if _is_test_source(path, dest):
-            continue
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except (OSError, SyntaxError, ValueError):
@@ -399,7 +389,7 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     for name in third_party:
         dists = pkg_dist.get(name)
         if dists:
-            reqs.update(_pin(d) for d in dists)
+            reqs.update(_pin(d) for d in dists if not d.lower().startswith("types-"))
         else:
             reqs.add(name)  # unresolved import: list the bare name, still auditable
     return sorted(reqs)

@@ -44,6 +44,7 @@ __all__ = [
     "ESCALATE_REQUEST_TRIAGE",
     "STOPPED_DIGEST",
     "STOPPED_TRIAGE",
+    "UPSTREAM_DEFECT_TRIAGE",
     "TieredAdapter",
     "session_stop_reason",
 ]
@@ -78,6 +79,10 @@ CHECK_SCORE_TRIAGE = "self-check-failing"
 # A session's report that the spec contradicts itself (a scenario's example breaks a
 # pinned constraint): surfaced in the build manifest, not worked around in code.
 SPEC_CONFLICT_TRIAGE = "spec-conflict"
+# A session's report that a dependency ticket's file (one it may not write) is wrong:
+# the file, the symptom and a repro. Recorded in the build manifest and handed to
+# every fixer pass with the owning ticket's files in its fence.
+UPSTREAM_DEFECT_TRIAGE = "upstream-defect"
 
 
 def session_stop_reason(triage: Iterable[Any]) -> str | None:

@@ -28,14 +28,17 @@ from foundry.execution.adapters.proxy_agent import (
     CHECK_OVERRIDDEN,
     CHECK_RED_LAST_TURN,
     CHECK_UNVERIFIED,
+    CHECK_UPSTREAM,
     GREEN_AUTO_DONE,
     PENDING_GREEN_DONE,
+    WRITE_GREEN_DONE,
     ProxyAgentAdapter,
 )
 from foundry.execution.adapters.tiered import (
     ALREADY_GREEN_TRIAGE,
     CHECK_SCORE_TRIAGE,
     DIGEST_TRIAGE,
+    UPSTREAM_DEFECT_TRIAGE,
     TieredAdapter,
     session_stop_reason,
 )
@@ -355,14 +358,14 @@ def test_an_unchanged_tree_answers_from_the_cache(
 # ---- the loop: check action, done gating, escalation ------------------------------
 
 
-def _packet(turn_budget: int = 12) -> TaskPacket:
+def _packet(turn_budget: int = 12, files: tuple[str, ...] = ("app.py",)) -> TaskPacket:
     return TaskPacket(
         task={
             "id": "t-1",
             "title": "t-1",
             "branch": "task/t-1",
             "criterion_ids": [],
-            "files": ["app.py"],
+            "files": list(files),
             "rules": ["VERIFY BEFORE YOU FINISH: run verify"],
         },
         worktree_path="/unused",
@@ -387,6 +390,10 @@ def _observations(seen: list[list[dict[str, Any]]]) -> list[str]:
     return [str(turn[-1]["content"]) for turn in seen[1:]]
 
 
+# A ticket with a file no test writes: the check never runs by itself.
+_UNFINISHED = ("app.py", "notes.md")
+
+
 def _run_loop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -396,6 +403,7 @@ def _run_loop(
     run: Any = None,
     skip_green: bool = False,
     start: Mapping[str, str] | None = None,
+    files: tuple[str, ...] = ("app.py",),
 ) -> tuple[Any, list[list[dict[str, Any]]], list[dict[str, str]]]:
     calls: list[dict[str, str]] = []
     monkeypatch.setattr(self_check, "run_check", run or _red_unless("OK", calls))
@@ -413,7 +421,7 @@ def _run_loop(
     for rel, text in (start or {}).items():
         (src / rel).write_text(text)
     with Sandbox(src) as sb, check_scope(spec):
-        result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(turn_budget), sb)
+        result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(turn_budget, files), sb)
     return result, seen, calls
 
 
@@ -430,6 +438,7 @@ def test_done_is_refused_on_red_and_allowed_on_green(
             {"action": "check"},
             {"action": "done", "summary": "built it"},
         ],
+        files=_UNFINISHED,
     )
     opening = str(seen[0][0]["content"])
     assert "GATE CHECK ON THE STARTING TREE" in opening and CHECK_RULE in opening
@@ -499,6 +508,7 @@ def test_the_check_run_at_done_is_the_digests_last_check(
             {"action": "read_file", "path": "app.py"},
         ],
         turn_budget=3,
+        files=_UNFINISHED,
     )
     digest = next(t.explanation for t in result.triage if t.name == DIGEST_TRIAGE)
     assert "last check: check at done: CHECK FAILED" in digest, digest
@@ -633,6 +643,7 @@ def test_a_session_out_of_turns_with_checks_left_says_why_it_is_unverified(
             {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
         ],
         turn_budget=1,
+        files=_UNFINISHED,
     )
     [note] = [t.explanation for t in result.triage if t.explanation.startswith(CHECK_UNVERIFIED)]
     assert "ended without checking" in note and "no check" not in note, note
@@ -1048,13 +1059,135 @@ def test_a_green_opening_whose_written_file_turns_it_red_goes_on(
         run=_run,
         skip_green=True,
     )
-    assert len(seen) == 4
+    assert len(seen) == 2  # the fixing write's own check passed and ended it
     assert (
         "run by itself" in seen[1][-1]["content"]
         and "app.py:1: error: bad" in (seen[1][-1]["content"])
     )
-    assert "run by itself" not in seen[2][-1]["content"]  # only the first completing write
-    assert PENDING_GREEN_DONE not in [t.explanation for t in result.triage]
+    notes = [t.explanation for t in result.triage]
+    assert PENDING_GREEN_DONE not in notes and WRITE_GREEN_DONE in notes
+
+
+def test_a_write_completing_the_ticket_runs_the_check_and_ends_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A feature ticket that goes green mid-session ends without a done turn."""
+    result, seen, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "done", "summary": "never asked"},
+        ],
+    )
+    obs = _observations(seen)
+    assert "CHECK (run by itself" in obs[0] and "app.py:1: error: not done yet" in obs[0]
+    assert len(seen) == 2 and result.turns_used == 2
+    notes = [t.explanation for t in result.triage]
+    assert "wrote app.py; the gate check run after the last write passed" in notes, notes
+    assert WRITE_GREEN_DONE in notes
+    assert session_stop_reason(result.triage) is None
+    assert DIGEST_TRIAGE not in _names(result)
+    assert len(calls) == 3  # the opening, then one per completing write
+
+
+def test_no_check_runs_by_itself_while_a_ticket_file_is_unbuilt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "write_file", "path": "notes.md", "content": "# notes\n"},
+            {"action": "done", "summary": "never asked"},
+        ],
+        files=_UNFINISHED,
+    )
+    obs = _observations(seen)
+    assert "run by itself" not in obs[0]
+    assert len(seen) == 2 and len(calls) == 2  # the opening, then once notes.md exists
+    assert WRITE_GREEN_DONE in [t.explanation for t in result.triage]
+
+
+def test_a_native_turn_writing_several_files_is_checked_once_after_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, str]] = []
+    monkeypatch.setattr(self_check, "run_check", _red_unless("OK", calls))
+    spec = CheckSpec(
+        base=_fake_base(tmp_path / "base"),
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=_UNFINISHED,
+    )
+    turns: list[list[dict[str, Any]]] = []
+    script = iter(
+        [
+            [
+                {"id": "a", "name": "write_file", "input": {"path": "app.py", "content": "x\n"}},
+                {"id": "b", "name": "write_file", "input": {"path": "notes.md", "content": "n"}},
+                {"id": "c", "name": "read_file", "input": {"path": "notes.md"}},
+            ],
+            [{"id": "d", "name": "write_file", "input": {"path": "app.py", "content": "OK\n"}}],
+        ]
+    )
+
+    def _tools(messages: Any, tools: Any) -> tuple[str, Any]:
+        turns.append([dict(m) for m in messages])
+        return "", next(script)
+
+    src = tmp_path / "src"
+    src.mkdir()
+    with Sandbox(src) as sb, check_scope(spec):
+        result = ProxyAgentAdapter(_scripted([], []), tool_complete_fn=_tools).run(
+            _packet(files=_UNFINISHED), sb
+        )
+    first = turns[1][-1]["content"]
+    assert [r["tool_use_id"] for r in first] == ["a", "b", "c"]
+    assert "run by itself" not in first[0]["content"] + first[1]["content"]
+    assert "run by itself" in first[2]["content"]  # once, after the turn's last call
+    assert len(turns) == 2 and len(calls) == 3
+    assert WRITE_GREEN_DONE in [t.explanation for t in result.triage]
+
+
+def test_a_red_done_naming_an_upstream_defect_is_accepted_without_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    defect = "upstream-defect: web/routes.py: DELETE is a 405; repro: client.delete('/n/1')"
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "done", "summary": "wired it", "triage": [defect]},
+        ],
+    )
+    assert len(seen) == 2 and result.turns_used == 2
+    notes = [t.explanation for t in result.triage]
+    assert any(n.startswith(CHECK_UPSTREAM) for n in notes), notes
+    assert UPSTREAM_DEFECT_TRIAGE in _names(result)
+
+
+def test_the_explicit_check_still_runs_on_a_complete_ticket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, seen, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+            {"action": "done", "summary": "a"},
+            {"action": "done", "summary": "b"},
+            {"action": "done", "summary": "c"},
+        ],
+    )
+    obs = _observations(seen)
+    assert "CHECK (run by itself" in obs[0]
+    assert "CHECK FAILED" in obs[1] and "app.py:1: error: not done yet" in obs[1]
+    assert len(calls) == 2  # the explicit check reused the automatic one's verdict
 
 
 def test_a_skipped_local_session_never_takes_the_local_slot(
@@ -1099,6 +1232,7 @@ def test_after_a_green_check_only_done_or_an_edit_may_follow(
             {"action": "run", "cmd": "touch ran-2"},
             {"action": "done", "summary": "never asked"},
         ],
+        files=_UNFINISHED,
     )
     obs = _observations(seen)
     assert "CHECK PASSED" in obs[1]
@@ -1122,6 +1256,7 @@ def test_an_edit_after_a_green_check_reopens_the_session(
             {"action": "run", "cmd": "echo hi"},
             {"action": "done", "summary": "built it"},
         ],
+        files=_UNFINISHED,
     )
     obs = _observations(seen)
     assert obs[3].startswith("OBSERVATION:\nexit 0")

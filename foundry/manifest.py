@@ -122,6 +122,8 @@ class BuildManifest(FrozenModel):
     base: BaseRef | None = None  # set when this build is a change on a base
     # Contradictions in the spec a coding session reported instead of coding around.
     spec_conflicts: tuple[str, ...] = ()
+    # Bugs a coding session found in a dependency ticket's file it may not write.
+    upstream_defects: tuple[str, ...] = ()
 
 
 def _artifact_refs(artifacts: Sequence[Artifact]) -> tuple[ArtifactRef, ...]:
@@ -282,6 +284,12 @@ def render_manifest_md(m: BuildManifest) -> str:
             if m.spec_conflicts
             else []
         ),
+        *(
+            ["", "## Upstream defects (reported by a dependent ticket)", ""]
+            + [f"- {d}" for d in m.upstream_defects]
+            if m.upstream_defects
+            else []
+        ),
         "",
         "## Gates",
         "",
@@ -379,6 +387,17 @@ def spec_conflicts(state: FactoryState) -> tuple[str, ...]:
     )
 
 
+def upstream_defects(state: FactoryState) -> tuple[str, ...]:
+    """Each reported defect in a dependency ticket's file, as ``task/<id>: <note>``."""
+    from foundry.execution.adapters.tiered import UPSTREAM_DEFECT_TRIAGE
+
+    return tuple(
+        f"{t.run_against}: {t.explanation}"
+        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+        if t.name == UPSTREAM_DEFECT_TRIAGE
+    )
+
+
 def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
     """Record the stack, the contracts and, for a change build, its base."""
     from foundry.base_tree import base_digest, read_base
@@ -387,6 +406,7 @@ def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -
     base_dir = state.get("base_dir")
     prior = read_base(base_dir) if base_dir else None
     update["spec_conflicts"] = spec_conflicts(state)
+    update["upstream_defects"] = upstream_defects(state)
     if prior is not None and base_dir:
         update["base"] = BaseRef(
             thread_id=prior.thread_id,

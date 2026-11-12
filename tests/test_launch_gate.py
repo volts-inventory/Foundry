@@ -192,11 +192,55 @@ def test_a_cli_target_runs_the_entrypoint_scenarios_command() -> None:
     tickets = [_ticket("T1", ("dice/__init__.py", "dice/__main__.py"), entrypoint=True)]
     crit = [_criterion("AC-1", "T1", "I run `dice roll 2d6`")]
     t = launch_target(cli, None, tickets=tickets, criteria=crit, python="py")
-    assert (t.cmd, t.runs, t.required) == ("py -m dice", ("py -m dice roll 2d6",), True)
+    assert (t.cmd, t.runs, t.required) == (
+        "py -m dice",
+        ("py -m dice roll 2d6", "py -m dice --help"),
+        True,
+    )
     bare = launch_target(cli, None, tickets=tickets, python="py")
     assert bare.runs == ("py -m dice --help",)
     nothing = launch_target(cli, None, tickets=[_ticket("T1", ("dice/core.py",), entrypoint=True)])
     assert (nothing.cmd, nothing.required) == ("", True)
+
+
+def test_a_security_abuse_scenarios_command_is_not_launched() -> None:
+    cli = StackDecision(language="python", kind="cli")
+    tickets = [_ticket("T1", ("todo/__init__.py", "todo/__main__.py"), entrypoint=True)]
+    abuse = _criterion("AC-2", "T1", "I run `todo add '; rm -rf /'`").model_copy(
+        update={"security_abuse": True}
+    )
+    crit = [_criterion("AC-1", "T1", "I run `todo done 99`"), abuse]
+    t = launch_target(cli, None, tickets=tickets, criteria=crit, python="py")
+    assert t.runs == ("py -m todo done 99", "py -m todo --help")
+
+
+def test_a_cli_user_error_is_not_a_launch_failure(tmp_path: Path) -> None:
+    (tmp_path / "todo.py").write_text(
+        "import sys\n"
+        "if '--help' in sys.argv: print('usage')\n"
+        "else:\n"
+        "    print('Error: task 99: not found', file=sys.stderr)\n"
+        "    print('todo.json: No such file or directory', file=sys.stderr)\n"
+        "    sys.exit(1)\n"
+    )
+    runs = (f"{_PY} todo.py done 99", f"{_PY} todo.py --help")
+    gate = LaunchGate(LaunchTarget(kind="cli", cmd=f"{_PY} todo.py", runs=runs))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.PASS, obs.findings
+
+
+def test_a_cli_whose_program_is_missing_or_file_absent_fails(tmp_path: Path) -> None:
+    gone = LaunchGate(
+        LaunchTarget(kind="cli", cmd="no-such-prog-xyz", runs=("no-such-prog-xyz --help",))
+    )
+    obs = gone.execute(tmp_path)
+    assert gone.decide(obs) is GateStatus.FAIL, obs.findings
+    absent = LaunchGate(
+        LaunchTarget(kind="cli", cmd=f"{_PY} nope.py", runs=(f"{_PY} nope.py --help",))
+    )
+    obs = absent.execute(tmp_path)
+    assert absent.decide(obs) is GateStatus.FAIL
+    assert any("can't open file" in f for f in obs.findings)
 
 
 def test_a_library_or_an_undeclared_build_without_an_entry_has_nothing_to_launch() -> None:

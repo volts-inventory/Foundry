@@ -13,6 +13,7 @@ Test code is never scanned: an in-memory database or a literal key is right ther
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import stat
@@ -72,10 +73,12 @@ _SECRET = _Rule(
 )
 _SQLITE_THREADS = _Rule(
     "sqlite-threads",
-    "sqlite3.connect without check_same_thread in a web app: a threaded server "
-    "uses the connection from other threads and every request after the first "
-    "500s; open one connection per request, or pass check_same_thread=False and "
-    "guard the shared connection with a lock",
+    "a sqlite3 connection opened at module level (or as a class attribute or "
+    "global singleton) without check_same_thread in a web app: a threaded server "
+    "uses it from other request threads and every request after the first 500s; "
+    "open the connection per request inside a function (e.g. Flask's g in "
+    "get_db()), or pass check_same_thread=False and guard the shared connection "
+    "with a lock",
 )
 _MEMORY_DB = _Rule(
     "memory-db",
@@ -124,7 +127,6 @@ _PY_SECRET_FALLBACK = re.compile(
     r"(?:secret|key|token|password|passwd)[^'\"]*['\"]\s*"
     r"(?:,\s*[rbu]?['\"][^'\"\n]+['\"]|\)\s*or\s*[rbu]?['\"][^'\"\n]+['\"])"
 )
-_PY_SQLITE_CONNECT = re.compile(r"\bsqlite3\.connect\s*\(")
 _MEMORY = re.compile(r"""['"](?::memory:|sqlite://|sqlite:///:memory:)['"]|mode=memory""")
 _PY_FAST_DIGEST = re.compile(r"\bhashlib\.(?:md5|sha1|sha224|sha256|sha384|sha512)\s*\(")
 _PY_PASSWORD_WORD = re.compile(r"(?i)pass(?:word|wd)?|pwd")
@@ -182,18 +184,6 @@ def _line_of(text: str, pos: int) -> int:
     return text.count("\n", 0, pos) + 1
 
 
-def _call_args(text: str, open_paren: int) -> str:
-    depth = 0
-    for i in range(open_paren, min(len(text), open_paren + 2000)):
-        if text[i] == "(":
-            depth += 1
-        elif text[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return text[open_paren : i + 1]
-    return text[open_paren : open_paren + 2000]
-
-
 def _like_hits(text: str, wildcard: re.Pattern[str]) -> Iterator[tuple[int, _Rule]]:
     """Each place a file with a parametrized LIKE and no ESCAPE clause wraps a value
     in % (or concatenates it in SQL)."""
@@ -204,8 +194,124 @@ def _like_hits(text: str, wildcard: re.Pattern[str]) -> Iterator[tuple[int, _Rul
             yield _line_of(text, m.start()), _LIKE_ESCAPE
 
 
-def _test_line(line: str) -> bool:
-    return bool(re.search(r"(?i)test", line))
+_TEST_WORDS = frozenset({"test", "tests", "testing"})
+_PY_HEADER = re.compile(r"^\s*(?:async\s+)?(?:def|class)\s+(\w+)")
+_JS_GO_HEADER = re.compile(
+    r"^\s*(?:export\s+)?(?:async\s+)?(?:function\*?|class|func(?:\s*\([^)]*\))?)\s+(\w+)"
+    r"|^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\(|function)"
+)
+_IF_HEADER = re.compile(r"^\s*(?:\}\s*else\s+)?(?:el)?if\b(.*)")
+
+
+def _testy(text: str) -> bool:
+    """Whether an identifier or condition names testing as a word (``TestingConfig``,
+    ``test_db``, ``app.testing``), not as a substring (``latest``, ``contest``)."""
+    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", text)
+    return any(w.lower() in _TEST_WORDS for w in words)
+
+
+def _strip_comment(line: str, marker: str) -> str:
+    quote = ""
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = ""
+        elif ch in "'\"`":
+            quote = ch
+        elif line.startswith(marker, i):
+            return line[:i]
+        i += 1
+    return line
+
+
+def _test_context(lines: list[str], n: int, header: re.Pattern[str]) -> bool:
+    """Whether 1-based line ``n`` sits in test-only code: a function/class named for
+    testing, an ``if`` on a testing flag (enclosing it by indentation), or a
+    conditional expression on one on the line itself."""
+    line = lines[n - 1]
+    tail = line.split(" if ", 1)
+    if (len(tail) == 2 and _testy(tail[1])) or ("?" in line and _testy(line.split("?", 1)[0])):
+        return True
+    indent = len(line) - len(line.lstrip())
+    for prev in reversed(lines[: n - 1]):
+        if not prev.strip():
+            continue
+        level = len(prev) - len(prev.lstrip())
+        if level >= indent:
+            continue
+        indent = level
+        if (m := header.match(prev)) and _testy(m.group(m.lastindex or 1) or ""):
+            return True
+        if (m := _IF_HEADER.match(prev)) and _testy(m.group(1)):
+            return True
+        if level == 0:
+            break
+    return False
+
+
+def _memory_hits(text: str, comment: str, header: re.Pattern[str]) -> Iterator[tuple[int, _Rule]]:
+    lines = text.splitlines()
+    for n, line in _code_lines(text, comment):
+        if _MEMORY.search(_strip_comment(line, comment)) and not _test_context(lines, n, header):
+            yield n, _MEMORY_DB
+
+
+def _py_shared_connects(text: str) -> Iterator[int]:
+    """Lines of each ``sqlite3.connect`` without check_same_thread whose connection
+    outlives a request: at module level, in a class body, or assigned to a name a
+    function declares ``global``/``nonlocal``."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return
+
+    def bare(call: ast.Call) -> bool:
+        f = call.func
+        return (
+            isinstance(f, ast.Attribute)
+            and f.attr == "connect"
+            and isinstance(f.value, ast.Name)
+            and f.value.id == "sqlite3"
+            and not any(k.arg == "check_same_thread" for k in call.keywords)
+        )
+
+    def scan(body: list[ast.stmt], shared: bool, globals_: set[str]) -> Iterator[int]:
+        todo: list[ast.AST] = list(body)
+        while todo:
+            node = todo.pop(0)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = {
+                    name
+                    for n in ast.walk(node)
+                    if isinstance(n, (ast.Global, ast.Nonlocal))
+                    for name in n.names
+                }
+                yield from scan(node.body, False, names)
+            elif isinstance(node, ast.ClassDef):
+                yield from scan(node.body, True, set())
+            elif isinstance(node, ast.Lambda):
+                continue
+            elif isinstance(node, ast.Call) and bare(node) and shared:
+                yield node.lineno
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and not shared:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if node.value is not None and any(
+                    isinstance(t, ast.Name) and t.id in globals_ for t in targets
+                ):
+                    yield from (
+                        c.lineno
+                        for c in ast.walk(node.value)
+                        if isinstance(c, ast.Call) and bare(c)
+                    )
+                todo.extend(ast.iter_child_nodes(node))
+            else:
+                todo.extend(ast.iter_child_nodes(node))
+
+    yield from scan(tree.body, True, set())
 
 
 def _code_lines(text: str, comment: str) -> Iterator[tuple[int, str]]:
@@ -218,14 +324,12 @@ def _python(rel: str, text: str, tree: _Tree) -> Iterator[tuple[int, _Rule]]:
     for n, line in _code_lines(text, "#"):
         if _PY_SECRET_LITERAL.search(line) or _PY_SECRET_FALLBACK.search(line):
             yield n, _SECRET
-        if _MEMORY.search(line) and not _test_line(line):
-            yield n, _MEMORY_DB
         if _PY_FAST_DIGEST.search(line) and _PY_PASSWORD_WORD.search(line):
             yield n, _WEAK_HASH
+    yield from _memory_hits(text, "#", _PY_HEADER)
     if tree.web:
-        for m in _PY_SQLITE_CONNECT.finditer(text):
-            if "check_same_thread" not in _call_args(text, m.end() - 1):
-                yield _line_of(text, m.start()), _SQLITE_THREADS
+        for at in _py_shared_connects(text):
+            yield at, _SQLITE_THREADS
     yield from _py_password_functions(text)
     for pattern in _PY_FSTRINGS:
         for m in pattern.finditer(text):
@@ -275,11 +379,10 @@ _JS_FORM = re.compile(r"\b(?:express|bodyParser)\.urlencoded\s*\(")
 
 def _javascript(rel: str, text: str, tree: _Tree) -> Iterator[tuple[int, _Rule]]:
     lines = text.splitlines()
+    yield from _memory_hits(text, "//", _JS_GO_HEADER)
     for n, line in _code_lines(text, "//"):
         if _JS_SECRET_FALLBACK.search(line) or _JS_SECRET_LITERAL.search(line):
             yield n, _SECRET
-        if _MEMORY.search(line) and not _test_line(line):
-            yield n, _MEMORY_DB
         if _JS_FAST_DIGEST.search(line):
             window = " ".join(lines[max(0, n - 3) : n + 2])
             if _PY_PASSWORD_WORD.search(window):
@@ -308,11 +411,10 @@ _GO_WILDCARD = re.compile(r"\"%\"\s*\+|\+\s*\"%\"")
 
 
 def _go(rel: str, text: str, tree: _Tree) -> Iterator[tuple[int, _Rule]]:
+    yield from _memory_hits(text, "//", _JS_GO_HEADER)
     for n, line in _code_lines(text, "//"):
         if _GO_SECRET_LITERAL.search(line):
             yield n, _SECRET
-        if _MEMORY.search(line) and not _test_line(line):
-            yield n, _MEMORY_DB
         if _GO_FAST_DIGEST.search(line) and _PY_PASSWORD_WORD.search(line):
             yield n, _WEAK_HASH
     for m in _GO_SPRINTF_SQL.finditer(text):

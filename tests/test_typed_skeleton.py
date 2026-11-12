@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -29,6 +30,7 @@ from foundry.agents.implementation.tickets.contracts import ContractDriftError
 from foundry.agents.planner import _safe_ticket_ids
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
+from foundry.execution.adapters.tiered import CHECK_SCORE_TRIAGE
 from foundry.execution.sandbox import Sandbox
 from foundry.graph.gate_wiring import materialize_workdir
 from foundry.schemas.architecture import InterfaceContract
@@ -736,3 +738,74 @@ def test_a_ticket_that_leaves_the_fixed_stub_untouched_counts_as_unwritten(
     assert rec.seen["T-001"]["store.py"] == _FIXED_STUB
     assert rec.calls.count("T-001") == 2
     assert "ticket-skipped" in {t.name for t in out["gate_triage"] if t.run_against == "task/T-001"}
+
+
+class _Scored(_Recorder):
+    """T-001's sessions write the next of ``attempts`` (text, failing lines at its
+    last check) and report that count as a proxy-agent session does."""
+
+    def __init__(self, attempts: list[tuple[str, int]], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.attempts = list(attempts)
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        if packet.task["id"] != "T-001" or not self.attempts:
+            return super().run(packet, sandbox)
+        text, score = self.attempts.pop(0)
+        self.writes["T-001"] = {"store.py": text}
+        result = super().run(packet, sandbox)
+        note = GateTriage(
+            name=CHECK_SCORE_TRIAGE,
+            run_against="task/T-001",
+            explanation=str(score),
+            produced_by="proxy-agent",
+            seq=_SEQ,
+        )
+        return result.model_copy(update={"triage": (note,)})
+
+
+def test_a_retry_carries_the_best_attempt_not_the_last(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.agents.implementation.tickets as tickets_mod
+    import foundry.agents.implementation.tickets.packet as packet_mod
+
+    monkeypatch.setattr(tickets_mod, "MAX_TICKET_ATTEMPTS", 3)
+    monkeypatch.setattr(packet_mod, "MAX_TICKET_ATTEMPTS", 3)
+    monkeypatch.setattr(tickets_mod, "REPLAN_AFTER", 3)  # a third attempt, not a re-plan
+    better = _GOOD_IMPL.replace("def count(self)", "def size(self)")
+    worse = _GOOD_IMPL.replace("def count(self)", "def total(self)")
+    rec = _Scored(
+        [(better, 1), (worse, 5), (_GOOD_IMPL, 0)],
+        writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}},
+    )
+    _graph_case(tmp_path, rec)
+    assert [p.task["id"] for p in rec.history].count("T-001") == 3
+    # Attempt 2 started from attempt 1; attempt 3 from attempt 1 again (1 failing
+    # line beats attempt 2's 5), not from the newer, worse attempt 2.
+    assert rec.seen["T-001"]["store.py"] == better
+
+
+class _SpecRecorder(_Recorder):
+    """Records, per session, whether its check spec allows the already-green skip."""
+
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.skip: list[tuple[str, bool | None]] = []
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        from foundry.gates.self_check import current_check
+
+        spec = current_check()
+        self.skip.append((str(packet.task["id"]), None if spec is None else spec.skip_green))
+        return super().run(packet, sandbox)
+
+
+def test_only_a_first_attempt_may_skip_as_already_green(tmp_path: Path) -> None:
+    renamed = _GOOD_IMPL.replace("def count(self)", "def size(self)")
+    rec = _SpecRecorder(
+        writes={"contracts": {"contracts.py": _GRAPH_CONTRACTS_PY}, "T-001": {"store.py": renamed}}
+    )
+    _graph_case(tmp_path, rec)
+    # The retry carries its failed attempt's files, which the opening check never saw.
+    assert [s for tid, s in rec.skip if tid == "T-001"] == [True, False]

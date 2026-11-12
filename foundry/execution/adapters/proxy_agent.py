@@ -60,7 +60,13 @@ from foundry.execution.adapters.claude_code import (
     changed_files,
     walk_worktree,
 )
-from foundry.execution.adapters.tiered import DIGEST_CAP, DIGEST_TRIAGE, STOPPED_DIGEST
+from foundry.execution.adapters.tiered import (
+    ALREADY_GREEN_TRIAGE,
+    CHECK_SCORE_TRIAGE,
+    DIGEST_CAP,
+    DIGEST_TRIAGE,
+    STOPPED_DIGEST,
+)
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
 from foundry.schemas.gates import GateTriage
@@ -69,7 +75,7 @@ from foundry.state.seq import Seq
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 
-    from foundry.gates.self_check import SessionCheck
+    from foundry.gates.self_check import CheckVerdict, SessionCheck
 
     # (messages, schema) -> (raw_text, parsed_json_or_None). In production a
     # closure over ModelProviderProxy.complete (the only credential holder).
@@ -284,7 +290,11 @@ _OBS_CAP = 4_000  # chars of run/search output fed back per turn (context discip
 # is what drove the model to re-read one file in many slices.
 _READ_CAP = 12_000
 _OBS_KEEP = 3  # observations kept verbatim after an elision pass (arXiv 2508.21433)
-_OBS_MAX = 6  # verbatim observations allowed to pile up before the next pass
+_OBS_MAX = 10  # verbatim observations allowed to pile up before the next pass
+# Turns between elision passes: each pass rewrites the prompt from its oldest elided
+# message on, so a native turn's several results must not move the cached prefix
+# every turn. Past the hard cap a pass runs whatever the turn count.
+_MASK_EVERY = 8
 _REPEAT_WARN = 3
 _REPEAT_STOP = 5
 # Reads of one unchanged file before a nudge / a stop. Only a read overlapping
@@ -292,10 +302,20 @@ _REPEAT_STOP = 5
 # masking elided, is legitimate.
 _THRASH_WARN = 4
 _THRASH_STOP = 6
+# The same environment/dependency error (normalized, across any run or check) before
+# a nudge / a stop: a local session once looped 123 times on one missing module.
+_ENV_WARN = 3
+_ENV_STOP = 6
+ENV_LOOP = "env-loop"
+# Turns after a green check that neither write nor declare done before the session
+# is ended as done.
+_GREEN_IDLE_STOP = 2
+GREEN_AUTO_DONE = "done automatically: the gate check passed and the session made no edit since"
 # Chars of unchanged-file reads kept verbatim past masking, not counting the
 # always-kept tail; over it, the oldest are elided down to half, so the cap
 # moves the cache prefix once per several reads rather than every turn.
 _PIN_CAP = 30_000
+_VERBATIM_CAP = _PIN_CAP + _OBS_MAX * 4_000
 _SEARCH_MAX_HITS = 50
 _SEARCH_MAX_FILE = 1_000_000
 # Lines this long are skipped: the model's regex runs in-process, and catastrophic
@@ -384,6 +404,18 @@ class _Loop:
     fence: tuple[str, ...] | None = None
     # One note per file a fenced fixer changed outside its target, with its reason.
     outside: list[str] = field(default_factory=list)
+    label: str = ""
+    turn: int = 0  # the current model call, from 1
+    # The newest check passed and no file was written since; the turns since that
+    # spent no write (the last counted turn, so a native turn counts once).
+    green: bool = False
+    green_idle: int = 0
+    green_turn: int = 0
+    # Normalized environment error line -> the run/check observations showing it.
+    env_errors: dict[str, int] = field(default_factory=dict)
+    masked_at: int = 0  # the turn of the last elision pass
+    # The previous model call's prompt: per-message digests and its size in chars.
+    prompt: list[tuple[str, int]] = field(default_factory=list)
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -456,6 +488,14 @@ class ProxyAgentAdapter:
         finally:
             _OPENED.reset(token)
 
+    def skips(self, packet: TaskPacket, sandbox: Sandbox) -> bool:
+        """Whether :meth:`run` inside :meth:`prepared` ends ``packet`` unrun (its
+        opening check green on its built files), so it needs no model slot."""
+        opened = _OPENED.get()
+        if opened is None or opened[0] != id(packet):
+            return False
+        return _already_green(packet, opened[1][0], Path(sandbox.worktree))
+
     def _run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
         worktree = Path(sandbox.worktree)
         before = walk_worktree(worktree)
@@ -467,6 +507,8 @@ class ProxyAgentAdapter:
         checker, checked = (
             opened[1] if opened is not None and opened[0] == id(packet) else _open_check(packet)
         )
+        if _already_green(packet, checker, worktree):
+            return self._skipped(packet, sandbox)
         if checker is not None and checker.spec.rules:
             packet = _with_rules(packet, checker.spec.rules)
         messages = _opening(packet, native=native, listing=listing, check=checked)
@@ -482,11 +524,13 @@ class ProxyAgentAdapter:
             origin=before,
             write_check=_write_check_flags(),
             fence=tuple(str(f) for f in fence) if isinstance(fence, list) and fence else None,
+            label=str(packet.task.get("id", "")),
         )
         turns = 0
         while turns < st.budget and not st.stopped:
             turns += 1  # one per model call, however many tool calls it makes
             st.left = st.budget - turns
+            st.turn = turns
             if not native:
                 self._json_turn(messages, st, sandbox)
                 continue
@@ -503,13 +547,16 @@ class ProxyAgentAdapter:
                 native = False
                 messages = _opening(packet, native=False, listing=listing, check=checked)
                 st.verbatim = []
+                st.prompt = []
                 turns -= 1
         if not st.stopped:
             st.triage.append("turn budget exhausted before 'done' — partial work recorded")
         after = walk_worktree(worktree)
         authored, deleted, skipped_binary = changed_files(before, after)
+        score: int | None = None
         if (c := st.checker) is not None:
             last = c.cached(authored, deleted)
+            score = None if last is None else _failing_count(last)
             if last is not None and last.red and c.left <= 0:
                 # Red on the final tree itself: an edit after the last check is unjudged.
                 st.triage.append(
@@ -555,6 +602,8 @@ class ProxyAgentAdapter:
         # one record on the state channel (GateTriage.union_key), so the last note
         # would hide it.
         heads = [] if st.done else [(DIGEST_TRIAGE, _digest(st, authored, deleted))]
+        if score is not None:
+            heads.append((CHECK_SCORE_TRIAGE, str(score)))
         run_against = f"task/{packet.task.get('id', 'unknown')}"
         triage = tuple(
             GateTriage(
@@ -576,10 +625,43 @@ class ProxyAgentAdapter:
             snapshot_digest=sandbox.snapshot(),
         )
 
+    def _skipped(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        """The result of a session not run: its opening check was green on the
+        ticket's files already in the tree, so the ticket is built as it stands."""
+        tid = str(packet.task.get("id", "unknown"))
+        progress.log(f"proxy-agent: {tid} already green at its opening check; session not run")
+        payload = {"kind": "full-file-snapshot", "files": {}}
+        diff_uri = sandbox.put_blob(json.dumps(payload, sort_keys=True).encode("utf-8"))
+        notes = [
+            (
+                ALREADY_GREEN_TRIAGE,
+                "the opening gate check passed with the ticket's files already in the "
+                "tree: built as it stands, no session run",
+            ),
+            (CHECK_SCORE_TRIAGE, "0"),
+        ]
+        return AdapterResult(
+            diff_uri=diff_uri,
+            triage=tuple(
+                GateTriage(
+                    name=name,
+                    run_against=f"task/{tid}",
+                    explanation=note,
+                    produced_by=self.name,
+                    seq=Seq(self._run_id, 0, 0, self._node_id, i),
+                )
+                for i, (name, note) in enumerate(notes)
+            ),
+            adapter_self_reported_model=self._self_reported_model,
+            turns_used=0,
+            snapshot_digest=sandbox.snapshot(),
+        )
+
     def _json_turn(self, messages: list[dict[str, Any]], st: _Loop, sandbox: Sandbox) -> None:
         schema = ACTION_SCHEMA if st.checker is None else _CHECK_SCHEMA
         if st.fence is not None:
             schema = _FENCED_SCHEMAS[id(schema)]
+        _log_prompt(st, messages)
         text, parsed = self._complete(messages, schema)
         act = parsed if isinstance(parsed, dict) else _lenient_action(text)
         messages.append({"role": "assistant", "content": text})
@@ -605,6 +687,7 @@ class ProxyAgentAdapter:
         tools = TOOLS if st.checker is None else _CHECK_TOOLS
         if st.fence is not None:
             tools = _FENCED_TOOLS[id(tools)]
+        _log_prompt(st, messages)
         text, calls = tool_fn(messages, tools)
         if not calls:
             messages.append({"role": "assistant", "content": text or "(no reply)"})
@@ -667,6 +750,20 @@ class ProxyAgentAdapter:
             st.stopped = st.done = True
             self._activity(act)
             return None
+        if st.green and action not in ("write_file", "delete_file"):
+            if st.green_turn != st.turn:
+                st.green_turn = st.turn
+                st.green_idle += 1
+            if st.green_idle >= _GREEN_IDLE_STOP:
+                st.summary = st.summary or GREEN_AUTO_DONE
+                st.triage.append(GREEN_AUTO_DONE)
+                st.stopped = st.done = True
+                return None
+            return (
+                "NOT RUN: the gate check passed on this tree. Call done now (say what you "
+                "built). Only a file edit may still follow (check it again after); any "
+                "other action ends the session as done."
+            ), None
         self._activity(act)
         st.actions.append(_summarize(act))
         fp = _fingerprint(act)
@@ -717,8 +814,31 @@ class ProxyAgentAdapter:
             st.last_check = f"{_summarize(act)}: {_head(observation)}"
         elif action == "check":
             st.last_check = f"check: {_head(observation)}"
+        tree_then = st.tree
         st.tree = _tree_state(worktree)
         st.repeats[fp] = (count, st.tree)
+        if action in ("write_file", "delete_file") or (st.tree != tree_then and action != "check"):
+            st.green = False
+            st.green_idle = 0
+        if action in ("run", "check"):
+            # A check's pre-existing failures are not the session's to fix: an error
+            # there repeats on every check whatever the session does.
+            env = _env_repeat(st, observation.split("\nPRE-EXISTING", 1)[0])
+            if env is not None and env[1] >= _ENV_STOP:
+                st.triage.append(
+                    f"stopped early: {ENV_LOOP} — the same environment/dependency error "
+                    f"came back {env[1]} times across runs and checks ({env[0][:200]}) — "
+                    "partial work recorded"
+                )
+                st.stopped = True
+                return None
+            if env is not None and env[1] == _ENV_WARN:
+                observation = (
+                    f"WARNING: this is an environment/dependency error, seen {env[1]} times "
+                    f"now ({env[0][:200]}): re-running will not fix it. Change the dependency "
+                    "(declare it, or use one the project already has) or change the "
+                    "approach.\n" + observation
+                )
         if count >= _REPEAT_WARN:
             observation = (
                 f"WARNING: you have issued this exact action {count} times in a row "
@@ -1218,6 +1338,106 @@ def _open_check(packet: TaskPacket) -> tuple[SessionCheck | None, str | None]:
     return checker, render(verdict, left=checker.left, opening=True)
 
 
+def _already_green(packet: TaskPacket, checker: SessionCheck | None, worktree: Path) -> bool:
+    """Whether ``packet``'s session has nothing to do: its spec allows the skip, the
+    opening check was green, and every one of the ticket's files is built in the
+    starting tree (a typed stub still to fill is not)."""
+    files = packet.task.get("files")
+    if (
+        checker is None
+        or not checker.spec.skip_green
+        or checker.last is None
+        or not checker.last.green
+        or not isinstance(files, list)
+        or not files
+        or packet.task.get("fix_files")
+    ):
+        return False
+    from foundry.agents.implementation.stubs import is_stub
+
+    for f in files:
+        try:
+            path = _contained(worktree, str(f).rstrip("/"))
+        except ValueError:
+            return False
+        if str(f).endswith("/"):
+            if not path.is_dir() or not any(p.is_file() for p in path.rglob("*")):
+                return False
+            continue
+        if not path.is_file():
+            return False
+        if path.suffix == ".py" and is_stub(path.read_text(encoding="utf-8", errors="replace")):
+            return False
+    return True
+
+
+def _failing_count(verdict: CheckVerdict) -> int:
+    """The session's own failing lines in a check (gate headers not counted)."""
+    return sum(1 for line in verdict.yours if not line.startswith("["))
+
+
+# An error line naming the environment rather than the code: a missing module,
+# package or command, a resolver or network failure. Language-agnostic phrasing.
+_ENV_ERROR = re.compile(
+    r"ModuleNotFoundError|No module named|command not found|executable file not found|"
+    r"Cannot find module|cannot find package|no required module provides|"
+    r"No matching distribution|Could not find a version|externally-managed-environment|"
+    r"Could not resolve|unable to resolve dependency|Temporary failure in name resolution|"
+    r"Name or service not known|getaddrinfo|Network is unreachable|"
+    r"error while loading shared libraries|Permission denied",
+    re.IGNORECASE,
+)
+_HEX = re.compile(r"\b0x[0-9a-fA-F]+\b|\b[0-9a-f]{7,}\b")
+_PATHISH = re.compile(r"(?:[A-Za-z]:)?(?:[\w.~-]*[/\\])+[\w.-]*")
+_NUM = re.compile(r"\d+")
+
+
+def _env_lines(observation: str) -> set[str]:
+    """The environment errors in ``observation``, each from its match on with paths,
+    hex and numbers stripped, so one error reads the same from any command."""
+    out: set[str] = set()
+    for line in observation.splitlines():
+        if (m := _ENV_ERROR.search(line)) is None:
+            continue
+        text = _NUM.sub("#", _PATHISH.sub("<path>", _HEX.sub("#", line[m.start() :])))
+        out.add(" ".join(text.split())[:200])
+    return out
+
+
+def _env_repeat(st: _Loop, observation: str) -> tuple[str, int] | None:
+    """Count each environment error ``observation`` shows; the most repeated one
+    and its count, else None."""
+    lines = _env_lines(observation)
+    for line in lines:
+        st.env_errors[line] = st.env_errors.get(line, 0) + 1
+    if not lines:
+        return None
+    worst = max(sorted(lines), key=lambda ln: st.env_errors[ln])
+    return worst, st.env_errors[worst]
+
+
+def _log_prompt(st: _Loop, messages: Sequence[dict[str, Any]]) -> None:
+    """Log this model call's prompt size beside the previous call's and the share of
+    it that is an unchanged prefix: a turn that rewrote an early message (masking)
+    re-sends, uncached, everything after it."""
+    sizes = []
+    for m in messages:
+        raw = json.dumps(m, sort_keys=True, ensure_ascii=False, default=str)
+        sizes.append((hashlib.sha256(raw.encode("utf-8")).hexdigest(), len(raw)))
+    kept = 0
+    for now, then in zip(sizes, st.prompt, strict=False):
+        if now[0] != then[0]:
+            break
+        kept += now[1]
+    total = sum(n for _, n in sizes)
+    prev = sum(n for _, n in st.prompt)
+    st.prompt = sizes
+    progress.log(
+        f"proxy-agent {st.label or '-'} turn {st.turn}: prompt ~{total // 4} tokens "
+        f"(previous ~{prev // 4}), {100 * kept // max(total, 1)}% an unchanged prefix"
+    )
+
+
 def _with_rules(packet: TaskPacket, rewrites: Mapping[str, str]) -> TaskPacket:
     """``packet`` with each rule ``rewrites`` names replaced (verify -> check)."""
     rules = packet.task.get("rules")
@@ -1247,6 +1467,7 @@ def _check(st: _Loop) -> str:
         return "ERROR: check is unavailable in this session; run the commands in `verify`"
     files, deleted = _changes(st)
     if (cached := c.cached(files, deleted)) is not None:
+        st.green = cached.green
         return render(cached, left=c.left, cached=True)
     if c.left <= 0:
         return (
@@ -1254,9 +1475,11 @@ def _check(st: _Loop) -> str:
             "further edits, then call done."
         )
     try:
-        return render(c.check(files, deleted), left=c.left)
+        verdict = c.check(files, deleted)
     except Exception as exc:
         return f"ERROR: the check could not run: {type(exc).__name__}: {exc}"
+    st.green = verdict.green
+    return render(verdict, left=c.left)
 
 
 def _red_done(st: _Loop) -> str | None:
@@ -1334,12 +1557,15 @@ def _mask(messages: list[dict[str, Any]], st: _Loop) -> None:
     pinned = _pinned(st.verbatim, st.worktree)
     tail = {k.key for k in st.verbatim[-_OBS_KEEP:]}
     pinned_size = sum(k.size for k in st.verbatim if k.key in pinned - tail)
-    if len(st.verbatim) - len(pinned) <= _OBS_MAX and pinned_size <= _PIN_CAP:
+    over = len(st.verbatim) - len(pinned) > _OBS_MAX or pinned_size > _PIN_CAP
+    due = st.turn - st.masked_at >= _MASK_EVERY
+    if not (over and due) and sum(k.size for k in st.verbatim) <= _VERBATIM_CAP:
         return
     # Elide in batches, not one per turn: every rewrite invalidates the
-    # prompt-prefix cache from that message on, so batching moves the
-    # prefix once every 4 turns (3 kept + 4 new).
+    # prompt-prefix cache from that message on, so a pass runs at most once per
+    # _MASK_EVERY turns (short of the hard cap) and the prefix holds in between.
     # A placeholder is never rewritten again.
+    st.masked_at = st.turn
     keep = set(tail)
     budget = _PIN_CAP if pinned_size <= _PIN_CAP else _PIN_CAP // 2
     for k in reversed(st.verbatim):

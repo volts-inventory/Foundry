@@ -28,9 +28,16 @@ from foundry.execution.adapters.proxy_agent import (
     CHECK_OVERRIDDEN,
     CHECK_RED_LAST_TURN,
     CHECK_UNVERIFIED,
+    GREEN_AUTO_DONE,
     ProxyAgentAdapter,
 )
-from foundry.execution.adapters.tiered import DIGEST_TRIAGE, TieredAdapter, session_stop_reason
+from foundry.execution.adapters.tiered import (
+    ALREADY_GREEN_TRIAGE,
+    CHECK_SCORE_TRIAGE,
+    DIGEST_TRIAGE,
+    TieredAdapter,
+    session_stop_reason,
+)
 from foundry.execution.sandbox import Sandbox
 from foundry.gates import sandbox as gate_sandbox
 from foundry.gates.pydeps import PythonEnvCache
@@ -386,6 +393,8 @@ def _run_loop(
     budget: int = 8,
     turn_budget: int = 12,
     run: Any = None,
+    skip_green: bool = False,
+    start: Mapping[str, str] | None = None,
 ) -> tuple[Any, list[list[dict[str, Any]]], list[dict[str, str]]]:
     calls: list[dict[str, str]] = []
     monkeypatch.setattr(self_check, "run_check", run or _red_unless("OK", calls))
@@ -395,10 +404,13 @@ def _run_loop(
         own_refs=frozenset(),
         own_files=("app.py",),
         rules={"VERIFY BEFORE YOU FINISH: run verify": CHECK_RULE},
+        skip_green=skip_green,
     )
     seen: list[list[dict[str, Any]]] = []
     src = tmp_path / "src"
     src.mkdir()
+    for rel, text in (start or {}).items():
+        (src / rel).write_text(text)
     with Sandbox(src) as sb, check_scope(spec):
         result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(turn_budget), sb)
     return result, seen, calls
@@ -941,3 +953,167 @@ def test_a_fixer_sent_for_smoke_checks_the_smoke_command() -> None:
     assert opening.yours[0] == "[smoke gate FAILED]"
     assert any("smoke.py" in line for line in opening.yours), opening.yours
     assert fixed.green, fixed
+
+
+# ---- a green session: skipped, or stopped once green ------------------------------
+
+
+def _names(result: Any) -> list[str]:
+    return [t.name for t in result.triage]
+
+
+def test_a_green_opening_on_built_files_skips_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, str]] = []
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [],
+        run=_red_unless("", calls),  # always green
+        skip_green=True,
+        start={"app.py": "def f() -> int:\n    return 1\n"},
+    )
+    assert seen == [] and result.turns_used == 0
+    assert ALREADY_GREEN_TRIAGE in _names(result)
+    assert session_stop_reason(result.triage) is None
+    assert len(calls) == 1  # the opening check only
+
+
+@pytest.mark.parametrize(
+    ("skip_green", "start"),
+    [
+        (False, {"app.py": "X = 1\n"}),  # the spec does not allow it (a retry)
+        (True, {}),  # the ticket's file is not built yet
+        (True, {"app.py": "def f() -> int:\n    raise NotImplementedError\n"}),  # a stub
+    ],
+)
+def test_a_green_opening_still_runs_a_session_with_work_left(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skip_green: bool,
+    start: dict[str, str],
+) -> None:
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [{"action": "done", "summary": "x"}],
+        run=_red_unless("", []),
+        skip_green=skip_green,
+        start=start,
+    )
+    assert len(seen) == 1 and ALREADY_GREEN_TRIAGE not in _names(result)
+
+
+def test_a_skipped_local_session_never_takes_the_local_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(self_check, "run_check", _red_unless("", []))
+    taken: list[str] = []
+
+    @contextlib.contextmanager
+    def _slot() -> Iterator[None]:
+        taken.append("slot")
+        yield
+
+    spec = CheckSpec(
+        base=_fake_base(tmp_path / "base"),
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=("app.py",),
+        skip_green=True,
+    )
+    local = ProxyAgentAdapter(_scripted([], []))
+    tiered = TieredAdapter(cloud=local, local=local, local_tiers={"T3"}, local_slot=_slot)
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("X = 1\n")
+    packet = _packet().model_copy(update={"task": {**_packet().task, "tier": "T3"}})
+    with Sandbox(src) as sb, check_scope(spec):
+        result = tiered.run(packet, sb)
+    assert taken == [] and ALREADY_GREEN_TRIAGE in _names(result)
+
+
+def test_after_a_green_check_only_done_or_an_edit_may_follow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "check"},
+            {"action": "run", "cmd": "touch ran-1"},
+            {"action": "run", "cmd": "touch ran-2"},
+            {"action": "done", "summary": "never asked"},
+        ],
+    )
+    obs = _observations(seen)
+    assert "CHECK PASSED" in obs[1]
+    assert obs[2].startswith("OBSERVATION:\nNOT RUN: the gate check passed")
+    assert result.turns_used == 4  # the second idle turn ended it as done
+    notes = [t.explanation for t in result.triage]
+    assert GREEN_AUTO_DONE in notes and session_stop_reason(result.triage) is None
+    assert DIGEST_TRIAGE not in _names(result)
+
+
+def test_an_edit_after_a_green_check_reopens_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, seen, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1  # OK\n"},
+            {"action": "check"},
+            {"action": "write_file", "path": "app.py", "content": "x = 2  # OK\n"},
+            {"action": "run", "cmd": "echo hi"},
+            {"action": "done", "summary": "built it"},
+        ],
+    )
+    obs = _observations(seen)
+    assert obs[3].startswith("OBSERVATION:\nexit 0")
+    assert GREEN_AUTO_DONE not in [t.explanation for t in result.triage]
+
+
+def test_the_last_checks_failing_count_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {"action": "write_file", "path": "app.py", "content": "x = 1\n"},
+            {"action": "check"},
+        ],
+        turn_budget=2,
+    )
+    score = [t.explanation for t in result.triage if t.name == CHECK_SCORE_TRIAGE]
+    assert score == ["1"]  # one failing line; the gate header is not counted
+
+
+def test_an_already_green_ticket_is_built_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.agents.implementation.tickets.adapter import _ScopedAdapter
+    from foundry.durability.artifact_store import ArtifactStore
+    from tests.test_ticket_scheduler import _runtime
+
+    monkeypatch.setattr(self_check, "run_check", _red_unless("", []))
+    spec = CheckSpec(
+        base=_fake_base(tmp_path / "base"),
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=("app.py",),
+        skip_green=True,
+    )
+    local = ProxyAgentAdapter(_scripted([], []))
+    scoped = _ScopedAdapter(
+        _runtime(local, ArtifactStore()), {"t-1": ("app.py",)}, checks={"t-1": spec}
+    )
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text("X = 1\n")
+    with Sandbox(src) as sb:
+        result = scoped.run(_packet(), sb)  # no EmptyTicketError: its file is built
+    assert ALREADY_GREEN_TRIAGE in _names(result) and scoped.empty == {}

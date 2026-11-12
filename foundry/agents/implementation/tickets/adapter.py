@@ -21,7 +21,7 @@ from foundry.agents.implementation.tickets.contracts import (
 )
 from foundry.agents.implementation.tickets.scope import trim_to_write_scope
 from foundry.execution.adapter_contract import AdapterResult, TaskPacket
-from foundry.execution.adapters.tiered import session_stop_reason
+from foundry.execution.adapters.tiered import CHECK_SCORE_TRIAGE, session_stop_reason
 from foundry.schemas.implementation import FeatureDiff
 from foundry.state.seq import Seq
 
@@ -64,6 +64,9 @@ class _ScopedAdapter:
         self._carried = dict(carried or {})
         # Task id -> the files a failed attempt wrote, for its retry to start from.
         self.carry: dict[str, dict[str, str]] = {}
+        # Task id -> each carryable attempt this pass (an escalation re-runs one in
+        # the same pass): its failing-line count at its last check, and its files.
+        self.attempts: dict[str, list[tuple[int | None, dict[str, str]]]] = {}
         self.supports_turn_snapshots = rt.adapter.supports_turn_snapshots
         # Task id -> why its session counted as empty. The work pool records a
         # worker's exception only as text, so the type is kept here.
@@ -100,6 +103,7 @@ class _ScopedAdapter:
                 written = _written_sources(result, sandbox, tid)
                 if kept := {p: t for p, t in written.items() if isinstance(t, str)}:
                     self.carry[tid] = kept
+                    self.attempts.setdefault(tid, []).append((check_score(result.triage), kept))
             raise
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
@@ -128,6 +132,32 @@ def _with_carried(
             files[rel] = (worktree / rel).read_text(encoding="utf-8")
     payload = json.dumps({**body, "files": files}, sort_keys=True, ensure_ascii=False)
     return result.model_copy(update={"diff_uri": sandbox.put_blob(payload.encode("utf-8"))})
+
+
+def check_score(triage: Sequence[object]) -> int | None:
+    """A session's own failing-line count at its last gate check, else None (no
+    check judged its final tree, or the adapter has none)."""
+    for t in triage:
+        if getattr(t, "name", None) == CHECK_SCORE_TRIAGE:
+            try:
+                return int(str(getattr(t, "explanation", "")))
+            except ValueError:
+                return None
+    return None
+
+
+def best_attempt(
+    attempts: Sequence[tuple[int | None, str]],
+) -> tuple[int | None, str] | None:
+    """The attempt to carry, oldest first in ``attempts``: the fewest failing lines,
+    an unscored one ranked last, the newer on a tie."""
+    if not attempts:
+        return None
+    _, best = min(
+        enumerate(attempts),
+        key=lambda ia: (ia[1][0] if ia[1][0] is not None else float("inf"), -ia[0]),
+    )
+    return best
 
 
 class EmptyTicketError(RuntimeError):

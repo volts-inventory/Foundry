@@ -116,6 +116,10 @@ class StackDecision(FrozenModel):
     # starts ``launch`` (an http app reads $PORT/$HOST) and drives it as that kind.
     kind: str = ""
     launch: str = ""
+    # The app's external interface as the spec names it: CLI options/subcommands
+    # ("--seed", "roll") or http routes ("GET /notes"). The launch gate FAILs one
+    # the running app lacks; () skips that check.
+    interface: tuple[str, ...] = ()
     profile: str = ""  # a pinned/legacy gate profile name, when one was used
     notes: str = ""
 

@@ -176,6 +176,17 @@ def test_planner_writes_the_chosen_stack_and_offers_the_detected_languages() -> 
     assert enum["language"]["enum"] == ["python", "typescript"]
 
 
+def test_the_stack_carries_the_specs_declared_interface() -> None:
+    writes, _, _ = _plan_once(
+        {**PLAN, "stack": {**TS_STACK, "interface": [" --seed ", "", "roll"]}}
+    )
+    assert writes["stack"].interface == ("--seed", "roll")
+    bare, _, _ = _plan_once({**PLAN, "stack": TS_STACK})
+    assert bare["stack"].interface == ()
+    schema = _plan_schema(["typescript"])["properties"]["stack"]
+    assert "interface" in schema["properties"] and "interface" in schema["required"]
+
+
 def test_undetected_language_writes_no_stack_and_says_so() -> None:
     writes, _, _ = _plan_once({**PLAN, "stack": {**TS_STACK, "language": "rust"}})
     assert "stack" not in writes

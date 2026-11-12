@@ -15,6 +15,10 @@ app's command in its own process group and drives it:
   ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, or a
   command that never exits with stdin closed.
 
+When the stack declares the spec's ``interface``, a cli option/subcommand its
+``--help`` does not list FAILs (an unrequested extra option is advisory only), and
+an http route that answers 404/405/501 FAILs.
+
 An app that must launch (a declared or inferred cli/http kind) but has no
 runnable entry FAILs; a library, or a build with nothing to launch, gets an
 attested "not pinned" PASS. The core is language-neutral: the profile/stack
@@ -229,6 +233,12 @@ def run_http():
             out["requests"].append(request(port, jar, "POST", form[0], form[1]))
         elif cfg["posts"]:
             out["requests"].append(request(port, jar, "POST", cfg["posts"][0], {}))
+        out["routes"] = [
+            request(port, jar, m, p, {} if m != "GET" else None) for m, p in cfg["routes"]
+        ]
+        for r in out["routes"]:
+            r.pop("body", None)
+            r.pop("html", None)
         for r in out["requests"]:
             r["body"] = r.get("body", "")[:600]
             r.pop("html", None)
@@ -263,6 +273,7 @@ class LaunchTarget:
     runs: tuple[str, ...] = ()
     needs: tuple[str, ...] = ()
     source: str = ""  # where the command came from, for the findings
+    interface: tuple[str, ...] = ()  # the spec's options/subcommands or routes
 
 
 # ---- the target: stack fields, else the run command, else the entry's files ----
@@ -436,9 +447,12 @@ def launch_target(
         cmd, need = _default_entry(language, files, python)
         needs = (need,) if need else ()
         source = f"the entrypoint's {need}" if need else ""
+    interface = stack.interface if stack is not None and not stack.profile else ()
     if kind == "http":
         probes, posts = _probes(lines)
-        return LaunchTarget(kind, cmd, required, probes, posts, needs=needs, source=source)
+        return LaunchTarget(
+            kind, cmd, required, probes, posts, needs=needs, source=source, interface=interface
+        )
     # A security_abuse scenario's command is meant to be refused: no launch verdict.
     runs = _cli_runs(
         cmd,
@@ -449,14 +463,105 @@ def launch_target(
             for s in c.when
         ),
     )
+    # A subcommand's own options show only in its own --help.
+    helps = (f"{cmd} --help", *_sub_helps(cmd, interface))
     return LaunchTarget(
         kind,
         cmd,
         required,
-        runs=tuple(dict.fromkeys((*runs, f"{cmd} --help"))) if cmd else (),
+        runs=tuple(dict.fromkeys((*runs, *helps))) if cmd else (),
         needs=needs,
         source=source,
+        interface=interface,
     )
+
+
+# ---- the declared interface: the spec's options/subcommands or routes -------------
+
+_ROUTE = re.compile(r"(GET|POST|PUT|PATCH|DELETE)\s+(/\S*)", re.I)
+_OPTION = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
+_SUBCOMMAND = re.compile(r"[A-Za-z][\w-]*")
+# Options every CLI framework adds on its own: never an unrequested extra.
+_FRAMEWORK_OPTIONS = frozenset(
+    {"h", "help", "version", "V", "install-completion", "show-completion"}
+)
+_HELP_TAIL = 4000  # the driver's TAIL: a help this long may have lost its head
+_MAX_ROUTES = 12
+_MAX_SUB_HELPS = 4
+
+
+def _routes(interface: Iterable[str]) -> tuple[tuple[str, str], ...]:
+    """The declared routes the gate can request as written (no ``{id}`` / ``<id>`` /
+    ``:id`` placeholder to fill)."""
+    out: list[tuple[str, str]] = []
+    for entry in interface:
+        m = _ROUTE.fullmatch(" ".join(entry.split()))
+        if m and not re.search(r"[<{]|/:", m[2]):
+            out.append((m[1].upper(), m[2]))
+    return tuple(dict.fromkeys(out))[:_MAX_ROUTES]
+
+
+def _cli_interface(interface: Iterable[str]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(options, subcommands) the declared cli entries name: every ``-x``/``--name``
+    token, and an entry's leading bare word (``roll`` in ``roll --seed``)."""
+    opts: list[str] = []
+    subs: list[str] = []
+    for entry in interface:
+        words = entry.split()
+        if not words or _ROUTE.fullmatch(" ".join(words)):
+            continue
+        opts += _OPTION.findall(entry)
+        if _SUBCOMMAND.fullmatch(words[0]):
+            subs.append(words[0])
+    return tuple(dict.fromkeys(opts)), tuple(dict.fromkeys(subs))
+
+
+def _sub_helps(cmd: str, interface: Iterable[str]) -> tuple[str, ...]:
+    subs = _cli_interface(interface)[1][:_MAX_SUB_HELPS]
+    return tuple(f"{cmd} {shlex.quote(s)} --help" for s in subs) if cmd else ()
+
+
+def _cli_interface_findings(r: dict[str, Any], cmd: str) -> tuple[list[str], list[str]]:
+    """(failures, advisories): a declared option/subcommand the CLI's --help lacks
+    FAILs; an option it lists that the spec never asked for is only advisory."""
+    interface = r.get("interface") or ()
+    opts, subs = _cli_interface(interface)
+    ran = {run.get("cmd"): run for run in r.get("runs") or () if run.get("rc") is not None}
+    top = ran.get(f"{cmd} --help")
+    if not (opts or subs) or top is None:
+        return [], []
+    helps = [str(top.get("output", ""))] + [
+        str(ran[c].get("output", "")) for c in _sub_helps(cmd, interface) if c in ran
+    ]
+    listed: dict[str, str] = {}
+    for text in helps:
+        for o in _OPTION.findall(text):
+            listed.setdefault(o.lstrip("-"), o)
+    fails: list[str] = []
+    if all(len(text) < _HELP_TAIL for text in helps):
+        fails += [
+            f"launch: spec option {o} is missing from the CLI: `{cmd} --help` does not "
+            "list it — implement the option the spec declares, spelled as the spec spells it"
+            for o in opts
+            if o.lstrip("-") not in listed
+        ]
+        fails += [
+            f"launch: spec subcommand `{s}` is missing from the CLI: `{cmd} --help` does "
+            "not list it — implement the subcommand the spec declares"
+            for s in subs
+            if not re.search(rf"(?<![\w-]){re.escape(s)}(?![\w-])", helps[0])
+        ]
+    declared = {o.lstrip("-") for o in opts}
+    extras = [o for k, o in listed.items() if k not in declared and k not in _FRAMEWORK_OPTIONS]
+    advisories = (
+        [
+            f"launch (advisory): `{cmd} --help` lists {', '.join(extras)}, which the spec's "
+            "interface does not declare — drop an option the request never asked for"
+        ]
+        if extras
+        else []
+    )
+    return fails, advisories
 
 
 # ---- the gate ---------------------------------------------------------------
@@ -524,6 +629,12 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
                 f"launch: {what} answered {q['status']} under the real server: a server "
                 f"error the tests did not catch. Response: {str(q.get('body', ''))[:400]}"
             )
+    for q in r.get("routes") or ():
+        if q.get("status") in (404, 405, 501):
+            out.append(
+                f"launch: spec route {q.get('method')} {q.get('path')} is missing from the "
+                f"running app (it answered {q['status']}) — serve the route the spec declares"
+            )
     if r.get("alive") is False:
         out.append(f"launch: the app died while serving requests (code {r.get('rc')})")
     if out:
@@ -531,7 +642,7 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
     return out
 
 
-def _cli_findings(r: dict[str, Any], cmd: str) -> list[str]:
+def _cli_findings(r: dict[str, Any], launch: str) -> list[str]:
     out: list[str] = []
     for run in r.get("runs") or ():
         cmd, rc, text = run.get("cmd"), run.get("rc"), str(run.get("output", ""))
@@ -549,7 +660,7 @@ def _cli_findings(r: dict[str, Any], cmd: str) -> list[str]:
                 f"launch: `{cmd}` cannot start (exit {rc}): the entry point or an import "
                 f"is broken — the user's launch command must work as written:\n{_tail(text)}"
             )
-    return out
+    return out + _cli_interface_findings(r, launch)[0]
 
 
 class LaunchGate:
@@ -576,8 +687,14 @@ class LaunchGate:
         self._seal_key = seal_key
         self._cfg = {"boot_s": boot_s, "request_s": request_s, "cli_s": cli_s}
         runs = len(target.runs) if target.kind == "cli" else 1
+        self._routes = _routes(target.interface) if target.kind == "http" else ()
         # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
-        self._timeout_s = boot_s + request_s * (len(target.probes) + 2) + (cli_s + 10) * runs + 30
+        self._timeout_s = (
+            boot_s
+            + request_s * (len(target.probes) + len(self._routes) + 2)
+            + (cli_s + 10) * runs
+            + 30
+        )
         self.mutant_rotation_id = 0
         self.scanner_rule_version = "launch-v1"
 
@@ -610,6 +727,7 @@ class LaunchGate:
             "probes": [list(p) for p in t.probes],
             "posts": list(t.posts),
             "runs": list(t.runs),
+            "routes": [list(p) for p in self._routes],
             "launch_id": (launch_id := secrets.token_hex(16)),
         }
         try:
@@ -643,7 +761,7 @@ class LaunchGate:
                 findings=(f"launch driver exited {rc} with no result: {_tail(err or out)}",),
                 seal_key=self._seal_key,
             )
-        result["required"] = t.required
+        result.update(required=t.required, interface=list(t.interface))
         findings = (
             _http_findings(result, t.cmd) if t.kind == "http" else _cli_findings(result, t.cmd)
         )
@@ -652,6 +770,8 @@ class LaunchGate:
             findings.insert(
                 0, f"launch FAILED: Foundry started `{t.cmd}`{source} as a {t.kind} app"
             )
+        if t.kind == "cli":
+            findings += _cli_interface_findings(result, t.cmd)[1]
         result.update(cmd=t.cmd, pinned=True)
         return observe(
             self.name,

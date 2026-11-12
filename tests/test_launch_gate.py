@@ -333,3 +333,71 @@ def test_a_daemonized_server_does_not_outlive_the_gate(tmp_path: Path) -> None:
         time.sleep(0.1)
     os.kill(pid, 9)
     pytest.fail("the daemonized server outlived the launch gate")
+
+
+# ---- the declared interface ------------------------------------------------------
+
+_DICE = """\
+import argparse
+p = argparse.ArgumentParser(prog="dice")
+sub = p.add_subparsers(dest="cmd")
+roll = sub.add_parser("roll")
+roll.add_argument("spec")
+for opt in OPTS:
+    roll.add_argument(opt)
+p.parse_args()
+"""
+
+
+def _dice(tmp_path: Path, opts: tuple[str, ...], interface: tuple[str, ...]) -> LaunchGate:
+    (tmp_path / "dice.py").write_text(f"OPTS = {opts!r}\n" + _DICE)
+    stack = StackDecision(
+        language="python", kind="cli", launch=f"{_PY} dice.py", interface=interface
+    )
+    return LaunchGate(launch_target(stack, None, python=_PY))
+
+
+def test_a_spec_option_missing_from_the_cli_fails(tmp_path: Path) -> None:
+    gate = _dice(tmp_path, ("-n",), ("roll", "roll --seed"))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    assert obs.findings[0].startswith("launch FAILED")
+    assert any("spec option --seed is missing from the CLI" in f for f in obs.findings)
+
+
+def test_an_extra_cli_option_is_advisory_and_passes(tmp_path: Path) -> None:
+    exact = _dice(tmp_path, ("--seed",), ("roll --seed",))
+    obs = exact.execute(tmp_path)
+    assert exact.decide(obs) is GateStatus.PASS and obs.findings == (), obs.findings
+    extra = _dice(tmp_path, ("--seed", "-n"), ("roll --seed",))
+    obs = extra.execute(tmp_path)
+    assert extra.decide(obs) is GateStatus.PASS, obs.findings
+    assert any("advisory" in f and "-n" in f for f in obs.findings), obs.findings
+    assert not any(f.startswith("launch FAILED") for f in obs.findings)
+
+
+def test_a_spec_subcommand_missing_from_the_cli_fails(tmp_path: Path) -> None:
+    gate = _dice(tmp_path, ("--seed",), ("stats",))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any("spec subcommand `stats` is missing" in f for f in obs.findings)
+
+
+def test_a_spec_route_the_server_lacks_fails(tmp_path: Path) -> None:
+    good = _SHARED_SQLITE.replace(
+        'sqlite3.connect(":memory:")', 'sqlite3.connect(":memory:", check_same_thread=False)'
+    )
+    ok = _http(tmp_path, good, interface=("GET /notes", "DELETE /notes/{id}"))
+    assert ok.decide(ok.execute(tmp_path)) is GateStatus.PASS
+    # The stdlib handler has no do_POST: it answers 501 Unsupported method.
+    bad = _http(tmp_path, good, interface=("GET /notes", "POST /notes"))
+    obs = bad.execute(tmp_path)
+    assert bad.decide(obs) is GateStatus.FAIL, obs.findings
+    assert any("spec route POST /notes is missing" in f for f in obs.findings)
+
+
+def test_nothing_declared_leaves_the_launch_unchanged(tmp_path: Path) -> None:
+    gate = _dice(tmp_path, ("-n",), ())
+    assert gate.target.runs == (f"{_PY} dice.py --help",)
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.PASS and obs.findings == ()

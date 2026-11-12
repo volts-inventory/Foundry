@@ -258,6 +258,12 @@ SOP = (
     "$PORT and host from $HOST. The gates start launch themselves and drive it, so "
     "the app MUST have that real entry point (a __main__ / main / server start), "
     "not only functions the tests call. "
+    "interface lists the external interface the request names, one entry each, "
+    "exactly as the spec writes it: a cli app's options and subcommands (`--seed`, "
+    "`-n`, `roll`, `roll --seed` for a subcommand's option), an http app's routes "
+    "(`GET /notes`, `POST /notes`); the gates check the running app has each one. "
+    "List only what the request asks for (never invent options or routes) and "
+    "leave it empty for a library or when the request names none. "
     "contracts_file is the source file the contract data types and errors are "
     "written to (e.g. src/contracts.ts, contracts.py); harness_files are the package manifest and "
     "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
@@ -407,6 +413,7 @@ _STACK_SCHEMA: dict[str, Any] = {
         "run": {"type": "string"},
         "kind": {"type": "string", "enum": ["cli", "http", ""]},
         "launch": {"type": "string"},
+        "interface": _STR_ARRAY,
         "notes": {"type": "string"},
         "contracts_file": {"type": "string"},
         "harness_files": _STR_ARRAY,
@@ -423,6 +430,7 @@ _STACK_SCHEMA: dict[str, Any] = {
         "run",
         "kind",
         "launch",
+        "interface",
         "contracts_file",
         "harness_files",
     ],

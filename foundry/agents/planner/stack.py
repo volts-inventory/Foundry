@@ -6,7 +6,7 @@ from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.planner.checks import _bdd_quoting, _declaration_only
-from foundry.agents.planner.readers import _section, _str, _strs, _uniq
+from foundry.agents.planner.readers import _section, _steps, _str, _strs, _uniq
 from foundry.agents.planner.schema import (
     _DEFAULT_CONTRACTS_FILE,
     _DEFAULT_HARNESS_FILES,
@@ -61,6 +61,7 @@ def _stack_decision(
                 "notes",
             )
         },
+        interface=_uniq(_steps(raw.get("interface"))),
     )
     if language != "python" and not stack.test and not stack.bdd:
         # The pytest harness cannot test another language: without a command of its

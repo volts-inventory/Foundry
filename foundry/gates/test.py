@@ -68,6 +68,8 @@ DISCRIMINATOR_KEY = "discriminator"
 BDD_KEY = "bdd"
 # Exit code of the planned Cucumber ``bdd`` command (absent on the pytest-bdd path).
 BDD_EXIT_KEY = "bdd_exit_code"
+# {property id: "covered" | "missing"} for every planned contract property.
+PROPERTIES_KEY = "properties"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -1799,7 +1801,13 @@ class TestGate:
         scope: frozenset[str] | None = None,
         pyenv: PythonBuildEnv | None = None,
         step_lint: str = "",
+        properties: Mapping[str, str] | None = None,
+        language: str = "python",
     ) -> None:
+        # Planned contract properties (id -> "<contract>: <statement>"): the full gate
+        # FAILs one no property-based test of ``language``'s library names.
+        self.properties = dict(properties or {})
+        self.language = language
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
         # honored verbatim (tests inject one). With a planned Cucumber ``bdd_cmd``
@@ -1838,6 +1846,11 @@ class TestGate:
             stack_harness=stack_harness,
             profile=profile_name,
             scope=sorted(scope) if scope is not None else None,
+            **(
+                {"properties": sorted(self.properties.items()), "language": language}
+                if self.properties
+                else {}
+            ),
         )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
@@ -2113,6 +2126,15 @@ class TestGate:
                     "normally (a test exited the process or tampered with the run)",
                     *findings,
                 )
+        if self.properties and self.scope is None:
+            from .properties import property_findings
+
+            covered, notes = property_findings(
+                workdir, self.properties, self.language, f"{out}\n{err}" if rc != 0 else ""
+            )
+            if covered:
+                structured[PROPERTIES_KEY] = covered
+            findings = (*notes, *findings)
         return observe(
             self.name,
             exit_codes=(rc,),
@@ -2154,7 +2176,11 @@ class TestGate:
         if rc == _NO_TESTS_COLLECTED:
             # Adequacy floor: an empty suite cannot clear the gate — nor can one
             # that leaves acceptance scenarios unexecuted.
-            if self.min_passed > 0 or obs.structured.get(BDD_KEY):
+            if (
+                self.min_passed > 0
+                or obs.structured.get(BDD_KEY)
+                or obs.structured.get(PROPERTIES_KEY)
+            ):
                 return GateStatus.FAIL
             return GateStatus.PASS
         if rc != 0:
@@ -2175,5 +2201,8 @@ class TestGate:
             return GateStatus.FAIL
         scenarios = obs.structured.get(BDD_KEY)
         if scenarios is not None and any(v != "passed" for v in scenarios.values()):
+            return GateStatus.FAIL
+        # Every planned contract property is proven by a property-based test.
+        if any(v != "covered" for v in (obs.structured.get(PROPERTIES_KEY) or {}).values()):
             return GateStatus.FAIL
         return GateStatus.PASS

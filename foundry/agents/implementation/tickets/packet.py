@@ -25,7 +25,7 @@ from foundry.agents.implementation.tickets.rules import (
 )
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.gates.bdd_scaffold import step_module, step_scaffold
-from foundry.gates.profiles import pytest_bdd_binds
+from foundry.gates.profiles import property_testing, pytest_bdd_binds
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
@@ -309,6 +309,53 @@ PRODUCTION_WIRING_RULE = (
 )
 
 
+def ticket_properties(
+    ticket: Ticket, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> tuple[str, ...]:
+    """ "<contract>: PRn: <statement>" for each contract property ``ticket`` tests:
+    those of the contracts it implements when it writes a test file, else (a test
+    ticket) those of the tickets it depends on that write none."""
+
+    def props(t: Ticket) -> list[str]:
+        return [
+            f"{name}: {p}"
+            for name in t.implements
+            if (c := contracts.get(name)) is not None
+            for p in c.properties
+        ]
+
+    if any(_is_test_path(f) for f in ticket.files):
+        out = props(ticket)
+        if ticket.specialty is Specialty.TEST:
+            by_id = {t.id: t for t in tickets}
+            for d in ticket.depends_on:
+                dep = by_id.get(d)
+                if dep is not None and not any(_is_test_path(f) for f in dep.files):
+                    out += props(dep)
+        return tuple(dict.fromkeys(out))
+    return ()
+
+
+def property_rule(properties: Sequence[str], stack: StackDecision | None) -> str | None:
+    """The rule a ticket implementing contracts with ``properties`` follows: one
+    property-based test per property, in the stack language's library (None when
+    there are none, or the language has no library)."""
+    lib = property_testing(stack.language if stack is not None else "python")
+    if not properties or lib is None:
+        return None
+    return (
+        f"PROPERTY TESTS (checked: the Test gate FAILs a property no test names): write "
+        f"ONE property-based test per contract property below with {lib.library}: "
+        f"{lib.usage}. Put the property id (PR1, ...) in the test's name. Each test "
+        "generates its inputs across the whole domain the property states (every "
+        "feature of the input and their combinations, never a fixed example list) and "
+        "calls the real function you implement, never a copy or a mock of it"
+        + (f"; declare {lib.dependency} if no ticket has yet" if lib.dependency else "")
+        + ". A failing property is a bug in the code: fix the code, never weaken the "
+        "property. Properties: " + "; ".join(properties)
+    )
+
+
 def _is_test_path(path: str) -> bool:
     parts = path.split("/")
     name = parts[-1]
@@ -332,6 +379,7 @@ def _ticket_packet(
     stack: StackDecision | None = None,
     contract_files: Sequence[str] = (),
     scenarios: Mapping[str, Sequence[str]] | None = None,
+    properties: Sequence[str] = (),
 ) -> TaskPacket:
     scenarios = scenarios or {}
     rules = [
@@ -351,6 +399,8 @@ def _ticket_packet(
         rules.append(ENTRYPOINT_RULE)
     if ticket.specialty is Specialty.TEST or any(_is_test_path(f) for f in ticket.files):
         rules.append(PRODUCTION_WIRING_RULE)
+    if rule := property_rule(properties, stack):
+        rules.append(rule)
     return TaskPacket(
         task={
             "id": task.id,

@@ -158,7 +158,11 @@ _TICKET_RULES = (
     'duplicate") gets one scenario per branch, each citing it in covers[]. HARD '
     "INPUTS: cover the inputs that break real apps, not only the happy path: invalid, "
     "blank and malformed values, wrong types, non-ASCII text, size limits and the "
-    "boundaries either side of them. ROLES (checked): when the request has users "
+    "boundaries either side of them. FEATURE PAIRS: when the spec lists independent "
+    "features of one input (operators, flags, options, input kinds), add at least one "
+    "scenario combining each pair the spec allows together (subtraction with dice "
+    "AND a constant, a filter with a sort): a scenario per feature alone passes while "
+    "their combination is broken. ROLES (checked): when the request has users "
     "with different roles (admin, staff, owner, ...), exactly ONE ticket owns the "
     "roles, the admin account and the seed data, and says so in its description; "
     "every other ticket consumes them. Scenarios never assert that installing "
@@ -227,7 +231,20 @@ SOP = (
     "list_books, get_by_id, find_all (checked for Python; a violation FAILS the Spec "
     "gate). A class contract the entrypoint ticket implements that composes other "
     "tickets' class contracts (the app / composition root) takes them in its "
-    "__init__ (checked; a violation FAILS the Spec gate). Emit cross-cutting "
+    "__init__ (checked; a violation FAILS the Spec gate). PROPERTIES: give each "
+    "function or class contract with a non-trivial input domain (parsing, "
+    "arithmetic, formatting, state transitions) 1-4 properties[]: invariants that "
+    "hold for EVERY valid generated input, never a worked example, each with an id "
+    "PR1, PR2, ... unique across the plan. E.g. 'PR1: for any valid notation the "
+    "total lies within [minimum possible, maximum possible]', 'the same seed gives "
+    "the same result', a round-trip (parse(format(x)) == x), idempotence (f(f(x)) "
+    "== f(x)), 'any input outside the grammar raises the documented error'. State "
+    "each over the input domain the spec allows, including combinations of its "
+    "features (an expression mixing every operator). Leave properties[] empty for "
+    "data types, trivial accessors and http/cli/event seams. The implementing "
+    "ticket, or its paired test ticket, writes one property-based test per "
+    "property (checked by the Test gate), so it lists a test file in files[]. "
+    "Emit cross-cutting "
     "concerns as pinned constraints, which are injected verbatim into every build "
     "task.\n"
     "STACK: choose the stack yourself from the request: stack.language MUST be one "
@@ -393,6 +410,15 @@ _INTERFACE_SCHEMA: dict[str, Any] = {
         "errors": _STR_ARRAY,
         "description": {"type": "string"},
         "consumers": _STR_ARRAY,
+        "properties": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["id", "text"],
+                "additionalProperties": False,
+            },
+        },
     },
     "required": ["name", "kind", "signature", "inputs", "outputs", "errors", "description"],
     "additionalProperties": False,

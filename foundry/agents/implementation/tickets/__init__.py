@@ -109,6 +109,7 @@ from foundry.agents.implementation.tickets.packet import (
     _ticket_packet,
     _ticket_scenarios,
     bdd_scaffold_spans,
+    ticket_properties,
     ticket_signature_map,
 )
 from foundry.agents.implementation.tickets.restart import (
@@ -720,6 +721,7 @@ def make_engineering_node(
                     stack=state.get("stack"),
                     contract_files=contract_files,
                     scenarios=owned,
+                    properties=ticket_properties(ticket, tickets, contracts),
                 )
                 if base is not None:
                     spec = _ticket_check(

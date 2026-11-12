@@ -195,8 +195,8 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
         "finding": "x",
         "failing_check": "",
         "command": "app",
-        "expected": "1",
-        "actual": "2",
+        "correct_result": "1",
+        "observed_result": "2",
     }
     final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", [finding])]))
     [rc] = final["gates"]
@@ -228,8 +228,8 @@ _CITES_S001 = {
     "finding": "total-sum check is fragile",
     "failing_check": "S001",
     "command": "pytest -k S001",
-    "expected": "",
-    "actual": "",
+    "correct_result": "",
+    "observed_result": "",
 }
 
 
@@ -346,8 +346,8 @@ _UNROUNDED = {
     "finding": "tip is not rounded to cents",
     "failing_check": "",
     "command": "python -c 'print(tip(0.1))'",
-    "expected": "0.02",
-    "actual": "0.015",
+    "correct_result": "0.02",
+    "observed_result": "0.015",
 }
 
 
@@ -565,7 +565,7 @@ def test_advisory_findings_are_kept_on_a_review_findings_record(records: Any) ->
     from foundry.schemas.quality import ReviewFindings
 
     cas = ArtifactStore()
-    advisory = {**_UNROUNDED, "finding": "names are terse", "actual": "0.02"}
+    advisory = {**_UNROUNDED, "finding": "names are terse", "observed_result": "0.02"}
     transport = MockTransport(verdicts=[verdict_json("request-changes", [_UNROUNDED, advisory])])
     node = make_reviewer_node(
         _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob

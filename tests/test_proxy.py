@@ -199,8 +199,8 @@ def _finding(text: str, **evidence: str) -> dict[str, str]:
         "finding": text,
         "failing_check": "",
         "command": "",
-        "expected": "",
-        "actual": "",
+        "correct_result": "",
+        "observed_result": "",
         **evidence,
     }
 
@@ -249,8 +249,8 @@ def test_a_finding_citing_a_passing_scenario_is_advisory_and_passes(verifier, in
                 "total-sum check is fragile",
                 failing_check="S001",
                 command="pytest -k S001",
-                expected="",
-                actual="",
+                correct_result="",
+                observed_result="",
             )
         ],
         _FAILING,
@@ -268,7 +268,9 @@ def test_with_no_failing_checks_a_citation_is_advisory_but_a_reproduction_blocks
 ):
     cites = _finding("fails", failing_check="tests/test_a.py::test_x")
     assert _judge_findings([cites]).status == GateStatus.PASS
-    repro = _finding("wrong total", command="dice 2d6 --seed 1", expected="7", actual="12")
+    repro = _finding(
+        "wrong total", command="dice 2d6 --seed 1", correct_result="7", observed_result="12"
+    )
     g = _judge_findings([cites, repro])
     assert g.status == GateStatus.FAIL
     assert g.findings[0].startswith(ADVISORY_PREFIX)
@@ -281,7 +283,7 @@ def test_mixed_findings_block_on_the_backed_one_and_keep_the_rest_advisory(verif
             _finding("doesn't assert exit code 1", failing_check="S002"),
             _finding("mocking Popen is pointless"),
             _finding("add() is broken", failing_check="test_x"),
-            _finding("same output", command="dice 1d6", expected="4 ", actual=" 4"),
+            _finding("same output", command="dice 1d6", correct_result="4 ", observed_result=" 4"),
         ],
         _FAILING,
     )
@@ -335,7 +337,10 @@ def test_the_evidence_label_names_the_id_that_matched():
 
 def test_a_backed_finding_blocks_even_when_the_model_approves(verifier, installed):
     repro = _finding(
-        "dead module", command="grep -r 'from parser' .", expected="no matches", actual="cli.py"
+        "dead module",
+        command="grep -r 'from parser' .",
+        correct_result="no matches",
+        observed_result="cli.py",
     )
     g = _judge_findings([repro], status="approve")
     assert g.status == GateStatus.FAIL
@@ -348,8 +353,8 @@ def test_a_reproduction_with_differing_results_blocks(verifier, installed):
             _finding(
                 "add() drops the title",
                 command="python -c 'import app; app.add(\"a\")'",
-                expected="1",
-                actual="None",
+                correct_result="1",
+                observed_result="None",
             ),
             _finding("naming is unclear"),
         ]
@@ -359,13 +364,69 @@ def test_a_reproduction_with_differing_results_blocks(verifier, installed):
     assert g.findings[1] == ADVISORY_PREFIX + "naming is unclear"  # kept, not dropped
 
 
+_CRASH_500 = "HTTP 500: sqlite3.ProgrammingError: SQLite objects created in a thread"
+
+
+@pytest.mark.parametrize(
+    ("correct", "observed", "blocks"),
+    [
+        ("", _CRASH_500, True),  # no correct result given: the crash alone backs it
+        ("the note is saved", _CRASH_500, True),
+        (_CRASH_500, _CRASH_500, False),  # a crash the reviewer calls correct
+        ("", "Traceback (most recent call last): ...", True),
+        ("201 with the note", "500 Internal Server Error", True),
+        ("exit 0", "exited with code 139", True),
+        ("", "panic: assignment to entry in nil map", True),
+        ("400 with an error message", "400 with an error message", False),
+        ("exits 2 with a ValueError message", "exits 2 with a ValueError message", False),
+        ("ok", "ok", False),
+        ("listed 500 notes", "listed 500 notes", False),
+    ],
+)
+def test_an_observed_crash_backs_a_finding_unless_the_correct_result_is_one(
+    verifier, installed, correct, observed, blocks
+):
+    finding = _finding(
+        "notes 500 under threads",
+        command="curl -s -X POST localhost:8000/notes",
+        correct_result=correct,
+        observed_result=observed,
+    )
+    g = _judge_findings([finding], status="approve")
+    assert (g.status == GateStatus.FAIL) is blocks
+    assert verifier.verify_judgment_binding(g)
+
+
+def test_a_finding_with_the_legacy_expected_actual_fields_still_counts(verifier, installed):
+    legacy = {"finding": "x", "failing_check": "", "command": "app", "expected": "1", "actual": "2"}
+    g = _judge_findings([legacy])
+    assert g.status == GateStatus.FAIL
+    assert g.findings == ("x [evidence: `app` expected '1', got '2']",)
+
+
+def test_the_verdict_schema_names_the_correct_and_observed_results():
+    from foundry.proxy.model_provider_proxy import VERDICT_SCHEMA
+
+    item = VERDICT_SCHEMA["properties"]["findings"]["items"]
+    assert {"correct_result", "observed_result"} <= set(item["required"])
+    assert not {"expected", "actual"} & set(item["properties"])
+
+
 @pytest.mark.parametrize(
     "findings",
     [
         [_finding("this looks wrong")],
-        [_finding("off by one", command="pytest", expected="pass", actual="pass")],
-        [_finding("needs a repro", command="pytest", expected="pass")],
-        [_finding("vague", failing_check="N/A", command="none", expected="1", actual="2")],
+        [_finding("off by one", command="pytest", correct_result="pass", observed_result="pass")],
+        [_finding("needs a repro", command="pytest", correct_result="pass")],
+        [
+            _finding(
+                "vague",
+                failing_check="N/A",
+                command="none",
+                correct_result="1",
+                observed_result="2",
+            )
+        ],
         ["missing tests"],  # an ungrammared plain-string finding cites nothing
         [],
     ],

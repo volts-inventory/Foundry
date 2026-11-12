@@ -1058,9 +1058,7 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     from tests.test_planner import _epic_of, _epic_runtime, _epic_scripts, _failed, _match
 
     plan, replies = multi_epic_plan()
-    plan["interfaces"] = [
-        {**i, "kind": "type", "signature": i["spec"]} for i in plan["interfaces"]
-    ]
+    plan["interfaces"] = [{**i, "kind": "type", "signature": i["spec"]} for i in plan["interfaces"]]
     plan["stack"] = {
         **PYTHON_STACK,
         "contracts_file": "notes/contracts.py",

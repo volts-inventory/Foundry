@@ -179,7 +179,7 @@ def test_demo_pm_directive_preserves_the_gate_enforced_floor() -> None:
     assert "oracle_hint" in directive
     assert "AT LEAST ONE security/abuse criterion" in directive
     assert "EXACTLY ONE" not in directive
-    assert "manifest" in directive
+    assert "manifest" not in directive  # no always-on manifest scenario
 
 
 def test_demo_architect_directive_caps_fan_out_but_never_to_zero() -> None:

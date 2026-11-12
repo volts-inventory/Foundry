@@ -300,6 +300,7 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
         "PC-001",
         "PC-002",
         "PC-python-sqlite-memory",
+        "PC-python-app-safety",
     }
     assert "gates" not in writes  # agents triage, never bless (L5)
 
@@ -938,6 +939,7 @@ def test_replan_retires_constraints_it_no_longer_emits() -> None:
         "PC-001",
         "OP-1",
         "PC-python-sqlite-memory",
+        "PC-python-app-safety",
     }
 
 

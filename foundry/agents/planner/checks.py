@@ -6,11 +6,9 @@ import builtins
 import re
 import textwrap
 from collections.abc import Collection, Sequence
-from pathlib import PurePosixPath
 from typing import Any
 
 from foundry.agents.plan_contracts import (
-    SOURCE_SUFFIXES,
     CompileResult,
     check_contracts,
     top_symbols,
@@ -452,10 +450,11 @@ def _role_findings(tickets: Sequence[Ticket], brief: IntentBrief | None) -> tupl
 def _entrypoint_findings(
     tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
 ) -> tuple[str, ...]:
-    """An entrypoint ticket that plans to define what a dependency owns: the same
-    source file in its files[], or a contract signature declaring a function or
-    class a dependency's contract declares. It must import and wire those, never
-    re-implement them (a second copy of the routes ships as dead code)."""
+    """An entrypoint ticket whose contract signatures declare a function or class a
+    dependency's contract declares: it must import and wire those, never
+    re-implement them (a second copy of the routes ships as dead code). A shared
+    file is no finding: overlapping scopes run in separate waves (a split ticket's
+    children share their parent's files); the post-build check reads the code."""
     by_name = {i.name: i for i in interfaces}
     by_id = {t.id: t for t in tickets}
     deps = {t.id: t.depends_on for t in tickets}
@@ -487,18 +486,12 @@ def _entrypoint_findings(
             d = by_id.get(did)
             if d is None:
                 continue
-            shared = sorted(
-                f
-                for f in set(e.files) & set(d.files)
-                if f.endswith(SOURCE_SUFFIXES) and PurePosixPath(f).name != "__init__.py"
-            )
-            twice = sorted(mine & declared(d))
-            if shared or twice:
+            if twice := sorted(mine & declared(d)):
                 out.append(
                     f"Entrypoint ticket {e.id} redefines what ticket {did} owns ("
-                    + ", ".join([*shared, *twice])
+                    + ", ".join(twice)
                     + f"): import and wire {did}'s modules instead of re-implementing "
-                    "them, and drop them from the entrypoint's files and contracts."
+                    "them, and drop them from the entrypoint's contracts."
                 )
     return tuple(out)
 

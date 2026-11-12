@@ -83,4 +83,4 @@ def test_capabilities_route_the_conditionals(
     if not caps:
         ids = {c.id for c in final["pinned_constraints"]}
         # Plus the planner's own stack-footgun constraints (the payload names sqlite).
-        assert ids - {"PC-001", "PC-002"} == {"PC-python-sqlite-memory"}
+        assert ids - {"PC-001", "PC-002"} == {"PC-python-sqlite-memory", "PC-python-app-safety"}

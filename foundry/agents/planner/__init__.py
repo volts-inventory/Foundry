@@ -191,6 +191,7 @@ from foundry.agents.planner.schema import (
 from foundry.agents.planner.sizing import size_text, ticket_ceilings
 from foundry.agents.planner.split import ask_split, split_items, split_problem
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
+from foundry.gates.app_checks import app_check_constraints
 from foundry.proxy.model_provider_proxy import (
     OutputLimitReached,
     ProxyUnavailable,
@@ -975,6 +976,11 @@ def make_planner_node(
             [
                 *_objs(payload.get("pinned_constraints")),
                 *_stack_constraints(draft.frame.stack, payload),
+                *(
+                    app_check_constraints(draft.frame.stack.language, NODE_ID)
+                    if draft.frame.stack is not None
+                    else ()
+                ),
             ],
             constraints_seq,
         )

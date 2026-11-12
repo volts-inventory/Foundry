@@ -79,8 +79,8 @@ _SQLITE_THREADS = _Rule(
     "global singleton) without check_same_thread in a web app: a threaded server "
     "uses it from other request threads and every request after the first 500s; "
     "open the connection per request inside a function (e.g. Flask's g in "
-    "get_db()), or pass check_same_thread=False and guard the shared connection "
-    "with a lock",
+    "get_db()) and close it at request teardown; check_same_thread=False on a "
+    "shared connection still races under concurrent requests",
 )
 _MEMORY_DB = _Rule(
     "memory-db",

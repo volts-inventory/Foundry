@@ -322,6 +322,7 @@ def run_check(
         _wave_test_gate,
         gate_profile,
         launch_gate,
+        owned_paths,
         planned_paths,
         wave_stack,
     )
@@ -348,7 +349,14 @@ def run_check(
         )
         with _build_env(profile, work, base.rt) as pyenv:
             gates: list[GateImpl] = [
-                _build_gate(profile, None, pyenv, planned=planned, timeout_s=timeout)
+                _build_gate(
+                    profile,
+                    None,
+                    pyenv,
+                    planned=planned,
+                    timeout_s=timeout,
+                    owned=owned_paths(base.state, base._resolve),
+                )
             ]
             if spec.scope:
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)

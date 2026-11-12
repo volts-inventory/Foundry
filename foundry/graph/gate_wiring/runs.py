@@ -21,6 +21,7 @@ from foundry.graph.gate_wiring.materialize import (
     _current_criteria,
     _of_kind,
     _toolchain_digest,
+    contract_paths,
     materialize_workdir,
     planned_files,
 )
@@ -196,11 +197,13 @@ def _build_gate(
     pyenv: PythonBuildEnv | None = None,
     planned: Iterable[str] = (),
     timeout_s: float = _GATE_TIMEOUT_S,
+    owned: frozenset[str] | None = None,
 ) -> GateImpl:
     """``planned``: the ticket files a wave check's tree may not hold yet, whose
     modules the build's import check counts as the project's own. No ``runner``:
     an unsealed gate for an unattested run (an agent's in-session check).
-    ``timeout_s`` bounds the build step; the install keeps the gate's own bound."""
+    ``timeout_s`` bounds the build step; the install keeps the gate's own bound.
+    ``owned``: :func:`owned_paths`, the files a code file must be one of."""
     first_party = frozenset(PurePosixPath(p).name.split(".", 1)[0] for p in planned_paths(planned))
     seal_key = runner.seal_key if runner is not None else None
     if profile is None:
@@ -210,6 +213,7 @@ def _build_gate(
             python=True,
             first_party=first_party,
             app_checks="python",
+            owned=owned,
             timeout_s=timeout_s,
             install_timeout_s=_GATE_TIMEOUT_S,
         )
@@ -224,6 +228,7 @@ def _build_gate(
         python=profile.python,
         first_party=first_party if profile.python else frozenset(),
         app_checks=app_check_language(profile),
+        owned=owned,
         timeout_s=timeout_s,
         install_timeout_s=_GATE_TIMEOUT_S,
     )
@@ -329,7 +334,24 @@ def run_build_test_gates(
             profile=profile,
             pyenv=pyenv,
             launch=launch_gate(state, resolve, profile, runner.seal_key, pyenv),
+            owned=owned_paths(state, resolve),
         )
+
+
+def owned_paths(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str] | None:
+    """Every file the plan owns: the live tickets' files (the contracts ticket's
+    among them) and a change build's base tree. ``None`` = no file plan (no ticket
+    lists a file), so nothing to judge a stray file against."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.base_tree import base_files
+
+    owned = {f.removeprefix("./") for t in read_tickets(state, resolve) for f in t.files}
+    if not owned:
+        return None
+    owned.update(contract_paths(state, resolve))
+    if base := state.get("base_dir"):
+        owned.update(base_files(base))
+    return frozenset(owned)
 
 
 def _build_test_smoke(
@@ -345,6 +367,7 @@ def _build_test_smoke(
     profile: VerificationProfile | None,
     pyenv: PythonBuildEnv | None,
     launch: GateImpl,
+    owned: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
@@ -387,7 +410,7 @@ def _build_test_smoke(
         smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
     gates = _run_gates(
         [
-            (_build_gate(profile, runner, pyenv), _BUILD_NODE),
+            (_build_gate(profile, runner, pyenv, owned=owned), _BUILD_NODE),
             (test_gate, _TEST_NODE),
             (smoke, _SMOKE_NODE),
             (launch, _LAUNCH_NODE),
@@ -565,7 +588,12 @@ def run_build_gate(
     profile = gate_profile(state, profile)
     with _build_env(profile, workdir, rt) as pyenv:
         gates: list[tuple[GateImpl, str]] = [
-            (_build_gate(profile, runner, pyenv, planned=files), _BUILD_NODE)
+            (
+                _build_gate(
+                    profile, runner, pyenv, planned=files, owned=owned_paths(state, resolve)
+                ),
+                _BUILD_NODE,
+            )
         ]
         test = _wave_test_gate(profile, runner, scenarios, pyenv) if scenarios else None
         if test is not None:

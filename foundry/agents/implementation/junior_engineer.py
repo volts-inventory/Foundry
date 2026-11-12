@@ -659,6 +659,7 @@ def _build_packet(
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
     fix_files: tuple[str, ...] = (),
+    owned_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
     effort: Effort | None = None,
 ) -> TaskPacket:
@@ -683,6 +684,8 @@ def _build_packet(
         body["verify"] = dict(verify)
     if fix_files:
         body["fix_files"] = list(fix_files)
+    if owned_files:
+        body["owned_files"] = list(owned_files)
     if diagnosis:
         body["diagnosis"] = dict(diagnosis)
     return TaskPacket(
@@ -744,6 +747,7 @@ def _run_one_task(
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
     check: CheckSpec | None = None,
     fix_files: tuple[str, ...] = (),
+    owned_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
     effort: Effort | None = None,
 ) -> dict[str, Any]:
@@ -777,6 +781,7 @@ def _run_one_task(
             rules=rules,
             verify=verify,
             fix_files=fix_files,
+            owned_files=owned_files,
             diagnosis=diagnosis,
             effort=effort,
         )
@@ -905,6 +910,16 @@ _FENCE_RULE = (
     "tickets that own it. Change a file anywhere else only when this failure needs "
     "it, and say why (where your write action takes a `reason`, a write elsewhere "
     "without one is refused); the reason is recorded for review."
+)
+
+
+_OWNERSHIP_RULE = (
+    "Every source and test file belongs to a ticket (`owned_files`): edit those files "
+    "or a file a failure names, and never create a new module or test file — put new "
+    "code in the owning ticket's file (a new code file outside `owned_files` is "
+    "refused, and the build gate fails on one). A file the build reports as not owned "
+    "by any ticket is dead code: move anything the owned files need from it into the "
+    "owning ticket's file, then delete it."
 )
 
 
@@ -1170,10 +1185,12 @@ def make_fixer_node(
                 tree=overlay,
                 allowed=fix_files,
             )
+        owned_files = tuple(sorted({f for t in tickets for f in t.files} | set(contracts)))
         rules = (
             *_FIXER_RULES[:2],
             _binding_rule(_cluster_gates(state, resolve)[0], _failed_gates(state), contracts),
             *((_FENCE_RULE,) if fix_files else ()),
+            *((_OWNERSHIP_RULE,) if owned_files else ()),
         )
         persona = _FIXER_PERSONA
         if focus and pending_wave(state, resolve):
@@ -1230,6 +1247,7 @@ def make_fixer_node(
                 ),
                 check=_fix_check(base, state, resolve) if base is not None else None,
                 fix_files=fix_files,
+                owned_files=owned_files,
                 diagnosis=diagnosis.packet_field(fix_files) if diagnosis is not None else None,
                 effort=fix_effort(attempt),
             )

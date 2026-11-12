@@ -44,7 +44,7 @@ _STEPS = """from pytest_bdd import scenarios, then
 
 import app
 
-scenarios('features/T-001.feature', 'features/T-SPEC.feature')
+scenarios('../features/T-001.feature', '../features/T-SPEC.feature')
 
 
 @then('Given a user, When they add a todo, Then it appears.')
@@ -109,7 +109,7 @@ def test_resume_after_a_wave_check_halt_reruns_the_check_and_continues(
     plans = _planner_calls(tx)
 
     # The operator reruns with more fix attempts; the fixer can now repair it.
-    rec.writes["fix-1"] = {"app.py": "VALUE = 42\n", "test_steps.py": _STEPS}
+    rec.writes["fix-1"] = {"app.py": "VALUE = 42\n", "tests/test_t_001.py": _STEPS}
     rec.calls.clear()
     ran = _stream(app(2), _RESUME, cfg, records)
     assert ran[:2] == ["triage", "implementation"]

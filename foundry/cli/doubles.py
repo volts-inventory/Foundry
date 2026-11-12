@@ -108,7 +108,7 @@ _PLAN_PAYLOAD: dict[str, Any] = {
             "specialty": "backend",
             "difficulty": "standard",
             "depends_on": ["T-002"],
-            "files": ["app.py", "tests/step_defs/test_t_001.py"],
+            "files": ["app.py", "test_app.py", "tests/step_defs/test_t_001.py"],
             "implements": [],
             "consumes": [],
             "entrypoint": True,

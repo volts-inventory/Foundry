@@ -1091,6 +1091,25 @@ def test_a_shared_undeclared_type_gets_one_owner_in_code_not_a_repair() -> None:
     assert len(_shared_type_findings(bare, [_PARSE, _EVALUATE], frozenset())) == 1
 
 
+def test_a_shared_type_in_java_gets_its_own_file_in_the_owner_ticket() -> None:
+    parse = _ifc("parse", "public static Roll parse(String text);", "function")
+    total = _ifc("total", "public static int total(Roll roll);", "function")
+    tickets = [
+        _t("PARSER", implements=("parse",)).model_copy(
+            update={"files": ("src/main/java/dice/Parser.java",)}
+        ),
+        _t("EVAL", implements=("total",)).model_copy(
+            update={"files": ("src/main/java/dice/Evaluator.java",)}
+        ),
+    ]
+    (parser, evaluator), _, owned = _assign_shared_types(
+        tickets, [parse, total], frozenset(), "java"
+    )
+    assert owned == {"Roll"}
+    assert parser.files[-1] == "src/main/java/dice/Roll.java"
+    assert "from src/main/java/dice/Roll.java" in evaluator.description
+
+
 def test_builtin_and_generic_names_are_never_shared_types() -> None:
     sigs = {
         "py": "def f(xs: List[str], o: Optional[Path], r: Random, m: Literal['Add']) -> "

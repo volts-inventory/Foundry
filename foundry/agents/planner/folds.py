@@ -14,7 +14,7 @@ from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
 from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
-from foundry.gates.profiles import SOURCE_SUFFIXES, pytest_bdd_binds
+from foundry.gates.profiles import ONE_TYPE_PER_FILE, SOURCE_SUFFIXES, pytest_bdd_binds
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
     Difficulty,
@@ -645,7 +645,8 @@ def _assign_shared_types(
 ) -> tuple[list[Ticket], list[str], set[str]]:
     """Give each data type several tickets' contracts name, but the contracts file
     does not declare, one owner: the first such ticket none of the others precede.
-    It defines the type in its first source file; the others depend on it and
+    It defines the type in its first source file (in its own file beside it where
+    the language wants one public type per file); the others depend on it and
     import it from there. No repair call: a local re-plan for this cost ~30 min,
     and the build's duplicate-type check still catches a second copy."""
     suffixes = SOURCE_SUFFIXES.get(language, ())
@@ -653,6 +654,7 @@ def _assign_shared_types(
     deps = {t.id: t.depends_on for t in tickets}
     notes: dict[str, list[str]] = {}
     added: dict[str, list[str]] = {}
+    new_files: dict[str, list[str]] = {}
     concerns: list[str] = []
     owned: set[str] = set()
     for name, ids in _shared_type_users(tickets, interfaces, declared).items():
@@ -668,6 +670,10 @@ def _assign_shared_types(
         if owner is None:
             continue
         home = next(f for f in by_id[owner].files if is_app_source(f, suffixes))
+        if language in ONE_TYPE_PER_FILE:
+            home = str(PurePosixPath(home).with_name(name + PurePosixPath(home).suffix))
+            if home not in by_id[owner].files:
+                new_files.setdefault(owner, []).append(home)
         owned.add(name)
         others = [i for i in ids if i != owner]
         notes.setdefault(owner, []).append(
@@ -690,6 +696,7 @@ def _assign_shared_types(
             update={
                 "description": "\n".join(filter(None, (t.description, *notes[t.id]))),
                 "depends_on": (*t.depends_on, *added.get(t.id, ())),
+                "files": (*t.files, *new_files.get(t.id, ())),
             }
         )
         if t.id in notes

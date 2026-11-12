@@ -34,6 +34,7 @@ from foundry.schemas.implementation import StackDecision
 __all__ = [
     "BDD_RUNNERS",
     "DEFAULT_INSTALL",
+    "ONE_TYPE_PER_FILE",
     "PROFILES",
     "PROPERTY_TESTING",
     "SOURCE_SUFFIXES",
@@ -717,6 +718,9 @@ SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
     "lua": (".lua",),
     "terraform": (".tf",),
 }
+
+# A public top-level type must sit in its own file named after it.
+ONE_TYPE_PER_FILE: frozenset[str] = frozenset({"java"})
 
 
 def profile_language(profile: VerificationProfile | None) -> str:

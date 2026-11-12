@@ -292,6 +292,33 @@ def _ticket_check(
     )
 
 
+ENTRYPOINT_RULE = (
+    "ENTRYPOINT: you wire the app together. Import the modules the tickets you depend "
+    "on built and register or call them (their routes, blueprints, services, models, "
+    "CLI commands); never re-implement their routes or logic here. A second copy "
+    "type-checks, while the tested modules ship as dead code."
+)
+
+
+PRODUCTION_WIRING_RULE = (
+    "TEST THROUGH PRODUCTION WIRING: step and test setup builds the app through its "
+    "real factory or entrypoint (e.g. create_app() with a test config, the CLI's "
+    "main(), the server's app object), never a hand-assembled copy of its routes, "
+    "services or store: a test that wires its own app passes while the shipped "
+    "entrypoint is broken."
+)
+
+
+def _is_test_path(path: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1]
+    return (
+        name.startswith("test_")
+        or name.rsplit(".", 1)[0].endswith(("_test", ".test", ".spec"))
+        or any(p in ("tests", "test", "step_definitions", "__tests__") for p in parts[:-1])
+    )
+
+
 def _ticket_packet(
     task: Task,
     ticket: Ticket,
@@ -320,6 +347,10 @@ def _ticket_packet(
             + ", ".join(ticket.files)
             + ".",
         )
+    if ticket.entrypoint:
+        rules.append(ENTRYPOINT_RULE)
+    if ticket.specialty is Specialty.TEST or any(_is_test_path(f) for f in ticket.files):
+        rules.append(PRODUCTION_WIRING_RULE)
     return TaskPacket(
         task={
             "id": task.id,
@@ -328,6 +359,7 @@ def _ticket_packet(
             "description": ticket.description,
             "specialty": ticket.specialty.value,
             "difficulty": ticket.difficulty.value,
+            "entrypoint": ticket.entrypoint,
             "tier": task.tier,
             "spec_uri": task.spec_uri,
             "branch": task.branch,

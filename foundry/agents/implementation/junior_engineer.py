@@ -1117,6 +1117,20 @@ def make_fixer_node(
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.tickets.constants import ENTRYPOINT_DUP_TRIAGE
+        from foundry.agents.implementation.tickets.contracts import entrypoint_redefinitions
+
+        redefined = tuple(
+            finding
+            for t in read_tickets(state, resolve)
+            if t.entrypoint
+            for finding in entrypoint_redefinitions(
+                {f: overlay.get(f) for f in t.files},
+                {f: text for f, text in overlay.items() if f not in t.files},
+            )
+        )
+        if redefined:
+            failures = (*failures, f"[{ENTRYPOINT_DUP_TRIAGE}]", *redefined)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
 
         focus = _fix_focus(state, resolve)

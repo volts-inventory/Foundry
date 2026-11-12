@@ -195,21 +195,24 @@ def verify_rules(
             else cmds.get("typecheck", "the language's type checker")
         )
         rules.append(
-            f"DECLARATIONS ONLY in {files}: types, interfaces and signatures with no "
-            "logic — Python: Protocol, dataclass, TypedDict and Enum classes whose "
-            "methods have `...` bodies; TypeScript: interface and type declarations "
-            "(plus the enum/const values the contracts name). No implementations, "
-            "helpers, I/O or validation. Type-check this file on its own before you "
-            f"finish (`{alone}`) and fix every error it reports."
+            f"DATA TYPES AND ERRORS ONLY in {files}, as real code that ships — Python: "
+            "dataclass, TypedDict and Enum classes with typed fields, and Exception "
+            "subclasses with a real __init__; TypeScript: interface and type "
+            "declarations (plus the enum/const values the contracts name) and Error "
+            "subclasses with a real constructor. No functions, services, Protocols, "
+            "ABCs, placeholder bodies, I/O or validation. Type-check this file on its "
+            f"own before you finish (`{alone}`) and fix every error it reports."
         )
     elif contract_files:
         rules.append(
-            "CONTRACT TYPES ARE THE ONLY TYPES: the data types, interfaces and errors "
-            f"in {', '.join(contract_files)} are the single definition of each. Import "
-            "them from there; never declare a class, interface or type with the same "
-            "name in another file (no parallel models.X copy of a contract type) — a "
-            "copy type-checks alone and breaks every caller that uses the contract's "
-            "type."
+            "CONTRACT TYPES ARE THE ONLY TYPES: the data types and errors in "
+            f"{', '.join(contract_files)} are the single definition of each. Import "
+            "them from there; never declare a class or type with the same name in "
+            "another file (no parallel models.X copy of a contract type) — a copy "
+            "type-checks alone and breaks every caller that uses the contract's type. "
+            "A contract function or class is defined by the ticket that implements it, "
+            "in its own files: implement yours there, and import the ones you call "
+            "from the module that defines them."
         )
     return rules
 

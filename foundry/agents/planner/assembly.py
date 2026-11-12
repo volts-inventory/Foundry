@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents.plan_contracts import CompileResult
 from foundry.agents.planner.build import _build_tickets, _Epic
 from foundry.agents.planner.checks import (
+    _branch_findings,
     _builtin_method_findings,
     _contract_findings,
     _coverage_findings,
+    _entrypoint_findings,
     _offline_scenario_findings,
     _redeclared_findings,
+    _role_findings,
     _size_findings,
     _unused_contracts,
     _wiring_findings,
@@ -23,6 +26,7 @@ from foundry.agents.planner.folds import (
     _add_read_deps,
     _drop_orphan_scenarios,
     _drop_self_consumes,
+    _ensure_security_scenario,
     _fix_covers,
     _fold_test_bindings,
     _merge_sole_dependents,
@@ -145,10 +149,13 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_drop_orphan_scenarios.__name__, more)
     criteria, more = _fix_covers(criteria, frame.brief)
     concerns += fold(_fix_covers.__name__, more)
+    tickets, criteria, more = _ensure_security_scenario(tickets, criteria, frame.criteria_seq)
+    concerns += fold(_ensure_security_scenario.__name__, more)
     contract = (
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
         *_wiring_findings(tickets, frame.interfaces),
+        *_entrypoint_findings(tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),
@@ -158,6 +165,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *stack_findings,
         *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
         *_offline_scenario_findings(criteria),
+        *_branch_findings(criteria, frame.brief),
+        # A change build's base tree already owns its roles.
+        *(_role_findings(tickets, frame.brief) if base is None else ()),
         *_size_findings(
             tickets, frame.ceilings, set(stack_files(frame.stack)) if frame.stack else set()
         ),

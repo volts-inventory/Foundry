@@ -629,7 +629,7 @@ def test_the_python_deps_rule_forbids_standard_library_modules() -> None:
 def test_the_sop_adds_bdd_harness_only_for_a_bdd_stack_and_reserves_its_id() -> None:
     assert "only when stack.bdd is set" in SOP
     assert "reserved: never plan a ticket with either" in SOP
-    assert "never that installing succeeds" in SOP
+    assert "never assert that installing dependencies succeeds" in SOP
 
 
 def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:

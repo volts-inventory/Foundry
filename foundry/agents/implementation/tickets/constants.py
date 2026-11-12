@@ -22,6 +22,8 @@ CAP_TRIAGE = "token-cap"
 OVERLAY_TRIAGE = "wave-overlay"
 # A ticket declared a type the contracts file already defines (a parallel copy).
 CONTRACT_DUP_TRIAGE = "contract-duplicate"
+# The entrypoint ticket redefined a function or class another module of the tree owns.
+ENTRYPOINT_DUP_TRIAGE = "entrypoint-redefinition"
 # The contracts ticket's last attempt still left out names its planned contracts declare.
 CONTRACT_DRIFT_TRIAGE = "contract-drift"
 # An implementation ticket's last attempt still changed a stubbed public signature.

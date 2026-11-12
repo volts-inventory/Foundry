@@ -448,7 +448,7 @@ def test_reentry_after_spec_fail_repairs_the_prior_plan() -> None:
 
     assert len(tx.requests) == 3
     assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
-    assert efforts == ["medium", "medium"]
+    assert efforts == ["medium", "xhigh"]
     prompt = _content(tx.requests[2])
     assert "REPAIR PASS — the signed Spec gate" in prompt
     assert "no criterion flags security_abuse=true" in prompt
@@ -863,7 +863,7 @@ def test_flagged_self_review_revises_once_in_node() -> None:
     efforts = _efforts(rt)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 3 and efforts == [None, "medium", None]
+    assert len(tx.requests) == 3 and efforts == ["medium", "xhigh", "medium"]
     assert "SELF-REVIEW REVISION" not in json.dumps(tx.requests[0])
     repair = _content(tx.requests[1])
     assert "REPAIR PASS — your own criteria_review" in repair and "no rate limit" in repair

@@ -588,7 +588,7 @@ def test_manifest_scaffold_grounds_pure_python_tree(tmp_path, verifier):
 
     assert recognized_manifests(dest) == ["requirements.txt"]
     manifest = (dest / "requirements.txt").read_text()
-    assert "pytest" in manifest  # the test runner is pinned as a dev dependency
+    assert "pytest" not in manifest  # only runtime imports: the gates bring the dev tools
 
 
 def test_manifest_scaffold_leaves_engineer_manifest_untouched(tmp_path, verifier):

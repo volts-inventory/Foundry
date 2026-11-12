@@ -92,12 +92,12 @@ def test_ticket_and_fixer_packets_carry_the_stack_commands_to_run(tmp_path: Path
         assert packet.task["verify"] == want
     rules = "\n".join(contracts.task["rules"])
     assert "VERIFY BEFORE YOU FINISH" in rules
-    assert "DECLARATIONS ONLY in contracts.py" in rules
+    assert "DATA TYPES AND ERRORS ONLY in contracts.py" in rules
     assert "`python -m mypy contracts.py`" in rules  # the contract file on its own
     t1_rules = "\n".join(t1.task["rules"])
     assert "VERIFY BEFORE YOU FINISH" in t1_rules
     assert "CONTRACT TYPES ARE THE ONLY TYPES" in t1_rules and "contracts.py" in t1_rules
-    assert "DECLARATIONS ONLY" not in t1_rules
+    assert "DATA TYPES AND ERRORS ONLY" not in t1_rules
     fix_rules = "\n".join(fix.task["rules"])
     assert "re-run the failing command" in fix_rules and "until they all pass" in fix_rules
 

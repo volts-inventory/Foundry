@@ -30,7 +30,11 @@ from foundry.agents.planner import (
     _wire_entrypoint,
     make_planner_node,
 )
-from foundry.agents.planner.checks import _wiring_findings, finding_kind
+from foundry.agents.planner.checks import (
+    _shared_type_findings,
+    _wiring_findings,
+    finding_kind,
+)
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -1012,6 +1016,66 @@ def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_recei
     # Only the entrypoint's composition root is checked.
     plain = [tickets[0], tickets[1].model_copy(update={"entrypoint": False})]
     assert _wiring_findings(plain, [_STORE, _BARE_APP]) == ()
+
+
+_PARSE = _ifc("parse", "def parse(text: str) -> DiceExpression: ...", "function")
+_EVALUATE = _ifc(
+    "evaluate",
+    "def evaluate(expr: DiceExpression, rng: random.Random, limit: Optional[int]) -> int: ...",
+    "function",
+)
+
+
+def test_a_data_type_two_tickets_name_must_be_declared_in_the_contracts_file() -> None:
+    # A local dice run: the parser and the evaluator each defined their own
+    # DiceExpression, and cli.py converted between the two copies.
+    tickets = [
+        _t("PARSER", implements=("parse",)),
+        _t("EVAL", implements=("evaluate",)),
+        _t("CLI", "PARSER", "EVAL", entry=True, consumes=("parse", "evaluate")),
+    ]
+    (finding,) = _shared_type_findings(tickets, [_PARSE, _EVALUATE], frozenset())
+    assert finding.startswith("Type DiceExpression is used by the contracts of tickets PARSER, ")
+    assert "EVAL" in finding and finding_kind(finding) == "type-undeclared"
+    # A consumer of the one ticket naming it shares it too.
+    alone = [tickets[0], _t("CLI", "PARSER", consumes=("parse",))]
+    assert len(_shared_type_findings(alone, [_PARSE], frozenset())) == 1
+
+    # Declared as a data type (its fields, in the contracts file): no finding.
+    expr = _ifc(
+        "DiceExpression",
+        "class Constant:\n    value: int\n\n"
+        "class BinaryOp:\n    op: str\n    left: DiceExpression\n    right: DiceExpression\n\n"
+        "DiceExpression = Constant | BinaryOp",
+        "type",
+    )
+    declared = frozenset({"DiceExpression"})
+    assert _shared_type_findings(tickets, [expr, _PARSE, _EVALUATE], declared) == ()
+    # A name only that type's signature defines is in the contracts file too.
+    const = _ifc("parse_constant", "def parse_constant(t: str) -> Constant: ...", "function")
+    users = [_t("A", implements=("parse_constant",)), _t("B", consumes=("parse_constant",))]
+    assert _shared_type_findings(users, [expr, const], declared) == ()
+    # A class contract one ticket implements is imported from that ticket.
+    store = [_t("STORE", implements=("DomainStore",)), _t("APP", consumes=("DomainStore",))]
+    assert _shared_type_findings(store, [_STORE], frozenset()) == ()
+
+
+def test_builtin_and_generic_names_are_never_shared_types() -> None:
+    sigs = {
+        "py": "def f(xs: List[str], o: Optional[Path], r: Random, m: Literal['Add']) -> "
+        'Iterator[Decimal]:\n    """Return the Parsed Result."""',
+        "ts": "export function f(xs: Array<string>, m: Map<string, Date>): Promise<Record<"
+        "string, Partial<T>>> // Returns Nothing Useful",
+        "go": "func F(ctx context.Context, w http.ResponseWriter) (time.Time, error)",
+        "consts": "def f(level: int = MAX_LEVEL, c: str = Color.RED) -> None: ...",
+        "imported": "from vendor.sdk import Client\ndef f(c: Client) -> None: ...",
+    }
+    for lang, sig in sigs.items():
+        f = _ifc("f", sig, "function")
+        tickets = [_t("A", implements=("f",)), _t("B", consumes=("f",))]
+        assert _shared_type_findings(tickets, [f], frozenset()) == (), lang
+    # One ticket alone naming its own type is its business.
+    assert _shared_type_findings([_t("PARSER", implements=("parse",))], [_PARSE], frozenset()) == ()
 
 
 def _wired_plan(app_signature: str) -> dict[str, Any]:

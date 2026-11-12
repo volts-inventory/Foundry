@@ -17,6 +17,7 @@ from foundry.agents.planner.checks import (
     _offline_scenario_findings,
     _redeclared_findings,
     _role_findings,
+    _shared_type_findings,
     _size_findings,
     _unused_contracts,
     _wiring_findings,
@@ -155,6 +156,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *_contract_findings(tickets, criteria, frame.declared),
         *(_redeclared_findings(frame.interfaces, base) if base is not None else ()),
         *_wiring_findings(tickets, frame.interfaces),
+        *_shared_type_findings(tickets, frame.interfaces, frame.declared),
         *_entrypoint_findings(tickets, frame.interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.

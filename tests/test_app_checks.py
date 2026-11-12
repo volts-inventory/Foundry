@@ -208,6 +208,7 @@ def test_every_rule_is_a_stack_constraint() -> None:
         "memory-db",
         "csrf-missing",
         "like-unescaped",
+        "duplicate-type",
     ):
         assert rule in python["text"]
     assert app_check_constraints("rust") == []
@@ -230,3 +231,59 @@ def test_build_without_the_hook_skips_the_checks(tmp_path: Path) -> None:
     (tmp_path / "app.py").write_text('SECRET_KEY = "dev"\n')
     gate = BuildGate()
     assert gate.decide(gate.execute(tmp_path)) is GateStatus.PASS
+
+
+_DICE_TYPES = (
+    "from dataclasses import dataclass\n\n\n"
+    "@dataclass\nclass Constant:\n    value: int\n\n\n"
+    "@dataclass\nclass BinaryOp:\n    op: str\n    left: object\n    right: object\n"
+)
+
+
+def test_one_data_type_defined_in_two_source_files_is_flagged(tmp_path: Path) -> None:
+    # A local dice run: the parser and the evaluator each defined their own
+    # Constant/BinaryOp, and cli.py converted between the two copies.
+    files = {
+        "dice/parser.py": _DICE_TYPES + "\ndef parse(text):\n    return Constant(1)\n",
+        "dice/evaluator.py": _DICE_TYPES,
+        "dice/contracts.py": "class Roll:\n    def __init__(self, n):\n        self.n = n\n",
+        "dice/cli.py": "from dice.contracts import Roll\n",  # a re-export defines nothing
+        "tests/test_dice.py": _DICE_TYPES,  # test code is never scanned
+    }
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    assert app_check_findings(tmp_path, "python") == (
+        "app check duplicate-type: dice/parser.py:5: duplicate type Constant in "
+        "dice/evaluator.py and dice/parser.py: import one from the contracts file instead "
+        "of redefining it",
+        "app check duplicate-type: dice/parser.py:10: duplicate type BinaryOp in "
+        "dice/evaluator.py and dice/parser.py: import one from the contracts file instead "
+        "of redefining it",
+    )
+
+
+def test_same_named_types_with_different_fields_are_not_duplicates(tmp_path: Path) -> None:
+    files = {
+        "a.py": "class Config:\n    path: str\n",
+        "b.py": "class Config:\n    url: str\n",
+        "c.py": "class NotFound(Exception):\n    pass\n",
+        "d.py": "class NotFound(Exception):\n    pass\n",  # no fields: never compared
+    }
+    assert _rules(tmp_path, files) == []
+
+
+def test_duplicate_types_in_typescript_and_go(tmp_path: Path) -> None:
+    ts = (
+        "export interface Constant {\n  kind: 'const';\n  value: number;\n}\n"
+        "export class BinaryOp {\n  readonly op: string;\n  constructor(public left: number) {\n"
+        "    this.right = 0;\n  }\n  eval(): number {\n    const x = 1;\n    return x;\n  }\n}\n"
+    )
+    dupes = ["duplicate-type", "duplicate-type"]
+    assert _rules(tmp_path / "ts", {"src/a.ts": ts, "src/b.ts": ts}, "typescript") == dupes
+    other = "export interface Constant {\n  value: string;\n  unit: string;\n}\n"
+    assert _rules(tmp_path / "ts2", {"src/a.ts": ts, "src/b.ts": other}, "typescript") == []
+    go = "package dice\n\ntype Roll struct {\n\tCount, Sides int // dice\n\tBonus int\n}\n"
+    assert _rules(tmp_path / "go", {"a.go": go, "b/b.go": go}, "go") == ["duplicate-type"]
+    go2 = "package dice\n\ntype Roll struct {\n\tTotal int\n}\n"
+    assert _rules(tmp_path / "go2", {"a.go": go, "b/b.go": go2}, "go") == []

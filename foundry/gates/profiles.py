@@ -35,6 +35,7 @@ __all__ = [
     "BDD_RUNNERS",
     "DEFAULT_INSTALL",
     "PROFILES",
+    "SOURCE_SUFFIXES",
     "VerificationProfile",
     "bdd_runner_hint",
     "installed_profiles",
@@ -42,6 +43,7 @@ __all__ = [
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "profile_language",
     "pytest_bdd_binds",
     "stack_install",
     "stack_profile",
@@ -616,6 +618,29 @@ _PROFILE_LANGUAGE: dict[str, str] = {
     "java-maven": "java",
     "iac-terraform": "terraform",
 }
+
+_JS_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx")
+# The files each language's build and typecheck compile: a tree with none of them
+# (only a harness: manifests, feature files) has nothing for those steps to judge.
+SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "python": (".py",),
+    "javascript": _JS_SUFFIXES,
+    "typescript": _JS_SUFFIXES,
+    "go": (".go",),
+    "rust": (".rs",),
+    "csharp": (".cs",),
+    "java": (".java",),
+    "lua": (".lua",),
+    "terraform": (".tf",),
+}
+
+
+def profile_language(profile: VerificationProfile | None) -> str:
+    """The language ``profile`` builds ("" = unknown); no profile builds Python."""
+    if profile is None:
+        return "python"
+    name = profile.name
+    return name.split(":", 1)[1] if name.startswith("stack:") else _PROFILE_LANGUAGE.get(name, "")
 
 
 def _script(cmd: tuple[str, ...] | None) -> str:

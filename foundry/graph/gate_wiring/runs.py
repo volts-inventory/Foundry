@@ -11,8 +11,9 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
-from foundry.gates.app_checks import app_check_language
+from foundry.gates.app_checks import app_check_language, has_app_source, is_app_source
 from foundry.gates.build import BuildGate
+from foundry.gates.profiles import SOURCE_SUFFIXES, profile_language
 from foundry.gates.pydeps import PythonBuildEnv, python_build_env
 from foundry.gates.sandbox import toolchain_scope
 from foundry.gates.spec import SpecGate
@@ -151,6 +152,34 @@ class UnpinnedSmokeGate:
 
     def decide(self, obs: ZoneAObservation) -> GateStatus:
         return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
+
+
+class NotApplicableGate:
+    """A wave check's step with nothing to judge on this tree (:func:`unbuilt_source`):
+    an attested PASS whose finding says why, so no fixer is sent to build what later
+    tickets own."""
+
+    verdict_class = VerdictClass.CONFIG_EVALUABLE
+    decision_deterministic = True
+    execution_deterministic = False
+
+    def __init__(self, name: str, reason: str, *, seal_key: bytes | None = None) -> None:
+        self.name = name
+        self._reason = reason
+        self._seal_key = seal_key
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import observe
+
+        return observe(
+            self.name,
+            structured={"applicable": False},
+            findings=(f"{self.name} {self._reason}",),
+            seal_key=self._seal_key,
+        )
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.PASS if obs.structured.get("applicable") is False else GateStatus.ERROR
 
 
 _GATE_TIMEOUT_S = 600.0
@@ -563,9 +592,15 @@ def run_build_gate(
             for name, text in notes
         ]
     profile = gate_profile(state, profile)
+    unbuilt = unbuilt_source(profile, files, workdir)
     with _build_env(profile, workdir, rt) as pyenv:
         gates: list[tuple[GateImpl, str]] = [
-            (_build_gate(profile, runner, pyenv, planned=files), _BUILD_NODE)
+            (
+                NotApplicableGate("build", unbuilt, seal_key=runner.seal_key)
+                if unbuilt
+                else _build_gate(profile, runner, pyenv, planned=files),
+                _BUILD_NODE,
+            )
         ]
         test = _wave_test_gate(profile, runner, scenarios, pyenv) if scenarios else None
         if test is not None:
@@ -575,7 +610,12 @@ def run_build_gate(
             gates.append((test, _TEST_NODE))
         if launch:
             gates.append(
-                (launch_gate(state, resolve, profile, runner.seal_key, pyenv), _LAUNCH_NODE)
+                (
+                    NotApplicableGate("launch", unbuilt, seal_key=runner.seal_key)
+                    if unbuilt
+                    else launch_gate(state, resolve, profile, runner.seal_key, pyenv),
+                    _LAUNCH_NODE,
+                )
             )
         out["gates"] = _run_gates(
             gates,
@@ -586,6 +626,28 @@ def run_build_gate(
             workdir=workdir,
         )
     return out
+
+
+def unbuilt_source(profile: VerificationProfile | None, files: Iterable[str], workdir: Path) -> str:
+    """Why a wave check's build and launch do not apply to ``workdir`` yet ("" =
+    they do): the plan has source files in the profile's language but no ticket
+    has written any (an early wave holds only the harness). A plan with no such
+    files, or a language without known suffixes, is checked as usual; the final
+    gates always run every step."""
+    language = profile_language(profile)
+    suffixes = SOURCE_SUFFIXES.get(language, ())
+    if (
+        not suffixes
+        or (profile is not None and profile.unavailable)
+        or not any(is_app_source(f, suffixes) for f in files)
+        or has_app_source(workdir, suffixes)
+    ):
+        return ""
+    return (
+        f"not applicable yet: no {language} source file ({', '.join(suffixes)}) is built "
+        "in this wave's tree (only the harness, manifests or feature files); the next "
+        "wave's check and the final gate run every step"
+    )
 
 
 WAVE_TYPECHECK_TRIAGE = "wave-typecheck-scope"

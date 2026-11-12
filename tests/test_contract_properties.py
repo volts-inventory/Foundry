@@ -392,28 +392,10 @@ def test_the_shipped_manifest_declares_the_harness_libraries_the_tests_import(
     ]
 
 
-def test_the_shipped_manifest_drops_a_requirement_nothing_uses(tmp_path: Path) -> None:
-    (tmp_path / "app.py").write_text(
-        "import flask\nimport psycopg\nMIDDLEWARE = ['whitenoise.middleware.WhiteNoise']\n"
-    )
-    (tmp_path / "Procfile").write_text("worker: celery -A app worker\n")
-    (tmp_path / "README.md").write_text("Built on SQLAlchemy and redis.\n")
-    (tmp_path / "requirements.txt").write_text(
-        "# runtime\nFlask==3.0.0\nSQLAlchemy==2.0.30\npsycopg-binary==3.1.0\n"
-        "celery==5.4.0\nwhitenoise==6.7.0\nredis>=5  # cache\n-e .\n"
-        "gunicorn==22.0.0\npytest>=8\npytest-asyncio==0.23.0\n"
-    )
+def test_the_shipped_manifest_never_drops_a_requirement(tmp_path: Path) -> None:
+    # A package can be used with no import (a server, a driver, a plugin): keep all.
+    (tmp_path / "app.py").write_text("import flask\n")
+    text = "# runtime\nFlask==3.0.0\nSQLAlchemy==2.0.30\ngunicorn==22.0.0\n-e .\n"
+    (tmp_path / "requirements.txt").write_text(text)
     _ship_test_manifest(tmp_path)
-    # SQLAlchemy and redis go: only prose names them. A server, the runner and its
-    # plugins are used without an import.
-    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
-        "# runtime",
-        "Flask==3.0.0",
-        "psycopg-binary==3.1.0",
-        "celery==5.4.0",
-        "whitenoise==6.7.0",
-        "-e .",
-        "gunicorn==22.0.0",
-        "pytest>=8",
-        "pytest-asyncio==0.23.0",
-    ]
+    assert (tmp_path / "requirements.txt").read_text() == text

@@ -16,7 +16,6 @@ from foundry.base_tree import base_features, copy_base_tree
 from foundry.canonical import content_digest
 from foundry.gates.profiles import property_testing
 from foundry.gates.pydeps import (
-    _DIST_FOR_IMPORT,
     SCAFFOLD_HEADER,
     _dist_for,
     _host_distributions,
@@ -441,82 +440,23 @@ def _scaffold_manifest(dest: Path) -> None:
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
 
 
-# Shipped files a requirement's name in which counts as a use (a server in a
-# Procfile, a driver in a database URL); prose and the spec's inputs do not.
-_DOC_SUFFIXES = (".md", ".rst", ".txt", ".feature")
-_MENTION_MAX_BYTES = 1_000_000
-# Used with no import or mention of their own: the test runner and the property
-# library (the suite runs under them), servers started by command, drivers an ORM
-# loads from a URL scheme, and the .env loader the Flask CLI picks up.
-_LOADED_WITHOUT_IMPORT = frozenset(
-    {"pytest", "hypothesis", "gunicorn", "uvicorn", "waitress", "hypercorn", "daphne"}
-    | {"psycopg", "psycopg2", "psycopg2-binary", "pymysql", "mysqlclient", "asyncpg"}
-    | {"aiosqlite", "cx-oracle", "oracledb", "python-dotenv"}
-)
-
-
-def _mentions(dest: Path, manifest: Path) -> str:
-    out: list[str] = []
-    for path in sorted(dest.rglob("*")):
-        rel = path.relative_to(dest).as_posix()
-        if (
-            path == manifest
-            or path.suffix in _DOC_SUFFIXES
-            or rel in GATE_INPUT_FILES
-            or rel.startswith(".")
-            or not path.is_file()
-            or path.is_symlink()
-        ):
-            continue
-        try:
-            if path.stat().st_size <= _MENTION_MAX_BYTES:
-                out.append(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError):
-            continue
-    return "\n".join(out)
-
-
-def _used(dist: str, imported: set[str], installed: dict[str, list[str]], text: str) -> bool:
-    """Whether a shipped file uses the requirement ``dist``: a module importing it
-    (mapped as the gates' undeclared-import check maps it), a module whose name is
-    its leading part (``psycopg2`` of psycopg2-binary), or its name in a
-    non-prose file."""
-    name = _normalized(dist)
-    if name in _LOADED_WITHOUT_IMPORT or name.startswith("pytest-"):
-        return True
-    if any(_import_declared(n, {name}, installed) for n in imported):
-        return True
-    if any(name.startswith(_normalized(n) + "-") for n in imported):
-        return True
-    names = {dist, *(i for i, d in _DIST_FOR_IMPORT.items() if _normalized(d) == name)}
-    names |= {i for i, ds in installed.items() if name in {_normalized(d) for d in ds}}
-    return any(re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", text, re.IGNORECASE) for n in names)
-
-
 def _ship_test_manifest(dest: Path) -> None:
-    """Make the shipped ``requirements.txt`` match what its files import: drop a
-    requirement no shipped file uses, and append (at Foundry's pin) each library the
-    harness provides that the tests import and the manifest omits. A line that is not
-    a plain requirement (``-e .``, a path, a URL, an option) is kept as written, and
-    so is every line of a scaffolded manifest."""
+    """Append to the shipped ``requirements.txt`` (at Foundry's pin) each library the
+    harness provides that the tests import and the manifest omits, so the shipped
+    tests collect outside the gates. Never drops a line: a package can be loaded with
+    no import (a server, a DB driver, a plugin), and a wrong drop breaks the app."""
     manifest = dest / "requirements.txt"
     if not manifest.is_file():
         return  # none (the scaffold derives one from imports) or pyproject-only
     text = manifest.read_text(encoding="utf-8")
-    scaffolded = text.startswith(SCAFFOLD_HEADER)  # derived from the imports already
     imported = _imported_modules(dest)
     installed = _host_distributions()
-    mentions = _mentions(dest, manifest)
-    kept: list[str] = []
+    kept = text.splitlines()
     declared: set[str] = set()
-    for line in text.splitlines():
+    for line in kept:
         spec = re.sub(r"(^|\s)#.*$", "", line).strip()
         dist = requirement_name(spec) if spec and not spec.startswith("-") else None
-        if dist is None or "/" in spec or "://" in spec:
-            kept.append(line)
-            continue
-        if scaffolded or _used(dist, imported, installed, mentions):
-            kept.append(line)
+        if dist is not None:
             declared.add(_normalized(dist))
     added = [
         _pin(_dist_for(lib, installed))

@@ -1405,11 +1405,10 @@ class ModelProviderProxy:
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
         findings, backed = _verdict_findings(verdict.get("findings"), failing_gates, failing_tests)
-        status = _STATUS_BY_VERDICT[verdict["status"]]
-        if not backed:
-            # Decided here, before the binding is stamped: a downgrade after signing
-            # would void the verdict.
-            status = GateStatus.PASS
+        # Decided here, before the binding is stamped: a change after signing would
+        # void the verdict. A backed finding blocks even under an "approve": models
+        # approve while listing a reproduced defect.
+        status = GateStatus.FAIL if backed else GateStatus.PASS
         unstamped = GateResult(
             name=gate_name,
             status=status,

@@ -206,9 +206,11 @@ def _finding(text: str, **evidence: str) -> dict[str, str]:
 
 
 def _judge_findings(
-    findings: list[object], failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    findings: list[object],
+    failing: tuple[tuple[str, ...], tuple[str, ...]] = ((), ()),
+    status: str = "request-changes",
 ) -> GateResult:
-    transport = FakeTransport(text=json.dumps({"status": "request-changes", "findings": findings}))
+    transport = FakeTransport(text=json.dumps({"status": status, "findings": findings}))
     proxy, _ = make_proxy(transport)
     return judge_once(proxy, failing=failing).gate_result
 
@@ -329,6 +331,15 @@ def test_the_evidence_label_names_the_id_that_matched():
         _FAILING,
     )
     assert g.findings == ("broken [evidence: failing tests/test_a.py::test_x]",)
+
+
+def test_a_backed_finding_blocks_even_when_the_model_approves(verifier, installed):
+    repro = _finding(
+        "dead module", command="grep -r 'from parser' .", expected="no matches", actual="cli.py"
+    )
+    g = _judge_findings([repro], status="approve")
+    assert g.status == GateStatus.FAIL
+    assert verifier.verify_judgment_binding(g)
 
 
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):

@@ -520,6 +520,15 @@ class ProxyUnavailable(RuntimeError):
         self.replayable = replayable
 
 
+class OutputLimitReached(ProxyUnavailable):
+    """A structured reply cut at the caller's ``max_tokens`` cap: re-rolling the same
+    request would spend the same budget and stop at the same place, so the caller
+    shrinks its request instead (the reviewer trims its diff)."""
+
+
+_LENGTH_STOPS = frozenset({"length", "max_tokens"})
+
+
 class PinnedIdDriftError(RuntimeError):
     """A served model drifted from the pinned id on a high-risk (gate/judgment)
     call under a FAIL_CLOSED :class:`DriftPolicy`.
@@ -1189,6 +1198,7 @@ class ModelProviderProxy:
         schema: dict[str, Any] | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
         effort: Effort | None = None,
+        max_tokens: int | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
@@ -1198,7 +1208,9 @@ class ModelProviderProxy:
         a tool channel raises :class:`ToolsUnsupported`. ``effort`` overrides the
         local thinking level (agent turns and verdicts medium, other one-shot calls
         xhigh): a ticket's session thinks at its difficulty's level, a plan repair
-        (an edit, not an invention) at medium."""
+        (an edit, not an invention) at medium. ``max_tokens`` caps the output budget
+        after that sizing; a structured reply cut at length under it is not
+        re-rolled but raises :class:`OutputLimitReached` at once."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1229,6 +1241,8 @@ class ModelProviderProxy:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
             request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
+        if max_tokens is not None:
+            request["max_tokens"] = min(int(request["max_tokens"]), max_tokens)
         if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
             if profile is not None:
@@ -1254,7 +1268,9 @@ class ModelProviderProxy:
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
+            response, parsed = self._send_with_retry(
+                request, schema=schema, tier=tier, label=label, capped=max_tokens is not None
+            )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
             if local:
@@ -1348,6 +1364,7 @@ class ModelProviderProxy:
         failing_gates: Iterable[str] = (),
         failing_tests: Iterable[str] = (),
         effort: Effort | None = None,
+        max_tokens: int | None = None,
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -1360,7 +1377,7 @@ class ModelProviderProxy:
         ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
         ids that failed on the reviewed tree in the caller's attested gate results;
         a finding citing anything else blocks only with a differing reproduction
-        (:func:`_verdict_findings`). ``effort`` is :meth:`complete`'s.
+        (:func:`_verdict_findings`). ``effort`` and ``max_tokens`` are :meth:`complete`'s.
         """
         if self._signer is None:
             raise RuntimeError(
@@ -1380,6 +1397,7 @@ class ModelProviderProxy:
             purpose="judgment",
             schema=VERDICT_SCHEMA,
             effort=effort,
+            max_tokens=max_tokens,
         )
         verdict = completion.parsed
         if not isinstance(verdict, dict) or verdict.get("status") not in _STATUS_BY_VERDICT:
@@ -1546,6 +1564,7 @@ class ModelProviderProxy:
         schema: dict[str, Any] | None = None,
         tier: str | None = None,
         label: str | None = None,
+        capped: bool = False,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
 
@@ -1596,6 +1615,11 @@ class ModelProviderProxy:
                     try:
                         parsed = _extract_json_object(response.text)
                     except StructuredOutputError as miss:
+                        if capped and response.stop_reason in _LENGTH_STOPS:
+                            raise OutputLimitReached(
+                                f"{miss}: the reply stopped at the {sent.get('max_tokens')}"
+                                "-token output cap"
+                            ) from None
                         sent = _with_parse_correction(
                             request, response, attempt + 1, str(miss), previous=sent
                         )
@@ -1603,7 +1627,7 @@ class ModelProviderProxy:
                             f"{miss} (stop reason {response.stop_reason!r})"
                         ) from None
                 return response, parsed
-            except ToolsUnsupported:
+            except (ToolsUnsupported, OutputLimitReached):
                 raise
             except Exception as exc:
                 if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):

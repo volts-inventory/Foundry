@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
+from foundry.gates.app_checks import app_check_language
 from foundry.gates.build import BuildGate
 from foundry.gates.pydeps import PythonBuildEnv, python_build_env
 from foundry.gates.sandbox import toolchain_scope
@@ -171,6 +172,7 @@ def _build_gate(
             pyenv=pyenv,
             python=True,
             first_party=first_party,
+            app_checks="python",
             timeout_s=timeout_s,
             install_timeout_s=_GATE_TIMEOUT_S,
         )
@@ -184,6 +186,7 @@ def _build_gate(
         pyenv=pyenv,
         python=profile.python,
         first_party=first_party if profile.python else frozenset(),
+        app_checks=app_check_language(profile),
         timeout_s=timeout_s,
         install_timeout_s=_GATE_TIMEOUT_S,
     )

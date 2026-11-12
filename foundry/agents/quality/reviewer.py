@@ -23,12 +23,14 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents.quality._common import ArtifactResolver, emit_artifact, read_criteria
 from foundry.agents.quality.reviewer_critic import REVIEWED_TREE_KIND, review, review_tree
 from foundry.graph.gate_wiring import snapshot_blob
+from foundry.proxy.model_provider_proxy import ADVISORY_PREFIX
 from foundry.schemas.product import Criticality
 from foundry.schemas.quality import (
     E2EReport,
     OracleBinding,
     OracleKind,
     ReviewedTree,
+    ReviewFindings,
     TestPlan,
     TestReport,
 )
@@ -41,6 +43,8 @@ if TYPE_CHECKING:
     from foundry.state.factory_state import FactoryState
 
 _NODE_ID = "reviewer"
+# The verdict's findings split blocking/advisory, for the build manifest to list.
+REVIEW_FINDINGS_KIND = "review_findings"
 
 # The determinism guarantees recorded on the E2E report (governance.md §1a).
 _DETERMINISM_NOTE = (
@@ -123,6 +127,21 @@ def make_reviewer_node(
             emit_artifact(report, "test_report", _NODE_ID, report_seq, store=rt.cas),
             emit_artifact(e2e, "e2e_report", _NODE_ID, e2e_seq, store=rt.cas),
         ]
+        findings_seq = rt.seq(config, _NODE_ID, "artifact:review_findings")
+        split = ReviewFindings(
+            verdict_seq=verdict.seq,
+            run_against=verdict.run_against,
+            status=verdict.status.value,
+            blocking=tuple(f for f in verdict.findings if not f.startswith(ADVISORY_PREFIX)),
+            advisory=tuple(
+                f.removeprefix(ADVISORY_PREFIX)
+                for f in verdict.findings
+                if f.startswith(ADVISORY_PREFIX)
+            ),
+        )
+        artifacts.append(
+            emit_artifact(split, REVIEW_FINDINGS_KIND, _NODE_ID, findings_seq, store=rt.cas)
+        )
         if tree is not None and rt.cas is not None:
             tree_seq = rt.seq(config, _NODE_ID, "artifact:reviewed_tree")
             reviewed = ReviewedTree(

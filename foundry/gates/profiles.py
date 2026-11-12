@@ -72,6 +72,9 @@ class VerificationProfile:
     # Why the TEST gate cannot run (a non-Python stack with no test and no bdd
     # command): that gate alone is an ERROR, never the pytest harness.
     test_unavailable: str = ""
+    # The language whose static app checks (``foundry.gates.app_checks``) BUILD runs:
+    # None = the language this profile builds, "" = none.
+    app_checks: str | None = None
 
 
 def _sh(script: str) -> tuple[str, ...]:

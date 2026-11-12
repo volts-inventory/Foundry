@@ -17,6 +17,7 @@ from foundry.agents.implementation.tickets.contracts import (
     _check_contract_names,
     _check_stub_signatures,
     _flag_contract_duplicates,
+    _flag_entrypoint_redefinitions,
     _written_sources,
 )
 from foundry.agents.implementation.tickets.scope import trim_to_write_scope
@@ -106,6 +107,8 @@ class _ScopedAdapter:
                     self.attempts.setdefault(tid, []).append((check_score(result.triage), kept))
             raise
         result = _flag_contract_duplicates(result, sandbox, self._contracts, tid)
+        if packet.task.get("entrypoint"):
+            result = _flag_entrypoint_redefinitions(result, sandbox, files, tid)
         _mirror_diff_blob(self._rt, sandbox, result)
         return result
 

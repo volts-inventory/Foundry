@@ -41,11 +41,12 @@ leaves the merged plan failing a check, falls back to the full re-plan.
 
 Repair before re-planning: every revision (the self-review's, the in-node plan
 check's, a Spec-gate re-entry's, an epic's) is first a REPAIR — the failed plan
-itself plus its findings in, the full corrected plan out — at medium thinking
-effort, as is the delta. A repair still leaving a finding gets ONE fresh
-revision at the default effort, so a revision is at most two calls; the plan
-check keeps whichever draft has the fewest findings, a tie going to the later.
-An epic with no previous one to repair is planned at the default effort.
+itself plus its findings in, the full corrected plan out — at xhigh thinking
+effort (locally; the first plan call and every fresh one run at medium). A
+repair still leaving a finding gets ONE fresh revision, so a revision is at most
+two calls; the plan check keeps whichever draft has the fewest findings, a tie
+going to the later. The delta runs at medium under a 32k output cap: a reply cut
+off at the cap goes straight to the full re-plan, never re-rolled.
 
 Interface re-plan: a ticket the stub-signature guard left to a re-plan (mid-build,
 the Spec gate already passed) gets one small call revising only the contracts it
@@ -190,7 +191,12 @@ from foundry.agents.planner.schema import (
 from foundry.agents.planner.sizing import size_text, ticket_ceilings
 from foundry.agents.planner.split import ask_split, split_items, split_problem
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
-from foundry.proxy.model_provider_proxy import ProxyUnavailable, StructuredOutputError
+from foundry.gates.app_checks import app_check_constraints
+from foundry.proxy.model_provider_proxy import (
+    OutputLimitReached,
+    ProxyUnavailable,
+    StructuredOutputError,
+)
 from foundry.schemas.architecture import SystemDesign
 from foundry.schemas.gates import JudgmentProvenance
 from foundry.schemas.governance import ScopeTier
@@ -248,10 +254,14 @@ __all__ = [
 
 Effort = Literal["medium", "xhigh"] | None
 
-# A repair corrects a plan it is shown, so it needs far less thinking than inventing
-# one: the first plan call keeps the default (xhigh locally), every repair and delta
-# runs at medium.
-_REPAIR_EFFORT: Effort = "medium"
+# Locally a first plan at medium kept the plan quality of xhigh at a fraction of the
+# time; a repair is reached only where that plan got stuck, so it thinks harder. The
+# delta patches a few tickets: medium, capped so a rambling reply fails fast.
+_FIRST_EFFORT: Effort = "medium"
+_REPAIR_EFFORT: Effort = "xhigh"
+_DELTA_EFFORT: Effort = "medium"
+_DELTA_MAX_TOKENS = 32_000
+_LENGTH_STOPS = frozenset({"length", "max_tokens"})
 
 
 def _count_findings(findings: Iterable[str]) -> None:
@@ -350,7 +360,7 @@ def make_planner_node(
             [{"role": "user", "content": content}],
             purpose="ideation",
             schema=schema,
-            effort=effort,
+            effort=effort or _FIRST_EFFORT,
         )
         return completion.parsed or {}
 
@@ -489,26 +499,43 @@ def make_planner_node(
         epic_ids = frozenset(e.id for e in frame.epics)
         shown = _affected(findings, items, (n for n, _ in contracts))
         try:
-            delta = _call(
+            completion = rt.proxy.complete(
+                NODE_ID,
+                TIER,
                 DELTA_SOP,
-                DELTA_SCHEMA,
-                _delta_text(
-                    str(state.get("request", "")) + sizing,
-                    findings,
-                    items,
-                    shown,
-                    contracts,
-                    frame.brief,
-                    epic_ids,
-                ),
-                _REPAIR_EFFORT,
+                [
+                    {
+                        "role": "user",
+                        "content": _delta_text(
+                            str(state.get("request", "")) + sizing,
+                            findings,
+                            items,
+                            shown,
+                            contracts,
+                            frame.brief,
+                            epic_ids,
+                        ),
+                    }
+                ],
+                purpose="ideation",
+                schema=DELTA_SCHEMA,
+                effort=_DELTA_EFFORT,
+                max_tokens=_DELTA_MAX_TOKENS,
             )
+        except OutputLimitReached:
+            # Never re-rolled: the same request runs into the same cap.
+            _rejected(f"its reply hit the {_DELTA_MAX_TOKENS}-token cap")
+            return None
         except ProxyUnavailable as exc:
             # Only an unparseable reply falls back: a transport outage stays one.
             if not isinstance(exc.__cause__, StructuredOutputError):
                 raise
             _rejected("its reply did not parse")
             return None
+        if completion.stop_reason in _LENGTH_STOPS:
+            _rejected(f"its reply hit the {_DELTA_MAX_TOKENS}-token cap")
+            return None
+        delta = completion.parsed or {}
         merged = _merge_delta(items, delta, epic_ids, shown)
         if merged is None:
             return None
@@ -949,6 +976,11 @@ def make_planner_node(
             [
                 *_objs(payload.get("pinned_constraints")),
                 *_stack_constraints(draft.frame.stack, payload),
+                *(
+                    app_check_constraints(draft.frame.stack.language, NODE_ID)
+                    if draft.frame.stack is not None
+                    else ()
+                ),
             ],
             constraints_seq,
         )

@@ -77,6 +77,16 @@ TS_STACK: dict[str, Any] = {
 
 TS_INTERFACES = [
     {
+        "name": "Todo",
+        "kind": "type",
+        "signature": "interface Todo { id: string; title: string }",
+        "inputs": [],
+        "outputs": [],
+        "errors": [],
+        "description": "A todo.",
+        "consumers": ["api"],
+    },
+    {
         "name": "TodoStore.add",
         "kind": "function",
         "signature": "add(todo: Todo): string",
@@ -201,9 +211,10 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     contracts, harness, *rest = tickets
     assert contracts.id == CONTRACTS_TICKET_ID and contracts.depends_on == ()
     assert contracts.files == ("src/contracts.ts",)
-    assert contracts.implements == ("TodoStore.add", "TodoStore.list")  # not the http one
+    # Only the data type: the functions are defined by the ticket implementing them.
+    assert contracts.implements == ("Todo",)
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
-    assert "only `interface` and `type` declarations" in contracts.description
+    assert "errors as classes extending Error" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
     assert harness.files == ("package.json", "tsconfig.json", "cucumber.json", "package-lock.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
@@ -452,7 +463,10 @@ def test_consuming_a_type_contract_needs_no_implementing_ticket() -> None:
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets, "interfaces": interfaces})
     findings = _critique(writes, cas).contract_findings
     assert not any("contract Errors" in f or "contract NotFound" in f for f in findings)
-    assert "Ticket T-002 consumes contract Missing, but no ticket implements it." in findings
+    assert any(
+        f.startswith("Ticket T-002 consumes contract Missing, but no ticket implements it")
+        for f in findings
+    )
 
 
 def test_fit_violations_become_blocking_spec_findings() -> None:
@@ -473,8 +487,8 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         },
         {
             "name": "Unused",
-            "kind": "type",
-            "signature": "type U = 1",
+            "kind": "function",
+            "signature": "u(): void",
             "inputs": [],
             "outputs": [],
             "errors": [],
@@ -488,8 +502,9 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         "Contract TodoStore.list is implemented by 2 tickets (T-001, T-003); exactly "
         "one ticket may implement it." in findings
     )
-    assert (
-        "Ticket T-002 consumes contract TodoStore.missing, but no ticket implements it." in findings
+    assert any(
+        f.startswith("Ticket T-002 consumes contract TodoStore.missing, but no ticket implements")
+        for f in findings
     )
     # A forgotten edge to the one implementer is added, not sent back for a re-plan.
     assert not any("does not depend on" in f for f in findings)
@@ -1043,9 +1058,7 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     from tests.test_planner import _epic_of, _epic_runtime, _epic_scripts, _failed, _match
 
     plan, replies = multi_epic_plan()
-    plan["interfaces"] = [
-        {**i, "kind": "function", "signature": i["spec"]} for i in plan["interfaces"]
-    ]
+    plan["interfaces"] = [{**i, "kind": "type", "signature": i["spec"]} for i in plan["interfaces"]]
     plan["stack"] = {
         **PYTHON_STACK,
         "contracts_file": "notes/contracts.py",

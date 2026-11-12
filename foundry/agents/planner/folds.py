@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Sequence
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from foundry.agents.planner.checks import _goal_of, _goal_rows
 from foundry.agents.planner.readers import _uniq
@@ -20,7 +22,10 @@ from foundry.schemas.implementation import (
     Ticket,
     scenario_ref,
 )
-from foundry.schemas.product import AcceptanceCriterion, IntentBrief
+from foundry.schemas.product import AcceptanceCriterion, Criticality, IntentBrief, render_scenario
+
+if TYPE_CHECKING:
+    from foundry.state.seq import Seq
 
 # Script files a stack command can name as its own repo file (`python3 smoke.py`).
 _SCRIPT_SUFFIXES = (
@@ -711,3 +716,73 @@ def _fix_covers(
         covers = _uniq(kept)
         out.append(c if covers == c.covers else c.model_copy(update={"covers": covers}))
     return out, concerns
+
+
+# A scenario exercising misuse: bad input, a refused operation, an exhausted limit.
+_MISUSE = re.compile(
+    r"\b(invalid|malformed|blank|empty|missing|wrong|bad|negative|non-numeric|"
+    r"reject(?:s|ed)?|refuse[sd]?|unauthori[sz]ed|unauthenticated|forbidden|denied|"
+    r"not allowed|too (?:long|large|many|big)|exceed(?:s|ed|ing)?|oversized|limit|"
+    r"injection|escaped?|traversal|nonexistent|does not exist|unknown|duplicate|"
+    r"40[0-9]|413|422)\b",
+    re.I,
+)
+
+
+def _ensure_security_scenario(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion], seq: Seq
+) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
+    """The Spec gate requires a security/abuse criterion. When the plan flags none,
+    flag the first scenario that already exercises misuse (a high-risk one first);
+    with none, add a malformed-input scenario to the entrypoint ticket (else the
+    last feature ticket) and to a test ticket binding its scenarios. No repair
+    call: the plan's abuse clause asks for exactly this case."""
+    if not criteria or any(c.security_abuse for c in criteria):
+        return list(tickets), list(criteria), []
+    misuse = sorted(
+        (c for c in criteria if _MISUSE.search(" ".join((*c.when, *c.then)) or c.text)),
+        key=lambda c: c.criticality is not Criticality.HIGH_RISK,
+    )
+    if misuse:
+        pick = misuse[0]
+        return (
+            list(tickets),
+            [c.model_copy(update={"security_abuse": True}) if c is pick else c for c in criteria],
+            [f"Scenario {pick.id} flagged security_abuse=true: none was, and it covers misuse."],
+        )
+    features = _features(tickets)
+    owner = next((t for t in features if t.entrypoint), features[-1] if features else None)
+    if owner is None:
+        return list(tickets), list(criteria), []
+    taken = {c.id for c in criteria}
+    cid = next(f"AC-ABUSE-{n}" for n in range(1, len(taken) + 2) if f"AC-ABUSE-{n}" not in taken)
+    given, when, then = (
+        ("the app is running",),
+        ("a request sends malformed input",),
+        ("the input is rejected with an error message", "the app keeps serving requests"),
+    )
+    added = AcceptanceCriterion(
+        id=cid,
+        text=render_scenario(given, when, then),
+        criticality=Criticality.HIGH_RISK,
+        oracle_hint=scenario_ref(owner.id, cid),
+        security_abuse=True,
+        given=given,
+        when=when,
+        then=then,
+        ticket_id=owner.id,
+        seq=seq._replace(local=len(criteria)),
+    )
+    own = set(owner.scenario_ids)
+    out = [
+        t.model_copy(update={"scenario_ids": (*t.scenario_ids, cid)})
+        if t.id == owner.id
+        or (t.specialty is Specialty.TEST and own and own <= set(t.scenario_ids))
+        else t
+        for t in tickets
+    ]
+    return (
+        out,
+        [*criteria, added],
+        [f"Added security scenario {cid} to ticket {owner.id}: no scenario covered misuse."],
+    )

@@ -98,7 +98,7 @@ def test_the_in_node_revision_repairs_the_failed_plan_without_a_fresh_replan() -
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 3  # plan, delta, repair: no fresh re-plan
-    assert efforts == [None, "medium", "medium"]
+    assert efforts == ["medium", "medium", "xhigh"]
     repair = _content(tx.requests[2])
     assert "REPAIR PASS — the planner's own plan check" in repair
     assert "Plan check findings:\n- Must-have MH-1 ('add todo') has no covering" in repair
@@ -126,7 +126,7 @@ def test_a_repair_leaving_a_finding_falls_back_to_one_fresh_replan() -> None:
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 4
-    assert efforts == [None, "medium", "medium", None]
+    assert efforts == ["medium", "medium", "xhigh", "medium"]
     fresh = _content(tx.requests[3])
     assert "REVISION PASS — the planner's own plan check" in fresh
     assert "id=AC-001 (ticket=T-002)" in fresh  # the criteria to keep
@@ -218,7 +218,7 @@ def test_an_epic_repair_leaving_a_finding_falls_back_to_one_fresh_epic_call() ->
         make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
-    assert efforts[4:] == ["medium", None]
+    assert efforts[4:] == ["xhigh", "medium"]
     repair, fresh = (_content(r) for r in tx.requests[4:])
     assert "REPAIR PASS" in repair and "E2-T03" in repair and "REPAIR PASS" not in fresh
     got = counts.snapshot()
@@ -356,8 +356,8 @@ def test_an_epic_with_no_previous_one_to_repair_is_planned_at_the_default_effort
     node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
 
     epic_efforts = [effort for epic, effort in seen if epic is not None]
-    assert len(epic_efforts) >= 3 and set(epic_efforts) == {None}
-    assert "medium" in {effort for epic, effort in seen if epic is None}
+    assert len(epic_efforts) >= 3 and set(epic_efforts) == {"medium"}
+    assert "xhigh" in {effort for epic, effort in seen if epic is None}
 
 
 def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None:
@@ -387,7 +387,7 @@ def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None
     assert got["planner.replan.used"] == 1 and "planner.repair.closed" not in got
 
 
-def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
+def test_a_gate_epic_repair_dropping_the_only_security_flag_is_closed_by_the_fold() -> None:
     _, replies = multi_epic_plan()
     unflagged = _copy(replies["E1"])
     unflagged["tickets"][1]["scenarios"][0]["security_abuse"] = False  # the only one
@@ -402,9 +402,11 @@ def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
             config_for("r", step=5),
         )
 
-    assert [_epic_of(r) for r in tx.requests[4:]] == ["E1"]  # no fresh re-run to run
+    # The missing security flag is restored in code: no finding is left to re-run.
+    assert [_epic_of(r) for r in tx.requests[4:]] == ["E1"]
     got = counts.snapshot()
-    assert "planner.repair.fallback" not in got and "planner.repair.closed" not in got
+    assert "planner.repair.fallback" not in got and got["planner.repair.closed"] == 1
+    assert got["planner.fold.ensure_security_scenario"] == 1
 
 
 # ---- patch, don't re-plan: one delta call instead of a full plan call ----------------

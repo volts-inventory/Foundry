@@ -148,7 +148,6 @@ _DEMO_PM_DIRECTIVE = (
     "- Still author AT LEAST ONE security/abuse criterion (security_abuse=true). "
     "Lead with the highest-value case rather than one per category; this is a "
     "floor, not a quota — author a second if the request genuinely warrants it.\n"
-    "- Still author the pinned-dependency-manifest criterion (SOP step 5).\n"
     "Spend the remaining criteria on the core feature."
 )
 

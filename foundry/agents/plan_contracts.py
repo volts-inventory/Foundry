@@ -1,12 +1,14 @@
 """Plan-time compile of the planned code contracts.
 
-The contract signatures become the contracts file the wave-0 ticket writes, so a
+The contract data types become the contracts file the wave-0 ticket writes, and
+the function and class signatures the code their implementing tickets write, so a
 signature the language's own checker rejects (a method named after a builtin its
 annotations use, an undefined type) otherwise surfaces only at the first BUILD
-gate, after agents already ran. Here the signatures are assembled into one file
-and checked offline in the gate sandbox (``ground_untrusted``), when that
-toolchain is installed. Only checker errors become findings: a missing
-toolchain, a signature that is not code, a crash or a timeout is a concern.
+gate, after agents already ran. Here every signature is assembled into one
+throwaway stub, in a temporary directory outside the tree (it never ships), and
+checked offline in the gate sandbox (``ground_untrusted``), when that toolchain
+is installed. Only checker errors become findings: a missing toolchain, a
+signature that is not code, a crash or a timeout is a concern.
 """
 
 from __future__ import annotations
@@ -21,7 +23,31 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["ENV", "CompileResult", "assemble_python", "assemble_typescript", "check_contracts"]
+__all__ = [
+    "ENV",
+    "SOURCE_SUFFIXES",
+    "CompileResult",
+    "assemble_python",
+    "assemble_typescript",
+    "check_contracts",
+    "top_symbols",
+]
+
+SOURCE_SUFFIXES = (".py", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".go", ".rs", ".java")
+
+# A top-level function or class name, across the common languages.
+_TOP_SYMBOL = re.compile(
+    r"^(?:export\s+)?(?:default\s+)?(?:async\s+)?"
+    r"(?:def|function|func|fn|class|interface|type|struct)\s+([A-Za-z_]\w*)",
+    re.MULTILINE,
+)
+
+
+def top_symbols(text: str) -> set[str]:
+    """The public top-level function and class names ``text`` defines (``main`` is
+    every entry module's own)."""
+    return {n for n in _TOP_SYMBOL.findall(text) if not n.startswith("_") and n != "main"}
+
 
 # Operator / test switch: "0" (or off/false/no) skips the check entirely.
 ENV = "FOUNDRY_PLAN_COMPILE"

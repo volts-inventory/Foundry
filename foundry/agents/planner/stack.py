@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from foundry.agents.planner.checks import _bdd_quoting
+from foundry.agents.planner.checks import _bdd_quoting, _declaration_only
 from foundry.agents.planner.readers import _section, _str, _strs, _uniq
 from foundry.agents.planner.schema import (
     _DEFAULT_CONTRACTS_FILE,
@@ -107,22 +107,23 @@ def _plan_paths(raw: Any, what: str, concerns: list[str]) -> tuple[str, ...]:
     return tuple(kept)
 
 
-# How to write contract stubs a strict type checker accepts with no implementation.
+# How to write the contract data types as real, shipping code.
 _CONTRACT_STUB_RULES: dict[str, str] = {
     "python": (
-        "declare services as typing.Protocol classes (mypy accepts a `...` body "
-        "there, but reports a plain class or function with a `...` body as a "
-        "missing return) or as ABCs with @abstractmethod, and data as dataclasses; "
-        "never name a method after a builtin used in annotations (`list`, `type`, "
+        "data as @dataclass (or Enum / TypedDict) classes with typed fields, errors as "
+        "Exception subclasses whose __init__ takes the fields it reports and calls "
+        "super().__init__ with a message; no `...` bodies, no Protocol or ABC. Never "
+        "name a field or method after a builtin used in annotations (`list`, `type`, "
         "`id`, `dict`, ...) — inside the class body it shadows the builtin, so "
-        "`-> list[X]` breaks — or annotate with `builtins.list`."
+        "`-> list[X]` breaks."
     ),
     "typescript": (
-        "use only `interface` and `type` declarations (plus `enum`/`const` values "
-        "the contracts name), never a function or class body."
+        "data as `interface` / `type` declarations (plus the `enum`/`const` values the "
+        "contracts name), errors as classes extending Error with a real constructor; "
+        "no function or service declarations."
     ),
-    "": "declarations only — interfaces, types and signatures with no bodies the "
-    "compiler would reject.",
+    "": "data types and error types only, written as real code that compiles and "
+    "ships: no function or service declarations and no empty bodies.",
 }
 
 
@@ -146,16 +147,18 @@ def _generated_tickets(
     seq: Seq,
     base: BaseView | None = None,
 ) -> tuple[list[Ticket], list[str]]:
-    """The planner's own tickets: ``contracts`` writes every code-kind contract as
-    real code when there are any; ``bdd-harness`` wires the stack's Cucumber runner
-    when it has a ``bdd`` command. Both have no dependencies (wave 0), so the first
-    BUILD check already has the manifest, the config and the contracts to compile.
-    A change build (``base``) extends the base's contracts file and keeps its
-    already-wired runner."""
+    """The planner's own tickets: ``contracts`` writes the contract data types and
+    errors (``_declaration_only``) as real, shipping code when there are any;
+    ``bdd-harness`` wires the stack's Cucumber runner when it has a ``bdd`` command.
+    Both have no dependencies (wave 0), so the first BUILD check already has the
+    manifest, the config and the contracts to compile. A change build (``base``)
+    extends the base's contracts file and keeps its already-wired runner."""
     concerns: list[str] = []
     language = stack.language if stack else _str(raw_stack.get("language")).strip().lower()
     out: list[Ticket] = []
-    code = [i for i in interfaces if i.kind in CODE_CONTRACT_KINDS]
+    # Only data types and errors: a function or class with behaviour is defined by
+    # the ticket implementing it, at its own path, so the shipped tree holds no stub.
+    code = [i for i in interfaces if i.kind in CODE_CONTRACT_KINDS and _declaration_only(i)]
     owned: tuple[str, ...] = ()
     if code:
         owned = _plan_paths(raw_stack.get("contracts_file"), "contracts", concerns)
@@ -165,22 +168,21 @@ def _generated_tickets(
             owned = (_DEFAULT_CONTRACTS_FILE[language],)
         if not owned:
             concerns.append(
-                f"{len(code)} code contract(s) but no contracts file for language "
+                f"{len(code)} contract data type(s) but no contracts file for language "
                 f"{language or '(none)'!r}: they are not written as code."
             )
         else:
             out.append(
                 Ticket(
                     id=CONTRACTS_TICKET_ID,
-                    title="Define contracts",
+                    title="Define the contract data types",
                     description=(
-                        f"Write every interface contract this ticket implements as real "
-                        f"{language or 'project-language'} code in {', '.join(owned)}: the "
-                        "exact signatures, types, classes and interfaces (TypeScript "
-                        "interfaces/types, Python Protocols and dataclasses, Go interfaces, "
-                        "...) with no behaviour beyond what the language needs to compile: "
-                        "declarations only, no logic, helpers, I/O or validation. Every "
-                        "other ticket imports these definitions and none may change or "
+                        "Write the data types and errors this ticket implements as real "
+                        f"{language or 'project-language'} code in {', '.join(owned)}: "
+                        "records with their typed fields, enums, and error classes with a "
+                        "real constructor. This code ships: no functions, services, "
+                        "interfaces, I/O or validation, and no placeholder bodies. Every "
+                        "other ticket imports these types and none may change or "
                         "redeclare them, so match each contract exactly. The file must pass "
                         "the stack's build and typecheck on its own: "
                         + _CONTRACT_STUB_RULES.get(language, _CONTRACT_STUB_RULES[""])
@@ -323,6 +325,7 @@ def _attach_generated(
     concerns: list[str] = []
     gen_ids = tuple(t.id for t in generated)
     owned = {f for t in generated if t.id == CONTRACTS_TICKET_ID for f in t.files}
+    written = {n for t in generated if t.id == CONTRACTS_TICKET_ID for n in t.implements}
     ordered = list(generated)
     for t in tickets:
         files = tuple(f for f in t.files if f not in owned)
@@ -331,11 +334,20 @@ def _attach_generated(
                 f"Ticket {t.id}: dropped the gate-owned contract file(s) "
                 f"{', '.join(sorted(set(t.files) - set(files)))} from its files."
             )
+        # A data type the contracts file defines: implementing it again redeclares it.
+        moved = [n for n in t.implements if n in written]
+        if moved:
+            concerns.append(
+                f"Ticket {t.id}: {', '.join(moved)} moved from implements to consumes: "
+                "the contracts file defines the data types."
+            )
         ordered.append(
             t.model_copy(
                 update={
                     "files": files,
                     "depends_on": _uniq((*gen_ids, *t.depends_on)),
+                    "implements": tuple(n for n in t.implements if n not in written),
+                    "consumes": _uniq((*t.consumes, *moved)),
                 }
             )
         )

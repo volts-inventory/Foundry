@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import builtins
 import re
+import textwrap
 from collections.abc import Collection, Sequence
 from typing import Any
 
-from foundry.agents.plan_contracts import CompileResult, check_contracts
+from foundry.agents.plan_contracts import (
+    CompileResult,
+    check_contracts,
+    top_symbols,
+)
 from foundry.agents.planner.readers import _str, _strs
 from foundry.agents.planner.schema import _GENERATED_TICKETS, CODE_CONTRACT_KINDS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
@@ -26,9 +31,10 @@ _MEMBER_CALL = re.compile(
 
 
 def _declaration_only(contract: InterfaceContract) -> bool:
-    """A contract the generated contracts ticket writes in full: a type, or a class
-    with no methods (an error hierarchy, a plain record). One with methods still
-    needs a ticket to implement its behaviour."""
+    """A contract the generated contracts ticket writes in full, as shipping code: a
+    type, or a class with no methods besides ``__init__`` (an error, a plain record).
+    A function, or a class with methods, is defined by the one ticket implementing
+    it, at its own path: the contracts file never holds a stub of it."""
     if contract.kind == "type":
         return True
     return contract.kind == "class" and not _MEMBER_CALL.search(contract.signature)
@@ -74,7 +80,11 @@ def _contract_findings(
             if not ids and name in declared:
                 continue
             if not ids:
-                out.append(f"Ticket {t.id} consumes contract {name}, but no ticket implements it.")
+                out.append(
+                    f"Ticket {t.id} consumes contract {name}, but no ticket implements it "
+                    "(the contracts file holds only data types and errors: name the one "
+                    "ticket that defines it in its own files)."
+                )
             elif len(ids) == 1 and ids[0] not in ancestors(t.id):
                 out.append(
                     f"Ticket {t.id} consumes contract {name} but does not depend on "
@@ -228,8 +238,7 @@ def _wiring_findings(
             out.append(
                 f"Contract {name} (entrypoint ticket {t.id}) composes {', '.join(deps)} "
                 "but declares no way to receive them: give its signature an __init__ "
-                "taking them, or add a factory function to the contract that takes "
-                f"them and returns a {name}."
+                "taking them."
             )
     return tuple(out)
 
@@ -385,6 +394,105 @@ def _coverage_findings(
             f"{deliverable or 'an app (undeclared)'}: give a run command that boots the "
             "real app headless and exits 0, or declare deliverable 'library' if nothing runs."
         )
+    return tuple(out)
+
+
+# "X or Y" naming alternatives; "one or more", "and/or" and "more or less" do not.
+_BRANCHING_OR = re.compile(
+    r"(?<!and/)(?<!more )\bor\b(?!\s+(?:more|less|fewer|greater|so|later|equal)\b)", re.I
+)
+
+
+def _branch_findings(
+    criteria: Sequence[AcceptanceCriterion], brief: IntentBrief | None
+) -> tuple[str, ...]:
+    """A must-have or success criterion naming alternatives ("by title or tag") that
+    a single scenario covers: the other branch is never executed."""
+    goals = _goal_rows(brief)
+    known = {g.lower(): g for _, g, _ in goals}
+    covering: dict[str, list[str]] = {}
+    for c in criteria:
+        for raw in c.covers:
+            if (gid := _goal_of(raw, known)) is not None:
+                covering.setdefault(gid, []).append(c.id)
+    return tuple(
+        f'{kind} {gid} ({text[:80]!r}) names alternatives ("or") but only scenario '
+        f"{covering[gid][0]} covers it: add one scenario per branch, each citing {gid}."
+        for kind, gid, text in goals
+        if _BRANCHING_OR.search(text) and len(covering.get(gid, ())) == 1
+    )
+
+
+_ROLE_WORDS = re.compile(r"\b(admins?|administrators?|roles?|moderators?|superusers?)\b", re.I)
+_ROLE_OWNER = re.compile(r"\b(roles?|admins?|administrators?|seed(?:s|ed|ing)?)\b", re.I)
+
+
+def _role_findings(tickets: Sequence[Ticket], brief: IntentBrief | None) -> tuple[str, ...]:
+    """A request with roles needs ONE ticket owning the roles, the admin account and
+    the seed data: left to every feature, each invents its own, or none does."""
+    if brief is None:
+        return ()
+    goals = " ".join((brief.intent, *brief.must_haves, *brief.success_criteria))
+    if not _ROLE_WORDS.search(goals):
+        return ()
+    if any(
+        _ROLE_OWNER.search(" ".join((t.id, t.title, t.description)))
+        for t in tickets
+        if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
+    ):
+        return ()
+    return (
+        "The request has user roles but no ticket owns the roles, the admin account and "
+        "the seed data: give exactly one ticket that work and say so in its description.",
+    )
+
+
+def _entrypoint_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """An entrypoint ticket whose contract signatures declare a function or class a
+    dependency's contract declares: it must import and wire those, never
+    re-implement them (a second copy of the routes ships as dead code). A shared
+    file is no finding: overlapping scopes run in separate waves (a split ticket's
+    children share their parent's files); the post-build check reads the code."""
+    by_name = {i.name: i for i in interfaces}
+    by_id = {t.id: t for t in tickets}
+    deps = {t.id: t.depends_on for t in tickets}
+
+    def ancestors(tid: str) -> set[str]:
+        seen: set[str] = set()
+        todo = list(deps.get(tid, ()))
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(deps.get(d, ()))
+        return seen
+
+    def declared(t: Ticket) -> set[str]:
+        return {
+            n
+            for name in t.implements
+            if (i := by_name.get(name)) is not None and i.kind in CODE_CONTRACT_KINDS
+            for n in top_symbols(textwrap.dedent(i.signature))
+        }
+
+    out: list[str] = []
+    for e in tickets:
+        if not e.entrypoint or e.id in _GENERATED_TICKETS:
+            continue
+        mine = declared(e)
+        for did in sorted(ancestors(e.id) - _GENERATED_TICKETS):
+            d = by_id.get(did)
+            if d is None:
+                continue
+            if twice := sorted(mine & declared(d)):
+                out.append(
+                    f"Entrypoint ticket {e.id} redefines what ticket {did} owns ("
+                    + ", ".join(twice)
+                    + f"): import and wire {did}'s modules instead of re-implementing "
+                    "them, and drop them from the entrypoint's contracts."
+                )
     return tuple(out)
 
 
@@ -570,6 +678,9 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"^Ticket \S+ is over its size ceiling", "ticket-oversized"),
         (r"^No entrypoint ticket", "entrypoint-missing"),
         (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
+        (r"^Entrypoint ticket \S+ redefines what", "entrypoint-redefines"),
+        (r"names alternatives .* but only scenario", "or-branch"),
+        (r"has user roles but no ticket owns", "roles-unowned"),
         (r"^stack\.run is empty", "run-missing"),
         (r"starts the server, which never exits", "run-server"),
         (r"^stack\.bdd ", "bdd-command"),

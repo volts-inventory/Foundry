@@ -42,12 +42,18 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
 _SQLITE_MEMORY_CONSTRAINT = {
     "id": "PC-python-sqlite-memory",
     "text": (
-        "Python SQLite: every sqlite3.connect(':memory:') opens a NEW, empty database, "
-        "so an in-memory store must open ONE connection and reuse it for its whole "
-        "life (schema, writes and reads), never connect per call. That database then "
-        "outlives each test, and pytest runs every test module in one process: a "
-        "conftest.py autouse fixture must give each test an empty database (drop and "
-        "re-create the schema, or delete every row), or one test's rows break the next."
+        "Python SQLite: the app's default database is a FILE whose path comes from an "
+        "environment variable (e.g. DATABASE_URL or DB_PATH, default app.db), never "
+        "':memory:' outside tests (the BUILD gate FAILs it: the data is lost on "
+        "restart). A web stack serves requests on several threads: open a connection "
+        "per request, or pass check_same_thread=False to a shared one. Only tests pass "
+        "an in-memory database, and every sqlite3.connect(':memory:') opens a NEW, "
+        "empty one, so the test store opens ONE connection and reuses it for its "
+        "whole life (schema, writes and reads), never connecting per call. That "
+        "database then outlives each test, and pytest runs every test module in one "
+        "process: a conftest.py autouse fixture must give each test an empty database "
+        "(drop and re-create the schema, or delete every row), or one test's rows "
+        "break the next."
     ),
     "scope": "global",
     "source": NODE_ID,
@@ -89,12 +95,17 @@ _SQLALCHEMY_SQLITE_CONSTRAINT = {
     "id": "PC-python-sqlalchemy-sqlite",
     "text": (
         "Python SQLAlchemy over SQLite: every module reaches the database through "
-        "SQLAlchemy, never through sqlite3.connect(). An in-memory database is ONE "
-        "shared engine, `create_engine('sqlite://', poolclass=StaticPool, "
-        "connect_args={'check_same_thread': False})`; `Base.metadata.create_all`, "
-        "`drop_all` and `Session` take that engine, never a sqlite3 connection, which "
-        "has none of the methods they call (AttributeError: 'sqlite3.Connection' "
-        "object has no attribute '_run_ddl_visitor')."
+        "SQLAlchemy, never through sqlite3.connect(). The app's engine opens a FILE "
+        "database whose URL comes from an environment variable (DATABASE_URL, default "
+        "`sqlite:///app.db`), with `connect_args={'check_same_thread': False}` on a "
+        "web stack; never 'sqlite://' (in-memory) outside tests (the BUILD gate FAILs "
+        "it). Only tests use an in-memory database: ONE shared engine, "
+        "`create_engine('sqlite://', poolclass=StaticPool, "
+        "connect_args={'check_same_thread': False})`, reset per test by a conftest.py "
+        "autouse fixture. `Base.metadata.create_all`, `drop_all` and `Session` take "
+        "an engine, never a sqlite3 connection, which has none of the methods they "
+        "call (AttributeError: 'sqlite3.Connection' object has no attribute "
+        "'_run_ddl_visitor')."
     ),
     "scope": "global",
     "source": NODE_ID,

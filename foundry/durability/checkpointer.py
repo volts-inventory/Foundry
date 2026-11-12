@@ -29,6 +29,8 @@ from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from foundry.durability.serde import foundry_serde
+
 __all__ = ["FoundryCheckpointer", "make_checkpointer"]
 
 
@@ -64,7 +66,7 @@ class FoundryCheckpointer:
         )
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=ON")
-        self.saver = SqliteSaver(self.conn)
+        self.saver = SqliteSaver(self.conn, serde=foundry_serde())
         # DDL (executescript ⇒ implicit COMMIT) must run OUTSIDE supersteps:
         self.saver.setup()
 

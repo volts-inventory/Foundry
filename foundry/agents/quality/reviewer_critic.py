@@ -24,6 +24,7 @@ honored: the agent emitted a verdict it could never have signed itself.
 from __future__ import annotations
 
 import difflib
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,8 +38,11 @@ from foundry.agents.quality._common import (
     subject_artifact_uri,
 )
 from foundry.durability.artifact_store import UnknownArtifactError
+from foundry.proxy.model_provider_proxy import OutputLimitReached
+from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff
+from foundry.schemas.implementation import FEATURE_DIR, Effort, FeatureDiff
+from foundry.schemas.product import PRD
 from foundry.schemas.quality import ReviewedTree
 
 if TYPE_CHECKING:
@@ -291,9 +295,145 @@ _SOP = (
     "you observed. Citing a passing test or scenario does not count. Opinions on "
     "test quality (fragile asserts, missing edge cases, needless mocks) are "
     "advisory while every check passes: record them, they do not block. "
+    "Work through this checklist against the spec, the contracts and the launch "
+    "result in the request, and for each problem you find give a concrete "
+    "reproduction: a shell command (curl against the launched app, a CLI call, a "
+    "python -c one-liner) with its expected and its actual result. "
+    "(1) Structure: logic duplicated across files, dead modules nothing imports, an "
+    "entry point that re-implements what another module owns. "
+    "(2) Spec coverage: every edge case the spec names, and BOTH branches of every "
+    "'X or Y' requirement. "
+    "(3) Security: hardcoded or fallback secret keys; POST forms without CSRF "
+    "protection; SQL built by string formatting, and LIKE patterns that do not "
+    "escape the user's % and _; passwords hashed with a fast digest (md5/sha*) "
+    "instead of a password KDF; routes reachable without the auth or role the spec "
+    "requires; request bodies and uploads with no size limit. "
+    "(4) Persistence: one database connection shared across server threads (sqlite3 "
+    "without check_same_thread, or no lock), an in-memory database holding data "
+    "that must persist, and multi-step writes that are not one transaction. "
     "Report at most 10 findings, most important first, each in a sentence or two; "
     "never repeat a finding."
 )
+
+# The local reviewer's output budget: thinking at low effort plus a verdict of at
+# most 10 findings fits well inside it; a reply that runs past it is rambling.
+_REVIEW_MAX_TOKENS = 24_576
+_REVIEW_EFFORT: Effort = "low"
+_SPEC_CHAR_CAP = 12_000
+_CONTRACT_CHAR_CAP = 8_000
+_LAUNCH_FINDINGS = 20
+# The launch gate (foundry/gates/launch.py) is read by name only: the reviewer never
+# depends on its module.
+_LAUNCH_GATE = "launch"
+_INTERFACE_CONTRACT_KIND = "interface_contract"
+
+
+def _clip(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n[TRUNCATED: first {cap} of {len(text)} chars]"
+
+
+def _spec_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The spec the build answers to: the design spec (else the request), then the
+    newest PRD's prose body when the store holds it."""
+    parts = [str(state.get("spec") or state.get("request") or "").strip()]
+    prds = [a for a in state.get("artifacts") or () if a.kind == "prd"]
+    if prds and rt.cas is not None:
+        try:
+            prd = rt.cas.resolve(max(prds, key=lambda a: a.seq))
+            body = rt.cas.get_body(prd.prd_uri) if isinstance(prd, PRD) else None
+        except Exception:
+            body = None
+        text = str(getattr(body, "text", "") or "").strip()
+        if text:
+            parts.append("PRD:\n" + text)
+    return _clip("\n\n".join(p for p in parts if p), _SPEC_CHAR_CAP)
+
+
+def _contract_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The planned contracts, newest record per name: each signature, else its
+    authored prose body."""
+    if rt.cas is None:
+        return ""
+    newest: dict[str, tuple[Any, InterfaceContract]] = {}
+    for handle in state.get("artifacts") or ():
+        if handle.kind != _INTERFACE_CONTRACT_KIND:
+            continue
+        try:
+            body = rt.cas.resolve(handle)
+        except Exception:
+            continue
+        if isinstance(body, InterfaceContract) and (
+            body.name not in newest or handle.seq > newest[body.name][0]
+        ):
+            newest[body.name] = (handle.seq, body)
+    lines: list[str] = []
+    for name in sorted(newest):
+        c = newest[name][1]
+        text = c.signature.strip()
+        if not text:
+            try:
+                text = str(getattr(rt.cas.get_body(c.spec_uri), "text", "") or "").strip()
+            except Exception:
+                text = ""
+        lines.append(
+            f"- {name}" + (f" [{c.kind}]" if c.kind else "") + (f": {text}" if text else "")
+        )
+    return _clip("\n".join(lines), _CONTRACT_CHAR_CAP)
+
+
+def launch_result(state: FactoryState) -> GateResult | None:
+    """The newest launch-gate verdict on state, if the launch gate has run."""
+    launches = [g for g in state.get("gates") or () if g.name == _LAUNCH_GATE]
+    return max(launches, key=lambda g: g.seq) if launches else None
+
+
+def _launch_text(state: FactoryState) -> str:
+    g = launch_result(state)
+    if g is None:
+        return "not run yet on this build."
+    shown = "\n".join(f"  {f}" for f in g.findings[:_LAUNCH_FINDINGS])
+    return f"{g.status.value} (tree {g.run_against})" + (f":\n{shown}" if shown else ".")
+
+
+_DIFF_FILE_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
+_HUNK_FILE_SPLIT = re.compile(r"^(?=--- (?:a/|/dev/null))", re.MULTILINE)
+_DIFF_PATH = re.compile(r"^(?:\+\+\+ b/|--- a/)(\S+)", re.MULTILINE)
+_TEST_PATH = re.compile(r"(^|/)(tests?|features|steps|__tests__)/|(^|/)(test_[^/]*|conftest\.py)$")
+
+
+def _failing_findings(state: FactoryState) -> str:
+    """Every finding of the newest non-judgment verdict per gate that failed."""
+    from foundry.state.reducers import JUDGMENT_VERDICTS
+
+    latest: dict[str, GateResult] = {}
+    for g in state.get("gates") or ():
+        if g.name not in JUDGMENT_VERDICTS and (g.name not in latest or g.seq > latest[g.name].seq):
+            latest[g.name] = g
+    return "\n".join(
+        f
+        for g in latest.values()
+        if g.status in (GateStatus.FAIL, GateStatus.ERROR)
+        for f in g.findings
+    )
+
+
+def trimmed_diff(diff: str, failing: str) -> str:
+    """``diff`` cut to the files the failing checks name, else to its non-test
+    source files, within half the usual cap: the retry after a reply ran past the
+    output cap."""
+    splitter = _DIFF_FILE_SPLIT if _DIFF_FILE_SPLIT.search(diff) else _HUNK_FILE_SPLIT
+    sections = [s for s in splitter.split(diff) if s.strip()]
+    paths = [(s, m.group(1) if (m := _DIFF_PATH.search(s)) else "") for s in sections]
+    named = [s for s, p in paths if p and p in failing]
+    kept = named or [s for s, p in paths if p and not _TEST_PATH.search(p)] or sections
+    text = "".join(kept)
+    cap = _DIFF_CHAR_CAP // 2
+    if len(text) > cap:
+        text = text[:cap] + f"\n[TRUNCATED: first {cap} of {len(text)} chars]"
+    which = "the files the failing checks name" if named else "the changed source files"
+    return f"[Trimmed to {which} after your last reply ran past the output limit.]\n" + text
 
 
 def review(
@@ -370,58 +510,83 @@ def review(
         if not whole:
             prior = delta = None
     content = (
-        f"Review the artifact under {subject_uri} against the interfaces and "
-        "acceptance criteria. Emit your verdict."
+        f"Review the artifact under {subject_uri} against the spec, the contracts and "
+        "the acceptance criteria. Emit your verdict."
     )
+    spec = _spec_text(rt, state)
+    if spec:
+        content += "\n\nThe spec:\n" + spec
+    contracts = _contract_text(rt, state)
+    if contracts:
+        content += "\n\nThe planned contracts:\n" + contracts
     if criteria:
         content += "\n\nAcceptance criteria:\n" + "\n".join(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
         )
+    content += (
+        "\n\nThe launch gate (the factory started the real app and probed it): "
+        + _launch_text(state)
+    )
     if prior is None or delta is None:
         diff, complete = _diff_text(rt, state)
-        content += "\n\nThe change (unified diffs, applied in order):\n" + diff
+
+        def body(change: str) -> str:
+            return "\n\nThe change (unified diffs, applied in order):\n" + change
+
     else:
-        verdict, complete = prior[0], True
-        content += (
-            "\n\nThis is a re-review: you already judged an earlier tree of this build "
-            f"({verdict.status.value}), and a fix pass has changed it since. Your verdict is "
-            "still for the WHOLE current tree. For each of your earlier findings below, "
-            "decide from the change whether it is resolved: drop a resolved one, and "
-            "repeat every unresolved one in your findings, with its evidence. Add only "
-            "the new problems the change introduced; the rest of the tree is what you "
-            "already reviewed.\n\nYour earlier findings:\n"
-            + ("\n".join(f"- {f}" for f in verdict.findings) or "(none)")
-            + "\n\nThe change since the tree you reviewed (unified diffs):\n"
-            + delta
-        )
+        verdict, complete, diff = prior[0], True, delta
+
+        def body(change: str) -> str:
+            return (
+                "\n\nThis is a re-review: you already judged an earlier tree of this build "
+                f"({verdict.status.value}), and a fix pass has changed it since. Your verdict "
+                "is still for the WHOLE current tree. For each of your earlier findings "
+                "below, decide from the change whether it is resolved: drop a resolved one, "
+                "and repeat every unresolved one in your findings, with its evidence. Add "
+                "only the new problems the change introduced; the rest of the tree is what "
+                "you already reviewed.\n\nYour earlier findings:\n"
+                + ("\n".join(f"- {f}" for f in verdict.findings) or "(none)")
+                + "\n\nThe change since the tree you reviewed (unified diffs):\n"
+                + change
+            )
+
     # Without this the judge flags every build: the .feature files and criteria.json
     # never appear in the tickets' diffs because the gates write them.
-    content += (
+    tail = (
         f"\n\nNot in the diffs by design: the factory writes {FEATURE_DIR}/*.feature (one "
         "per ticket, rendered from the acceptance criteria above) and criteria.json "
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
     built = tree[0] if tree is not None else _reviewed_tree(state, resolve, resolve_blob)
     gates, tests = failing_checks(state, built)
-    content += (
+    tail += (
         "\n\nChecks failing on this tree in its gate results: "
         + (", ".join((*gates, *tests)) or "none (no gate has failed on it)")
         + "."
     )
-    result = rt.proxy.judge(
-        node_id,
-        subject_uri,
-        run_against,
-        nonce,
-        _SOP,
-        [{"role": "user", "content": content}],
-        seq=seq,
-        tier=_REVIEW_TIER,
-        gate_name=_GATE_NAME,
-        failing_gates=gates,
-        failing_tests=tests,
-        effort=None if prior is None else "medium",
-    )
+
+    def judge(change: str) -> JudgmentResult:
+        return rt.proxy.judge(
+            node_id,
+            subject_uri,
+            run_against,
+            nonce,
+            _SOP,
+            [{"role": "user", "content": content + body(change) + tail}],
+            seq=seq,
+            tier=_REVIEW_TIER,
+            gate_name=_GATE_NAME,
+            failing_gates=gates,
+            failing_tests=tests,
+            effort=_REVIEW_EFFORT,
+            max_tokens=_REVIEW_MAX_TOKENS,
+        )
+
+    try:
+        result = judge(diff)
+    except OutputLimitReached:
+        # Once: the trimmed request differs, so the call cache cannot replay the miss.
+        result, complete = judge(trimmed_diff(diff, _failing_findings(state))), False
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict
     # onto the SEPARATE `agent_journal` channel, which no gate/router reads. The

@@ -293,7 +293,14 @@ def test_reviewer_emits_every_quality_artifact_kind(records: Any) -> None:
     final, _cas = _run()
     arts = [a for a in final["artifacts"] if a.produced_by == "reviewer"]
     kinds = sorted(a.kind for a in arts)
-    assert kinds == ["e2e_report", "oracle_binding", "oracle_binding", "test_plan", "test_report"]
+    assert kinds == [
+        "e2e_report",
+        "oracle_binding",
+        "oracle_binding",
+        "review_findings",
+        "test_plan",
+        "test_report",
+    ]
     assert all(a.uri.startswith("cas://") for a in final["artifacts"])
     # The seeded criterion + diff handles are still on the channel.
     assert sum(a.kind == ACCEPTANCE_CRITERION_KIND for a in final["artifacts"]) == len(CRITERIA)
@@ -416,7 +423,7 @@ def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findi
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (full, delta), efforts, verdict = _two_reviews(monkeypatch)
-    assert efforts == [None, "medium"]
+    assert efforts == ["low", "low"]
     assert "--- task T1" in full and "UNTOUCHED" in full and "re-review" not in full
 
     assert "re-review" in delta and "--- task T1" not in delta
@@ -433,7 +440,7 @@ def test_a_re_review_without_the_last_reviewed_tree_is_full(
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (_, second), efforts, _ = _two_reviews(monkeypatch, keep_snapshot=False)
-    assert efforts == [None, None]
+    assert efforts == ["low", "low"]
     assert "re-review" not in second and "--- task fix-1" in second
 
 
@@ -450,7 +457,7 @@ def test_a_re_review_is_full_unless_both_reviews_see_their_whole_change(
     records: Any, monkeypatch: pytest.MonkeyPatch, built_body: str, fix_body: str
 ) -> None:
     (_, second), efforts, _ = _two_reviews(monkeypatch, built_body=built_body, fix_body=fix_body)
-    assert efforts == [None, None]
+    assert efforts == ["low", "low"]
     assert "re-review" not in second and "--- task T1" in second
 
 
@@ -499,3 +506,98 @@ def test_a_review_builds_the_tree_once_and_judges_checks_on_its_gated_sha(
     # S001 fails on the very tree under review, so the finding citing it blocks.
     assert verdict.status is GateStatus.FAIL
     assert "test, features/T1.feature::S001" in transport.requests[0]["messages"][0]["content"]
+
+
+# ---- spec, contracts, launch result, checklist, length stop --------------------
+
+
+def _reviewer_state(cas: ArtifactStore, body: str = _ADD_APP) -> FactoryState:
+    from foundry.schemas.architecture import InterfaceContract
+
+    criteria = [
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
+        for c in CRITERIA
+    ]
+    contract = InterfaceContract(
+        name="tip",
+        spec_uri="cas://contract/tip",
+        kind="function",
+        signature="def tip(total: float) -> float",
+        seq=Seq("r", 0, 0, "planner", 0),
+    )
+    handle = emit_artifact(contract, "interface_contract", "planner", contract.seq, store=cas)
+    launch = _gate("launch", GateStatus.FAIL, "GET / returned 500", local=3)
+    return {
+        "spec": "A tip calculator. Tips round to cents or to whole dollars.",
+        "artifacts": [*criteria, handle, _stored_diff(cas, "T1", body, 1)],
+        "gates": [launch],
+    }
+
+
+def test_the_review_sees_the_spec_contracts_launch_result_and_checklist(records: Any) -> None:
+    cas = ArtifactStore()
+    transport = MockTransport(verdicts=["approve"])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    node(_reviewer_state(cas), _config())
+    [request] = transport.requests
+    prompt = request["messages"][0]["content"]
+    assert "round to cents or to whole dollars" in prompt
+    assert "- tip [function]: def tip(total: float) -> float" in prompt
+    assert "launch gate" in prompt and "GET / returned 500" in prompt
+    sop = reviewer_critic._SOP
+    for item in ("CSRF", "LIKE", "check_same_thread", "transaction", "'X or Y'", "dead modules"):
+        assert item in sop
+    assert request["max_tokens"] <= reviewer_critic._REVIEW_MAX_TOKENS
+
+
+def test_advisory_findings_are_kept_on_a_review_findings_record(records: Any) -> None:
+    from foundry.agents.quality.reviewer import REVIEW_FINDINGS_KIND
+    from foundry.schemas.quality import ReviewFindings
+
+    cas = ArtifactStore()
+    advisory = {**_UNROUNDED, "finding": "names are terse", "actual": "0.02"}
+    transport = MockTransport(verdicts=[verdict_json("request-changes", [_UNROUNDED, advisory])])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    out = node(_reviewer_state(cas), _config())
+    [handle] = [a for a in out["artifacts"] if a.kind == REVIEW_FINDINGS_KIND]
+    body = cas.get_body(handle.uri)
+    assert isinstance(body, ReviewFindings)
+    assert body.status == "fail" and body.verdict_seq == out["gates"][0].seq
+    assert [f.split(" [")[0] for f in body.blocking] == ["tip is not rounded to cents"]
+    assert body.advisory == ("names are terse",)
+
+
+class _CutOnce(MockTransport):
+    """Its first verdict stops at the output cap mid-JSON; the rest are whole."""
+
+    def send(self, request: dict[str, Any]) -> Any:
+        from dataclasses import replace
+
+        response = super().send(request)
+        if len(self.requests) == 1:
+            return replace(response, text='{"status": "request-ch', stop_reason="max_tokens")
+        return response
+
+
+def test_a_review_cut_at_the_output_cap_retries_once_on_the_trimmed_diff(records: Any) -> None:
+    cas = ArtifactStore()
+    test_file = "--- /dev/null\n+++ b/tests/test_app.py\n@@ -0,0 +1 @@\n+TESTS_ONLY = 1\n"
+    transport = _CutOnce(verdicts=["approve", "approve"])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    out = node(_reviewer_state(cas, _ADD_APP + test_file), _config())
+    first, second = (r["messages"][0]["content"] for r in transport.requests)
+    assert "TESTS_ONLY" in first
+    assert "after your last reply ran past the output limit" in second
+    assert "TESTS_ONLY" not in second and "def tip" in second
+    assert out["gates"][0].status is GateStatus.PASS
+
+
+def test_the_trimmed_diff_keeps_the_files_a_failing_check_names() -> None:
+    trimmed = reviewer_critic.trimmed_diff(_ADD_APP, "build: lib.py:1: name error")
+    assert "UNTOUCHED" in trimmed and "def tip" not in trimmed

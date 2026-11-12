@@ -61,6 +61,9 @@ def test_passing_run_writes_source_files(tmp_path: Path) -> None:
     assert manifest["passed"] is True
     assert manifest["model_usage"]["model_calls"] > 0
     assert "## Model usage (observed)" in (out / "BUILD-MANIFEST.md").read_text()
+    # The shipped tree is the one a passing gate verdict ran against.
+    assert manifest["tree_sha"]
+    assert manifest["tree_attested"] is True
 
 
 def test_halted_run_writes_a_usable_draft(tmp_path: Path) -> None:
@@ -188,3 +191,57 @@ def test_a_draft_tree_that_cannot_be_written_is_tried_once_without_a_best(
     )
     assert root is None and "held at the gate" in text.lower()
     assert calls == [None]
+
+
+def test_a_run_that_crashes_after_building_still_writes_its_latest_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.cli import RunCrashed
+
+    def crash(*_: object, **__: object) -> None:
+        raise ValueError("max() iterable argument is empty")
+
+    monkeypatch.setattr("foundry.agents.quality.reviewer.review", crash)
+    out = tmp_path / "generated"
+    with pytest.raises(RunCrashed) as caught:
+        run("build a tiny URL-shortener service", thread_id="cli-out-crash", output_dir=str(out))
+
+    assert "VALUE = 42" in (out / "app.py").read_text(encoding="utf-8")
+    assert any(str(out.resolve()) in n for n in getattr(caught.value, "__notes__", ()))
+
+
+def test_a_run_stopped_before_any_code_says_why_it_left_no_draft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.proxy.token_meter import TimeCapExceeded
+
+    def capped(*_: object, **__: object) -> None:
+        raise TimeCapExceeded("time cap reached")
+
+    monkeypatch.setattr("foundry.cli.invoke._invoke", capped)
+    out = tmp_path / "generated"
+    with pytest.raises(TimeCapExceeded) as caught:
+        run("build a tiny URL-shortener service", thread_id="cli-out-early", output_dir=str(out))
+
+    assert any("no DRAFT written" in n for n in getattr(caught.value, "__notes__", ()))
+
+
+def test_manifest_cost_and_models_come_from_what_the_backends_reported() -> None:
+    from foundry.manifest import build_manifest
+
+    manifest = build_manifest(
+        request="r",
+        thread_id="t",
+        generated_at="now",
+        passed=True,
+        phase="done",
+        artifacts=(),
+        gates=(),
+        proxy_manifest=[{"served_model": "claude-opus", "usage": {"cost_microusd": 1500}}],
+        agent_usage=[{"input_tokens": 3, "cost_microusd": 250}],
+        agent_models=["claude-haiku"],
+        tree_sha="abc",
+    )
+    assert manifest.estimated_cost_microusd == 1750
+    assert manifest.model_usage.served_models == ("claude-haiku", "claude-opus")
+    assert manifest.tree_attested is False

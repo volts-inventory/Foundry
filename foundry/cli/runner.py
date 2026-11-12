@@ -636,12 +636,9 @@ def run(
                     cancel=cancel,
                     meter=meter,
                 )
-            except ValueError as exc:
-                # main() reports a ValueError as a usage error (exit 2, no traceback);
-                # one raised inside the graph is a crash and must show where.
-                raise RunCrashed(f"the run crashed: {exc!r}") from exc
             except Exception as exc:
-                # A capped, stopped or unavailable run still hands back its best tree.
+                # A capped, stopped, unavailable or crashed run still hands back its
+                # best tree.
                 if output_dir is not None:
                     output._draft_on_stop(
                         app,
@@ -653,6 +650,14 @@ def run(
                         resolve=resolve,
                         resolve_blob=resolve_blob,
                     )
+                if isinstance(exc, ValueError):
+                    # main() reports a ValueError as a usage error (exit 2, no
+                    # traceback); one raised inside the graph is a crash and must
+                    # show where.
+                    crashed = RunCrashed(f"the run crashed: {exc!r}")
+                    for note in getattr(exc, "__notes__", ()):
+                        crashed.add_note(note)
+                    raise crashed from exc
                 raise
         finally:
             if run_dir is not None:
@@ -690,12 +695,13 @@ def run(
         result = replace(
             result, resume_from=resume_boundary(final_state, resolve), resumable=durable is not None
         )
+    shipped_sha = ""
     if output_dir is not None and result.passed:
         # On a PASSING build, materialize the FINAL accepted integrated tree
         # (reusing the SAME materialize_workdir + resolve/resolve_blob seams the
         # terminal gates ran against) and write the real source files to disk.
         # A HALTED run writes a best-effort DRAFT instead (see the elif below).
-        output_root = output._write_output_tree(
+        output_root, shipped_sha = output._write_shipped_tree(
             final_state, output_dir, resolve=resolve, resolve_blob=resolve_blob
         )
         result = replace(result, output_root=output_root)
@@ -729,6 +735,7 @@ def run(
                 state=final_state,
                 rt=rt,
                 passed=result.passed,
+                tree_sha=shipped_sha,
             )
         except Exception as exc:
             print(f"warning: BUILD-MANIFEST not written: {exc}", file=sys.stderr)

@@ -15,6 +15,7 @@ from foundry.agents.planner.checks import (
     _coverage_findings,
     _entrypoint_findings,
     _offline_scenario_findings,
+    _property_findings,
     _redeclared_findings,
     _role_findings,
     _shared_type_findings,
@@ -31,6 +32,7 @@ from foundry.agents.planner.folds import (
     _ensure_security_scenario,
     _fix_covers,
     _fold_test_bindings,
+    _lift_described_properties,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
     _own_scenario_bindings,
@@ -84,6 +86,8 @@ class _Fit:
     coverage_findings: tuple[str, ...]
     overflow: tuple[str, ...]  # work dropped at a cap: a concern, fed to a revision
     folds: tuple[str, ...] = ()  # the repairs that changed something, for telemetry
+    # The frame's contracts with the properties lifted out of ticket descriptions.
+    interfaces: tuple[InterfaceContract, ...] = ()
 
     @property
     def blocking(self) -> tuple[str, ...]:
@@ -153,6 +157,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_fix_covers.__name__, more)
     tickets, criteria, more = _ensure_security_scenario(tickets, criteria, frame.criteria_seq)
     concerns += fold(_ensure_security_scenario.__name__, more)
+    tickets, interfaces, more = _lift_described_properties(tickets, frame.interfaces)
+    concerns += fold(_lift_described_properties.__name__, more)
     tickets, more, owned_types = _assign_shared_types(
         tickets, frame.interfaces, frame.declared, frame.language
     )
@@ -163,6 +169,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *_wiring_findings(tickets, frame.interfaces),
         *_shared_type_findings(tickets, frame.interfaces, frame.declared, owned_types),
         *_entrypoint_findings(tickets, frame.interfaces),
+        *_property_findings(tickets, interfaces),
         *frame.compiled.findings,
         # mypy, when it ran, is the authority on signatures; else the heuristic.
         *(() if frame.compiled.ran else _builtin_method_findings(frame.interfaces, frame.language)),
@@ -180,4 +187,13 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         ),
         *frame.stack_findings,
     )
-    return _Fit(tickets, criteria, concerns, contract, coverage, tuple(over), tuple(fired))
+    return _Fit(
+        tickets,
+        criteria,
+        concerns,
+        contract,
+        coverage,
+        tuple(over),
+        tuple(fired),
+        tuple(interfaces),
+    )

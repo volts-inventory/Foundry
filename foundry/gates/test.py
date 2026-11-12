@@ -68,7 +68,7 @@ DISCRIMINATOR_KEY = "discriminator"
 BDD_KEY = "bdd"
 # Exit code of the planned Cucumber ``bdd`` command (absent on the pytest-bdd path).
 BDD_EXIT_KEY = "bdd_exit_code"
-# {property id: "covered" | "missing"} for every planned contract property.
+# {property id: "covered" | "missing" | "skipped"} for every planned contract property.
 PROPERTIES_KEY = "properties"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
@@ -1877,6 +1877,10 @@ class TestGate:
         self.bdd_cmd = bdd_cmd or None
         self._runs_bdd = cmd is None and self.bdd_cmd is None
         self.cmd = cmd or (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short")
+        if cmd is None and self.properties and scope is None:
+            # -rs names each skip's location, so a skipped property counts as not run;
+            # -r replaces pytest's default "fE", so those are spelled out again.
+            self.cmd = (*self.cmd, "-rfEs")
         self.min_passed = min_passed
         # The held-out-mutant + behavioral-invariance discriminator: a green
         # pytest run is NECESSARY but NOT SUFFICIENT — a vacuous/gamed-green
@@ -2190,8 +2194,9 @@ class TestGate:
         if self.properties and self.scope is None:
             from .properties import property_findings
 
+            ran = f"{out}\n{err}"
             covered, notes = property_findings(
-                workdir, self.properties, self.language, f"{out}\n{err}" if rc != 0 else ""
+                workdir, self.properties, self.language, ran if rc != 0 else "", ran=ran
             )
             if covered:
                 structured[PROPERTIES_KEY] = covered

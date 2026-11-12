@@ -145,6 +145,32 @@ def test_python_gate_names_a_failing_property(tmp_path: Path) -> None:
     assert any(f.startswith("property PR1 failing (tests/test_dice.py)") for f in obs.findings)
 
 
+def test_python_gate_counts_a_skipped_property_test_as_not_run(tmp_path: Path) -> None:
+    skips = _PROPERTY_TEST.format(rest=0).replace(
+        "from hypothesis", "import pytest\nfrom hypothesis"
+    ) + (
+        "\n\ndef test_plain():\n    pytest.skip('not a property')\n"
+        "\n\n@given(st.integers())\ndef test_pr2_skips_zero(n):\n"
+        "    if n == 0:\n        pytest.skip('zero')\n    assert total(n) % 2 == 0\n"
+    )
+    gate = TestGate(properties={"PR1": "total: even", "PR2": "total: even again"})
+    obs = gate.execute(_project(tmp_path, skips))
+    assert obs.structured[PROPERTIES_KEY] == {"PR1": "covered", "PR2": "skipped"}
+    assert gate.decide(obs) is GateStatus.FAIL
+    [finding] = [f for f in obs.findings if f.startswith("property PR2 not run")]
+    assert "assume()" in finding
+
+
+def test_a_skip_line_naming_a_property_marks_it_skipped(tmp_path: Path) -> None:
+    (tmp_path / "rapid_test.go").write_text('import "testing/quick"\nfunc TestPR1Sum(t *T) {}\n')
+    ran = "=== RUN   TestPR1Sum\n--- SKIP: TestPR1Sum (0.00s)\nok  \tx\t0.01s\n"
+    status, [finding] = property_findings(tmp_path, {"PR1": "sum: s"}, "go", ran=ran)
+    assert status == {"PR1": "skipped"} and "not run" in finding
+    assert property_findings(tmp_path, {"PR1": "sum: s"}, "go", ran="1 skipped")[0] == {
+        "PR1": "covered"
+    }
+
+
 def test_non_python_profiles_detect_property_tests(tmp_path: Path) -> None:
     (tmp_path / "test").mkdir()
     (tmp_path / "test" / "dice.test.ts").write_text(
@@ -300,6 +326,7 @@ def _lock_version(name: str) -> str:
 def test_the_property_rule_forbids_a_guarded_import() -> None:
     rule = property_rule(("roll: PR1: x",), None)
     assert rule is not None and "try/except ImportError" in rule
+    assert "Never skip inside a property" in rule and "assume()" in rule
     assert f"hypothesis=={_lock_version('hypothesis')}" in rule
 
 

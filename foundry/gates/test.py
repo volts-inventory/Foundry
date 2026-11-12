@@ -1384,19 +1384,64 @@ _THEN_NONENESS = re.compile(
 )
 
 
+# A Then line that says only that an error is raised or the input refused is
+# checked in full by the error's type (isinstance, pytest.raises, toThrow(X),
+# errors.Is/As): it states no message, so agents asserting one would invent it.
+_THEN_ERROR = re.compile(
+    r"(?i)\b(errors?|exceptions?|rais(e|es|ed)|reject(s|ed)?|refuse(s|d)?|throws?|thrown)\b"
+)
+_JS_ERROR_TYPE = re.compile(
+    r"\.(toThrow|toThrowError)\s*\(\s*[A-Za-z_$]|\.toBeInstanceOf\s*\(|\binstanceof\b"
+    r"|\bassert\.(throws|rejects)\s*\("
+)
+_GO_ERROR_TYPE = re.compile(r"\berrors\.(Is|As)\s*\(")
+_THEN_QUOTED = re.compile(r"\"([^\"]+)\"|'([^']+)'|`([^`]+)`")
+
+
 def _states_only(then: str, what: re.Pattern[str]) -> bool:
     return bool(what.search(then)) and not _THEN_ASKS_MORE.search(then)
 
 
+def _then_example(then: str, language: str) -> str:
+    """A Then step that would pass the lint for ``then``, as a concrete hint."""
+    m = _THEN_QUOTED.search(then)
+    quoted = next((g for g in m.groups() if g), "") if m else ""
+    q = json.dumps(quoted or "the text the Then line states")
+    error = bool(_THEN_ERROR.search(then))
+    if language == "go":
+        if error and not quoted:
+            return 'if !errors.Is(err, ErrInvalid) { return fmt.Errorf("got %v", err) }'
+        return f'if !strings.Contains(out, {q}) {{ return fmt.Errorf("got %q", out) }}'
+    if language in ("javascript", "typescript"):
+        if error:
+            return f"expect(() => this.act()).toThrow({q if quoted else 'ValidationError'})"
+        return f"expect(this.output).toContain({q})"
+    if error:
+        if quoted:
+            return (
+                f'assert isinstance(context["error"], ValueError) and {q} in str(context["error"])'
+            )
+        return 'assert isinstance(context["error"], ValueError)'
+    if _THEN_EXIT.search(then):
+        return f"assert result.returncode == 0 and {q} in result.stdout"
+    return (
+        f"assert result == {q}" if quoted else "assert result == <the value the Then line states>"
+    )
+
+
 def _weak_test(test: ast.expr, then: str = "") -> bool:
     """An assert condition that holds for nearly any outcome: truthiness, a bare
-    ``len``/``bool``, or a not-None / exit-code check the Then line asks more of."""
+    ``len``/``bool``, or a not-None / exit-code / ``isinstance`` check the Then line
+    asks more of."""
     if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
         return True
     if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
         return _weak_test(test.operand, then)
     if isinstance(test, ast.Call):
-        return _callee(test.func) in ("bool", "len", "isinstance", "callable", "hasattr")
+        name = _callee(test.func)
+        if name == "isinstance":
+            return not _states_only(then, _THEN_ERROR)
+        return name in ("bool", "len", "callable", "hasattr")
     if isinstance(test, ast.BoolOp):
         return all(_weak_test(v, then) for v in test.values)
     if isinstance(test, ast.Compare) and len(test.ops) == 1:
@@ -1512,7 +1557,8 @@ def _python_step_lint(
     if asserts and not checks and all(_weak_test(a.test, text) for a in asserts):
         return (
             "is a Then step whose only check is truthiness, not-None or an exit code: "
-            "assert the actual output the scenario's Then line states"
+            "assert the actual output the scenario's Then line states, e.g. "
+            f"`{_then_example(text, 'python')}`"
         )
     if (name := _expected_from_sut(fn, sut)) is not None:
         return (
@@ -1661,7 +1707,7 @@ def _cucumber_step_defs(root: Path, language: str) -> list[tuple[str, str, str, 
     return out
 
 
-def _cucumber_lint(kind: str, body: str, language: str) -> str | None:
+def _cucumber_lint(kind: str, body: str, language: str, then: str = "") -> str | None:
     code = re.sub(r"//[^\n]*|/\*.*?\*/", "", body, flags=re.S)
     if kind == "when":
         rx = _GO_ASSERT if language == "go" else _JS_ASSERT
@@ -1676,8 +1722,18 @@ def _cucumber_lint(kind: str, body: str, language: str) -> str | None:
         if not _GO_CHECK.search(code):
             return "is a Then step that checks nothing (no condition, assertion or error)"
         conds = _GO_IF.findall(code)
-        if conds and not _GO_ASSERT.search(code) and all(_EXIT_TEXT.search(c) for c in conds):
-            return "is a Then step whose only check is the exit code: check the actual output"
+        error_ok = _states_only(then, _THEN_ERROR)
+        if (
+            conds
+            and not _GO_ASSERT.search(code)
+            and all(
+                _EXIT_TEXT.search(c) and not (error_ok and _GO_ERROR_TYPE.search(c)) for c in conds
+            )
+        ):
+            return (
+                "is a Then step whose only check is the exit code: check the actual "
+                f"output, e.g. `{_then_example(then, language)}`"
+            )
         return None
     checks = [
         m.group(0)
@@ -1687,10 +1743,15 @@ def _cucumber_lint(kind: str, body: str, language: str) -> str | None:
     ]
     if not checks:
         return "is a Then step that checks nothing (no assert or expect)"
-    if all(_JS_WEAK.search(c) or _EXIT_TEXT.search(c) for c in checks):
+    error_ok = _states_only(then, _THEN_ERROR)
+    if all(
+        (_JS_WEAK.search(c) or _EXIT_TEXT.search(c)) and not (error_ok and _JS_ERROR_TYPE.search(c))
+        for c in checks
+    ):
         return (
             "is a Then step whose only check is truthiness or an exit code: assert the "
-            "actual output the scenario's Then line states"
+            "actual output the scenario's Then line states, e.g. "
+            f"`{_then_example(then, language)}`"
         )
     return None
 
@@ -1714,7 +1775,7 @@ def cucumber_weak_step_notes(
                         continue
                 except re.error:
                     continue
-                if why := _cucumber_lint(kind, body, language):
+                if why := _cucumber_lint(kind, body, language, text):
                     notes.append(f"step `{text}` ({where}) {why}")
                 break
         if notes:

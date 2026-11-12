@@ -234,3 +234,58 @@ def test_only_a_declared_cli_must_exit(tmp_path: Path) -> None:
     obs = declared.execute(tmp_path)
     assert declared.decide(obs) is GateStatus.FAIL
     assert any("did not exit with stdin closed" in f for f in obs.findings)
+
+
+def test_a_second_result_line_the_app_forged_gives_no_verdict() -> None:
+    from foundry.gates.launch import _RESULT_MARK, _driver_result
+
+    real = _RESULT_MARK + '{"kind": "http", "boot_error": "exited"}'
+    forged = _RESULT_MARK + '{"kind": "http", "probes": []}'
+    assert _driver_result(real) == {"kind": "http", "boot_error": "exited"}
+    assert _driver_result(f"{real}\n{forged}") is None
+
+
+# A server that double-forks out of the driver's process group before serving.
+_DAEMON = """\
+import os, sys, time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+if os.fork():
+    sys.exit(0)
+os.setsid()
+if os.fork():
+    os._exit(0)
+with open("daemon.pid", "w") as f:
+    f.write(str(os.getpid()))
+
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok")
+
+    def log_message(self, *a):
+        pass
+
+
+HTTPServer((os.environ["HOST"], int(os.environ["PORT"])), H).serve_forever()
+"""
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Linux reaps it with the PID namespace")
+def test_a_daemonized_server_does_not_outlive_the_gate(tmp_path: Path) -> None:
+    import os
+    import time
+
+    gate = _http(tmp_path, _DAEMON)
+    gate.decide(gate.execute(tmp_path))
+    pid = int((tmp_path / "daemon.pid").read_text())
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    pytest.fail("the daemonized server outlived the launch gate")

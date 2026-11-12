@@ -23,9 +23,13 @@ supplies the command, and only the fallback entry derivation knows file names.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
+import secrets
 import shlex
+import signal
 import subprocess
 import sys
 from collections.abc import Iterable, Sequence
@@ -54,11 +58,17 @@ _MAX_GETS = 6
 _MAX_RUNS = 3
 
 # The trusted driver: argv[1] is its JSON config; its last stdout line is the result.
+_LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
+
 _DRIVER = r"""
 import http.client, json, os, re, signal, socket, subprocess, sys, threading, time
+LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
 from urllib.parse import urlencode, urljoin, urlsplit
 
 cfg = json.loads(sys.argv[1])
+# Every process the app starts inherits this, so the host can find a daemonized
+# one that left the process group (macOS has no PID namespace to reap it).
+os.environ[LAUNCH_ID_ENV] = cfg["launch_id"]
 MARK = cfg["mark"]
 TAIL = 4000
 
@@ -546,7 +556,8 @@ class LaunchGate:
         self._seal_key = seal_key
         self._cfg = {"boot_s": boot_s, "request_s": request_s, "cli_s": cli_s}
         runs = len(target.runs) if target.kind == "cli" else 1
-        self._timeout_s = boot_s + request_s * (len(target.probes) + 2) + cli_s * runs + 30
+        # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
+        self._timeout_s = boot_s + request_s * (len(target.probes) + 2) + (cli_s + 10) * runs + 30
         self.mutant_rotation_id = 0
         self.scanner_rule_version = "launch-v1"
 
@@ -579,6 +590,7 @@ class LaunchGate:
             "probes": [list(p) for p in t.probes],
             "posts": list(t.posts),
             "runs": list(t.runs),
+            "launch_id": secrets.token_hex(16),
         }
         try:
             rc, out, err = ground_untrusted(
@@ -589,6 +601,7 @@ class LaunchGate:
                 binds=self._pyenv.binds if self._pyenv is not None else (),
             )
         except subprocess.TimeoutExpired as exc:
+            _reap_escapees(cfg["launch_id"])
             return observe(
                 self.name,
                 structured={"cmd": t.cmd, "timed_out_s": self._timeout_s},
@@ -598,6 +611,7 @@ class LaunchGate:
                 ),
                 seal_key=self._seal_key,
             )
+        _reap_escapees(cfg["launch_id"])
         result = _driver_result(out)
         if result is None:
             return observe(
@@ -643,11 +657,38 @@ class LaunchGate:
 
 
 def _driver_result(stdout: str) -> dict[str, Any] | None:
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(_RESULT_MARK):
-            try:
-                got = json.loads(line[len(_RESULT_MARK) :])
-            except ValueError:
-                return None
-            return got if isinstance(got, dict) else None
-    return None
+    """The driver's one result line. More than one means the app wrote a forged one
+    (it can add lines to the driver's stdout but never remove the driver's own): no
+    verdict, so never a PASS it didn't earn."""
+    marked = [line for line in stdout.splitlines() if line.startswith(_RESULT_MARK)]
+    if len(marked) != 1:
+        return None
+    try:
+        got = json.loads(marked[0][len(_RESULT_MARK) :])
+    except ValueError:
+        return None
+    return got if isinstance(got, dict) else None
+
+
+def _reap_escapees(launch_id: str) -> None:
+    """SIGKILL any process still carrying ``launch_id`` in its environment: an app
+    that daemonized (setsid) out of the driver's process group outlives its kill on
+    macOS, which has no PID namespace. Linux reaps them with the namespace."""
+    if sys.platform != "darwin":
+        return
+    try:
+        listing = subprocess.run(
+            ("ps", "-Eww", "-x", "-o", "pid=,command="),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    needle = f"{_LAUNCH_ID_ENV}={launch_id}"
+    for line in listing.splitlines():
+        pid, _, rest = line.strip().partition(" ")
+        if needle in rest and pid.isdigit() and int(pid) != os.getpid():
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(int(pid), signal.SIGKILL)

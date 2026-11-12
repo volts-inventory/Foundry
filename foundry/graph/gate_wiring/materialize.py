@@ -14,7 +14,16 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents._common import as_text
 from foundry.base_tree import base_features, copy_base_tree
 from foundry.canonical import content_digest
-from foundry.gates.pydeps import SCAFFOLD_HEADER
+from foundry.gates.profiles import property_testing
+from foundry.gates.pydeps import (
+    _DIST_FOR_IMPORT,
+    SCAFFOLD_HEADER,
+    _dist_for,
+    _host_distributions,
+    _import_declared,
+    _normalized,
+    requirement_name,
+)
 from foundry.graph.gate_wiring.diffs import (
     FeatureDiffBodyError,
     MaterializationError,
@@ -340,13 +349,21 @@ def _pin(dist: str) -> str:
         return dist
 
 
-# What the gate harness provides (pytest, pytest-bdd and the plugins it runs them
-# with) and pure dev tools. A third-party helper the tests import (freezegun,
-# responses, hypothesis) is NOT here: the build/test venv installs from this file.
+# Never shipped: the harness's own plugins (a test never imports them) and pure dev
+# tools. A library the shipped tests import IS shipped, the harness's included.
 _DEV_TOOLS = frozenset(
-    {"pytest", "_pytest", "pytest_bdd", "pluggy", "xdist", "pytest_cov", "coverage"}
+    {"pluggy", "xdist", "pytest_cov", "coverage"}
     | {"mypy", "mypy_extensions", "ruff", "black", "flake8", "pylint", "isort"}
 )
+
+
+def _harness_test_libraries() -> tuple[str, ...]:
+    """Import names of what the gate harness provides that shipped tests import: the
+    pytest runner, pytest-bdd and the Python profile's property-testing library. The
+    gates run Foundry's copies, so a manifest without them passes every gate yet
+    ships tests that cannot be collected."""
+    lib = property_testing("python")
+    return ("pytest", "_pytest", "pytest_bdd", *((lib.library,) if lib else ()))
 
 
 def _imported_modules(dest: Path, py_files: list[Path] | None = None) -> set[str]:
@@ -424,27 +441,91 @@ def _scaffold_manifest(dest: Path) -> None:
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
 
 
-_REQ_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+# Shipped files a requirement's name in which counts as a use (a server in a
+# Procfile, a driver in a database URL); prose and the spec's inputs do not.
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".feature")
+_MENTION_MAX_BYTES = 1_000_000
+# Used with no import or mention of their own: the test runner and the property
+# library (the suite runs under them), servers started by command, drivers an ORM
+# loads from a URL scheme, and the .env loader the Flask CLI picks up.
+_LOADED_WITHOUT_IMPORT = frozenset(
+    {"pytest", "hypothesis", "gunicorn", "uvicorn", "waitress", "hypercorn", "daphne"}
+    | {"psycopg", "psycopg2", "psycopg2-binary", "pymysql", "mysqlclient", "asyncpg"}
+    | {"aiosqlite", "cx-oracle", "oracledb", "python-dotenv"}
+)
 
 
-def _declare_property_library(dest: Path) -> None:
-    """The property tests' library in the shipped ``requirements.txt``: a tree whose
-    tests import hypothesis gets ``hypothesis==<Foundry's pin>`` appended when its
-    manifest omits it. The gates run Foundry's own hypothesis, so a manifest without
-    it passes every gate yet ships a project whose tests cannot run."""
+def _mentions(dest: Path, manifest: Path) -> str:
+    out: list[str] = []
+    for path in sorted(dest.rglob("*")):
+        rel = path.relative_to(dest).as_posix()
+        if (
+            path == manifest
+            or path.suffix in _DOC_SUFFIXES
+            or rel in GATE_INPUT_FILES
+            or rel.startswith(".")
+            or not path.is_file()
+            or path.is_symlink()
+        ):
+            continue
+        try:
+            if path.stat().st_size <= _MENTION_MAX_BYTES:
+                out.append(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return "\n".join(out)
+
+
+def _used(dist: str, imported: set[str], installed: dict[str, list[str]], text: str) -> bool:
+    """Whether a shipped file uses the requirement ``dist``: a module importing it
+    (mapped as the gates' undeclared-import check maps it), a module whose name is
+    its leading part (``psycopg2`` of psycopg2-binary), or its name in a
+    non-prose file."""
+    name = _normalized(dist)
+    if name in _LOADED_WITHOUT_IMPORT or name.startswith("pytest-"):
+        return True
+    if any(_import_declared(n, {name}, installed) for n in imported):
+        return True
+    if any(name.startswith(_normalized(n) + "-") for n in imported):
+        return True
+    names = {dist, *(i for i, d in _DIST_FOR_IMPORT.items() if _normalized(d) == name)}
+    names |= {i for i, ds in installed.items() if name in {_normalized(d) for d in ds}}
+    return any(re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", text, re.IGNORECASE) for n in names)
+
+
+def _ship_test_manifest(dest: Path) -> None:
+    """Make the shipped ``requirements.txt`` match what its files import: drop a
+    requirement no shipped file uses, and append (at Foundry's pin) each library the
+    harness provides that the tests import and the manifest omits. A line that is not
+    a plain requirement (``-e .``, a path, a URL, an option) is kept as written, and
+    so is every line of a scaffolded manifest."""
     manifest = dest / "requirements.txt"
     if not manifest.is_file():
         return  # none (the scaffold derives one from imports) or pyproject-only
     text = manifest.read_text(encoding="utf-8")
-    declared = {
-        m.group(1).lower().replace("_", "-")
-        for line in text.splitlines()
-        if (m := _REQ_NAME.match(line))
-    }
-    if "hypothesis" in declared or "hypothesis" not in _imported_modules(dest):
-        return
-    sep = "" if not text or text.endswith("\n") else "\n"
-    manifest.write_text(f"{text}{sep}{_pin('hypothesis')}\n", encoding="utf-8")
+    scaffolded = text.startswith(SCAFFOLD_HEADER)  # derived from the imports already
+    imported = _imported_modules(dest)
+    installed = _host_distributions()
+    mentions = _mentions(dest, manifest)
+    kept: list[str] = []
+    declared: set[str] = set()
+    for line in text.splitlines():
+        spec = re.sub(r"(^|\s)#.*$", "", line).strip()
+        dist = requirement_name(spec) if spec and not spec.startswith("-") else None
+        if dist is None or "/" in spec or "://" in spec:
+            kept.append(line)
+            continue
+        if scaffolded or _used(dist, imported, installed, mentions):
+            kept.append(line)
+            declared.add(_normalized(dist))
+    added = [
+        _pin(_dist_for(lib, installed))
+        for lib in _harness_test_libraries()
+        if lib in imported and not _import_declared(lib, declared, installed)
+    ]
+    out = "".join(f"{line}\n" for line in [*kept, *dict.fromkeys(added)])
+    if out != text:
+        manifest.write_text(out, encoding="utf-8")
 
 
 # ---- gate-owned contract files (the wave-0 contracts ticket) -----------------
@@ -626,7 +707,7 @@ def _gated_tree_sha(dest: Path, state: FactoryState) -> str:
     stack = state.get("stack")
     if stack is None or stack.language == "python":
         _scaffold_manifest(dest)
-        _declare_property_library(dest)
+        _ship_test_manifest(dest)
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.

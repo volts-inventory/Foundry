@@ -417,9 +417,13 @@ def test_without_the_dependency_the_same_tree_fails(tmp_path: Path) -> None:
     assert gates["smoke"].status is GateStatus.FAIL
 
 
+# The materializer drops a requirement no shipped file uses: this one is imported.
+_USES_MISSING = {"uses.py": "import foundry_no_such_package_xyz\n"}
+
+
 def test_unknown_dependency_is_a_build_fail(tmp_path: Path, allow_install: None) -> None:
     reqs = "--no-index\nfoundry-no-such-package-xyz\n"
-    gates = _gates(tmp_path, {**_APP, "requirements.txt": reqs})
+    gates = _gates(tmp_path, {**_APP, **_USES_MISSING, "requirements.txt": reqs})
     build = gates["build"]
     assert build.status is GateStatus.FAIL
     assert "cannot be installed — FAIL" in build.findings[0]
@@ -442,7 +446,8 @@ def test_network_failure_is_an_error_everywhere(
         )
 
     monkeypatch.setattr(pydeps, "ground_untrusted", _offline)
-    gates = _gates(tmp_path, {**_APP, "requirements.txt": "flask\n"})
+    uses = {"uses.py": "import flask\n"}  # the materializer drops an unused requirement
+    gates = _gates(tmp_path, {**_APP, **uses, "requirements.txt": "flask\n"})
     assert {n: g.status for n, g in gates.items()} == {
         "build": GateStatus.ERROR,
         "test": GateStatus.ERROR,
@@ -686,7 +691,11 @@ def test_a_failed_install_is_retried_on_the_next_check(
     tmp_path: Path, built: list[Path], allow_install: None
 ) -> None:
     rt = _Rt()
-    files = {**_APP, "requirements.txt": "--no-index\nfoundry-no-such-package-xyz\n"}
+    files = {
+        **_APP,
+        **_USES_MISSING,
+        "requirements.txt": "--no-index\nfoundry-no-such-package-xyz\n",
+    }
     for _ in range(2):
         assert _gates(tmp_path, files, rt)["build"].status is GateStatus.FAIL
     assert len(built) == 2

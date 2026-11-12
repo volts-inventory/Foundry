@@ -19,7 +19,7 @@ from foundry.agents.planner.schema import PLAN_SCHEMA
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.properties import property_findings
 from foundry.gates.test import PROPERTIES_KEY, TestGate
-from foundry.graph.gate_wiring.materialize import _declare_property_library
+from foundry.graph.gate_wiring.materialize import _ship_test_manifest
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.gates import GateStatus
 from foundry.schemas.implementation import Specialty, StackDecision, Task, Ticket
@@ -360,15 +360,60 @@ def test_python_gate_does_not_count_a_guarded_property_test(tmp_path: Path) -> N
 def test_the_shipped_manifest_declares_hypothesis_at_the_lock_pin(tmp_path: Path) -> None:
     pin = f"hypothesis=={_lock_version('hypothesis')}"
     _project(tmp_path, _PROPERTY_TEST.format(rest=0))
+    (tmp_path / "app.py").write_text("import flask\n")
     (tmp_path / "requirements.txt").write_text("flask==3.0.0")
-    _declare_property_library(tmp_path)
+    _ship_test_manifest(tmp_path)
     assert (tmp_path / "requirements.txt").read_text() == f"flask==3.0.0\n{pin}\n"
-    _declare_property_library(tmp_path)  # already declared: unchanged
+    _ship_test_manifest(tmp_path)  # already declared: unchanged
     assert (tmp_path / "requirements.txt").read_text().count("hypothesis") == 1
     # No property test imports it: nothing is added.
     plain = tmp_path / "plain"
     plain.mkdir()
     (plain / "app.py").write_text("import flask\n")
     (plain / "requirements.txt").write_text("flask==3.0.0\n")
-    _declare_property_library(plain)
+    _ship_test_manifest(plain)
     assert (plain / "requirements.txt").read_text() == "flask==3.0.0\n"
+
+
+def test_the_shipped_manifest_declares_the_harness_libraries_the_tests_import(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("import flask\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_steps.py").write_text(
+        "import pytest\nfrom pytest_bdd import scenarios\nimport mypy\n"
+    )
+    (tmp_path / "requirements.txt").write_text("flask==3.0.0\n")
+    _ship_test_manifest(tmp_path)
+    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
+        "flask==3.0.0",
+        f"pytest=={_lock_version('pytest')}",
+        f"pytest-bdd=={_lock_version('pytest-bdd')}",
+    ]
+
+
+def test_the_shipped_manifest_drops_a_requirement_nothing_uses(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text(
+        "import flask\nimport psycopg\nMIDDLEWARE = ['whitenoise.middleware.WhiteNoise']\n"
+    )
+    (tmp_path / "Procfile").write_text("worker: celery -A app worker\n")
+    (tmp_path / "README.md").write_text("Built on SQLAlchemy and redis.\n")
+    (tmp_path / "requirements.txt").write_text(
+        "# runtime\nFlask==3.0.0\nSQLAlchemy==2.0.30\npsycopg-binary==3.1.0\n"
+        "celery==5.4.0\nwhitenoise==6.7.0\nredis>=5  # cache\n-e .\n"
+        "gunicorn==22.0.0\npytest>=8\npytest-asyncio==0.23.0\n"
+    )
+    _ship_test_manifest(tmp_path)
+    # SQLAlchemy and redis go: only prose names them. A server, the runner and its
+    # plugins are used without an import.
+    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
+        "# runtime",
+        "Flask==3.0.0",
+        "psycopg-binary==3.1.0",
+        "celery==5.4.0",
+        "whitenoise==6.7.0",
+        "-e .",
+        "gunicorn==22.0.0",
+        "pytest>=8",
+        "pytest-asyncio==0.23.0",
+    ]

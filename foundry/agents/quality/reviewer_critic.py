@@ -382,6 +382,11 @@ _SOP = (
     "violation (e.g. a traceback, panic or crash where a constraint forbids one) is "
     "BLOCKING: give the command, the constraint's id as correct_result's basis, and the "
     "observed output. "
+    "(7) Accepted input: for each operator, sign, flag, option or field the app "
+    "accepts (including ones beyond the spec), run it on a small input and compare "
+    "with the answer you compute by hand. Input that is accepted but dropped, ignored "
+    "or misread into a different answer is BLOCKING; rejecting it with an error is "
+    "fine. "
     "Report at most 10 findings, most important first, each in a sentence or two; "
     "never repeat a finding."
 )

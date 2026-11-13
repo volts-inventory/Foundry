@@ -17,6 +17,7 @@ from foundry.agents.implementation.tickets.contracts import (
 )
 from foundry.agents.implementation.tickets.packet import (
     ENTRYPOINT_RULE,
+    HONOUR_INPUT_RULE,
     PRODUCTION_WIRING_RULE,
     _ticket_context,
     _ticket_packet,
@@ -363,6 +364,8 @@ def test_the_entrypoint_packet_wires_dependencies_and_tests_use_production_wirin
     assert ENTRYPOINT_RULE not in plain and PRODUCTION_WIRING_RULE not in plain
     steps = _packet_rules(_ticket("steps", files=("features/step_definitions/a.steps.ts",)))
     assert PRODUCTION_WIRING_RULE in steps
+    assert HONOUR_INPUT_RULE in rules and HONOUR_INPUT_RULE in plain
+    assert HONOUR_INPUT_RULE not in steps
 
 
 # ---- scenario rules (11, 13) -----------------------------------------------------

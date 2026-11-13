@@ -400,6 +400,14 @@ PRODUCTION_WIRING_RULE = (
 )
 
 
+HONOUR_INPUT_RULE = (
+    "HONOUR WHAT YOU ACCEPT: every operator, sign, flag, option or field your code "
+    "accepts must change the result as it means, or be rejected with an error. Never "
+    "parse a token and then drop or ignore it: input the data types cannot represent "
+    "is rejected, not silently misread into a different answer."
+)
+
+
 def ticket_properties(
     ticket: Ticket, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
 ) -> tuple[str, ...]:
@@ -553,6 +561,8 @@ def _ticket_packet(
         )
     if ticket.entrypoint:
         rules.append(ENTRYPOINT_RULE)
+    if any(not _is_test_path(f) for f in ticket.files):
+        rules.append(HONOUR_INPUT_RULE)
     if ticket.specialty is Specialty.TEST or any(_is_test_path(f) for f in ticket.files):
         rules.append(PRODUCTION_WIRING_RULE)
     if rule := property_rule(properties, stack):

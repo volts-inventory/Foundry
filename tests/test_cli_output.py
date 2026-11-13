@@ -257,6 +257,20 @@ def test_manifest_keeps_the_stack_list_fields_as_json_lists() -> None:
     assert fields["stack"]["run"] == "python -m dice"
 
 
+def test_manifest_names_the_typecheck_the_build_gate_ran() -> None:
+    from foundry.gates.profiles import python_typecheck, stack_profile
+    from foundry.manifest import plan_fields
+    from foundry.schemas.implementation import StackDecision
+
+    stack = StackDecision(language="python", typecheck="python -m mypy .")
+    shipped = plan_fields({"stack": stack}, None)["stack"]["typecheck"]
+    assert "--exclude" in shipped and "--strict" in shipped
+    assert stack_profile(stack).build_cmd is not None
+    assert shipped in stack_profile(stack).build_cmd[-1]
+    # A change build reads the manifest back: the rewrite must not stack up.
+    assert python_typecheck(shipped) == shipped
+
+
 def test_manifest_surfaces_the_spec_conflicts_sessions_reported() -> None:
     from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
     from foundry.manifest import build_manifest, render_manifest_md, spec_conflicts

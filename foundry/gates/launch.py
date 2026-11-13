@@ -13,11 +13,13 @@ app's command in its own process group and drives it:
   as a CSRF token or ``_method`` kept, the rest filled by type/name), signup
   before login before the rest with the same credentials, then re-crawls what
   sign-in reveals and submits those forms too (no form at all: a scenario's POST
-  path). A burst of parallel requests (an authenticated page, a repeat of a
-  working form POST) follows. Then it kills the whole group. Requests and time
-  are capped. FAIL when the app exits early or never listens, a request is
-  refused, any response (burst included) is a 5xx, a form the app rendered is
-  answered 405, or the app dies under the requests.
+  path). A burst of requests released together follows: 20 signups, each in its
+  own session with its own credentials, alongside the authenticated page and
+  repeats of the form POSTs that worked (each re-fetched, so its token is fresh).
+  Then it kills the whole group. Requests and time are capped. FAIL when the app
+  exits early or never listens, a request is refused, any response (burst
+  included) is a 5xx, a form the app rendered is answered 405, or the app dies
+  under the requests.
 * **cli** — the driver runs the entrypoint scenarios' commands (else
   ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, a
   command that never exits with stdin closed, or (an app that must launch) a
@@ -79,6 +81,7 @@ _MAX_REQUESTS = 80
 _MAX_PAGES = 10
 _MAX_FORMS = 12
 _BURST = 12
+_SIGNUPS = 20  # concurrent signups in the burst, each its own session and account
 _OVERSIZED = 1_000_000  # the oversized form field's length
 _FUZZ_S = 10.0  # each hostile-input cli run's time limit
 
@@ -403,8 +406,8 @@ def probe(s, out, signed_in):
     reqs = out["requests"]
     seen, order, queue = set(), [], []
     pending, done = [], set()
-    st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "post": None,
-          "big": None, "signup": None}
+    st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "posts": [],
+          "big": None, "signup": None, "signup_form": None}
     linked = {}  # a link the app rendered -> the page that rendered it
 
     def harvest(r):
@@ -413,6 +416,7 @@ def probe(s, out, signed_in):
         for f in parse_forms(r["page"], r.get("full", "")):
             if f["rank"] == 0 and st["signup"] is None:
                 st["signup"] = f["page"]
+                st["signup_form"] = f
             if f["key"] not in done and all(f["key"] != p["key"] for p in pending):
                 pending.append(f)
         for link in parse_links(r["page"], r.get("full", ""), s.local):
@@ -461,7 +465,7 @@ def probe(s, out, signed_in):
         if g["rank"] < 2 and ok:
             st["authed"] = True
         if g["rank"] == 2 and g["method"] == "POST" and ok:
-            st["post"] = (g["action"], g["fields"])
+            st["posts"].append(g)
         if g["method"] == "POST" and g["texts"] and g["rank"] < 3:
             if st["big"] is None or (g["rank"] == 2 and st["big"]["rank"] != 2):
                 st["big"] = g
@@ -499,25 +503,78 @@ def probe(s, out, signed_in):
     return st
 
 
+def distinct(fields, texts, i):
+    # Worker i's own account: a signup reusing the probe's email is refused before
+    # it ever writes, and never reaches the code a real concurrent signup does.
+    out = []
+    for n, v in fields:
+        if n in texts and v == EMAIL:
+            v = f"launch-check-{i}@example.com"
+        elif n in texts and v == USER:
+            v = f"{USER}{i}"
+        out.append((n, v))
+    return out
+
+
+def fresh_form(s, f):
+    # The form as its page renders it now, for this session (its CSRF token), or None
+    # once the page no longer offers it (a later form deleted what it edits).
+    page = s.go("GET", f["page"], follow=2)
+    if page is None or not page.get("page") or page.get("status", 500) >= 400:
+        return None
+    found = parse_forms(page["page"], page.get("full", ""))
+    return next((g for g in found if g["key"] == f["key"]), None)
+
+
 def burst(s, st):
-    # Requests in parallel against shared state the sequential probe never races.
+    # Requests released together against shared state the sequential probe never
+    # races: `signups` new users at once (each its own session and credentials) and
+    # a mix, in the signed-in session, of its page and repeats of the forms that worked.
+    s.deadline = max(s.deadline, time.monotonic() + cfg["request_s"] * 4)
+    forms = []
+    if st["signup_form"] is not None and st["signup_form"]["method"] == "POST":
+        forms += [("signup", i) for i in range(cfg["signups"])]
+    seen = set()
+    for f in reversed(st["posts"]):
+        if f["key"] not in seen and len(seen) < 3:
+            seen.add(f["key"])
+            forms.append(("post", f))
+    ready = [None] * len(forms)
+
+    def prep(k, item):
+        kind, x = item
+        if kind == "signup":
+            own = Session(s.port)
+            g = fresh_form(own, st["signup_form"])
+            if g is not None:
+                ready[k] = (own, "POST", g["action"], distinct(g["fields"], g["texts"], x))
+        else:
+            g = fresh_form(s, x)
+            if g is not None:
+                ready[k] = (s, "POST", g["action"], g["fields"])
+
+    threads = [threading.Thread(target=prep, args=kw, daemon=True) for kw in enumerate(forms)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(cfg["request_s"] + 2)
+    jobs = [r for r in ready if r is not None and r[0] is not s]
+    repeats = [r for r in ready if r is not None and r[0] is s]
     page = st["page"] or "/"
-    jobs = [
-        ("POST", *st["post"]) if st["post"] and i % 2 else ("GET", page, None)
-        for i in range(cfg["burst"])
-    ]
+    for i in range(cfg["burst"]):
+        jobs.append(repeats[i // 2 % len(repeats)] if repeats and i % 2 else (s, "GET", page, None))
     start = threading.Barrier(len(jobs))
     results = [None] * len(jobs)
-    limit = s.sent + len(jobs) * 2
+    limit = {id(j[0]): j[0].sent + 2 * sum(1 for k in jobs if k[0] is j[0]) for j in jobs}
 
     def one(i, job):
+        who, method, path, form = job
         try:
             start.wait(cfg["request_s"])
         except threading.BrokenBarrierError:
             pass
-        results[i] = s.go(job[0], job[1], job[2], follow=1, limit=limit)
+        results[i] = who.go(method, path, form, follow=1, limit=limit[id(who)])
 
-    s.deadline = max(s.deadline, time.monotonic() + cfg["request_s"])
     threads = [threading.Thread(target=one, args=(i, j), daemon=True) for i, j in enumerate(jobs)]
     for t in threads:
         t.start()
@@ -529,7 +586,12 @@ def burst(s, st):
         k = str(r.get("status", "error"))
         statuses[k] = statuses.get(k, 0) + 1
     bad = [r for r in got if r.get("status", 0) >= 500]
-    return {"sent": len(got), "statuses": statuses, "failures": bad[:3], "count": len(bad)}
+    first = {}
+    for r in bad:
+        first.setdefault((r["method"], r["path"], r["status"]), r)
+    signups = sum(1 for j in jobs if j[0] is not s)
+    return {"sent": len(got), "signups": signups, "statuses": statuses,
+            "failures": list(first.values())[:3], "count": len(bad)}
 
 
 def oversized(s, st):
@@ -1240,19 +1302,19 @@ class LaunchGate:
         # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
         self._timeout_s = (
             boot_s
-            + request_s * (len(self._routes) + len(target.probes) + 4)
+            + request_s * (len(self._routes) + len(target.probes) + 6)
             + (cli_s + 10) * runs
             + (fuzz_s + 10) * fuzz
             + 30
         )
         # The http probe stops starting requests at probe_s, inside that timeout:
         # after it one request may be in flight, each declared route, the burst
-        # (barrier wait + two hops) and the oversized form (a GET and the POST) take a
-        # request_s each, then the kill and join.
+        # (its forms re-fetched in parallel, barrier wait + two hops) and the oversized
+        # form (a GET and the POST) take a request_s each, then the kill and join.
         probe_s = (
             self._timeout_s
             - boot_s
-            - request_s * (len(self._routes) + 7)
+            - request_s * (len(self._routes) + 9)
             - 20
             - (fuzz_s + 10) * fuzz
         )
@@ -1267,6 +1329,7 @@ class LaunchGate:
             "max_pages": _MAX_PAGES,
             "max_forms": _MAX_FORMS,
             "burst": _BURST,
+            "signups": _SIGNUPS,
         }
         self.mutant_rotation_id = 0
         self.scanner_rule_version = "launch-v1"

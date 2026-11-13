@@ -262,7 +262,8 @@ def test_a_correct_app_is_driven_through_signup_login_and_create(tmp_path: Path)
     # Each submission's redirect landed on a page (the session and CSRF token held).
     assert all(code == 200 for _, _, code in sent), sent
     assert "/notes/0" in paths, "the edit form behind the created note was never submitted"
-    assert launch["burst"]["sent"] == 12 and launch["burst"]["failures"] == []
+    burst = launch["burst"]
+    assert burst["sent"] == 32 and burst["signups"] == 20 and burst["failures"] == [], burst
     assert launch["sent"] <= 80
 
 
@@ -304,6 +305,84 @@ def test_shared_state_that_breaks_under_concurrent_requests_fails(tmp_path: Path
     assert all(q.get("status", 0) < 500 for q in launch["requests"]), "sequential probe raced"
     bad = [f for f in findings if "concurrent requests" in f]
     assert bad and all("answered 500" in f and "shared connection" in f for f in bad), findings
+
+
+# The notes bench app's bug: one service object whose DB handle each request swaps
+# for its own, so a request still using the handle meets another thread's (or a
+# closed) connection. Only a signup is slow enough (its password hash) to overlap.
+_SWAPPED_HANDLE = """\
+import os, sqlite3, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
+
+sqlite3.connect("users.db").execute("create table if not exists users (email text unique)")
+FORM = b'<form method="post" action="/signup"><input type="email" name="email">' \\
+    b'<input type="password" name="password"><button>Sign up</button></form>'
+
+
+class Accounts:
+    def sign_up(self, email):
+        time.sleep(0.1)  # the password hash
+        with self._db:
+            self._db.execute("insert into users values (?)", (email,))
+
+
+ACCOUNTS = Accounts()
+
+
+class H(BaseHTTPRequestHandler):
+    def _send(self, code, body=b"", loc=None):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html")
+        if loc:
+            self.send_header("Location", loc)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self._send(200, FORM)
+
+    def do_POST(self):
+        form = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+        db = sqlite3.connect("users.db", timeout=10)
+        accounts = {accounts}
+        accounts._db = db
+        try:
+            accounts.sign_up(form["email"][0])
+            self._send(303, loc="/")
+        except Exception as exc:
+            self._send(500, repr(exc).encode())
+        finally:
+            db.close()
+
+    def log_message(self, *a):
+        pass
+
+
+ThreadingHTTPServer.request_queue_size = 64
+ThreadingHTTPServer((os.environ["HOST"], int(os.environ["PORT"])), H).serve_forever()
+"""
+
+
+def test_concurrent_signups_through_a_swapped_shared_db_handle_fail(tmp_path: Path) -> None:
+    gate = _http(tmp_path, _SWAPPED_HANDLE.format(accounts="ACCOUNTS"))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    launch = obs.structured["launch"]
+    assert all(q.get("status", 0) < 500 for q in launch["requests"]), "sequential probe raced"
+    bad = [f for f in obs.findings if "concurrent requests" in f]
+    assert bad and "POST /signup answered 500" in bad[0] and "ProgrammingError" in bad[0], bad
+
+
+def test_concurrent_signups_each_with_its_own_handle_pass(tmp_path: Path) -> None:
+    gate = _http(tmp_path, _SWAPPED_HANDLE.format(accounts="Accounts()"))
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.PASS, obs.findings
+    burst = obs.structured["launch"]["burst"]
+    assert (
+        burst["signups"] == 20
+        and burst["statuses"].get("303", 0) + burst["statuses"].get("200", 0) == burst["sent"]
+    ), burst
 
 
 def test_a_server_that_exits_before_listening_fails(tmp_path: Path) -> None:

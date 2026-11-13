@@ -492,6 +492,28 @@ def test_the_shipped_manifest_declares_the_harness_libraries_the_tests_import(
     ]
 
 
+def test_the_shipped_manifest_pins_the_harness_libraries_at_foundrys_versions(
+    tmp_path: Path,
+) -> None:
+    # The notes bench app shipped pytest 8.2.0 under pytest-bdd 7.0.0: its suite could
+    # not even import, while the gates had run it on Foundry's copies.
+    (tmp_path / "app.py").write_text("import flask\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_steps.py").write_text("import pytest\nimport pytest_bdd\n")
+    (tmp_path / "requirements.txt").write_text(
+        "flask==3.0.3\npytest==8.2.0  # tests\npytest-bdd==7.0.0\n"
+        "hypothesis>=6; python_version >= '3.8'\nmypy==1.10.0\n"
+    )
+    _ship_test_manifest(tmp_path)
+    assert (tmp_path / "requirements.txt").read_text().splitlines() == [
+        "flask==3.0.3",
+        f"pytest=={_lock_version('pytest')}",
+        f"pytest-bdd=={_lock_version('pytest-bdd')}",
+        f"hypothesis=={_lock_version('hypothesis')}; python_version >= '3.8'",
+        "mypy==1.10.0",
+    ]
+
+
 def test_the_shipped_manifest_never_drops_a_requirement(tmp_path: Path) -> None:
     # A package can be used with no import (a server, a driver, a plugin): keep all.
     (tmp_path / "app.py").write_text("import flask\n")

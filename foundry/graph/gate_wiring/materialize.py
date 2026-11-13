@@ -443,21 +443,29 @@ def _scaffold_manifest(dest: Path) -> None:
 def _ship_test_manifest(dest: Path) -> None:
     """Append to the shipped ``requirements.txt`` (at Foundry's pin) each library the
     harness provides that the tests import and the manifest omits, so the shipped
-    tests collect outside the gates. Never drops a line: a package can be loaded with
-    no import (a server, a DB driver, a plugin), and a wrong drop breaks the app."""
+    tests collect outside the gates. A line naming one of those libraries is
+    rewritten to Foundry's pin: the gates only ever ran the tests on Foundry's
+    copies, and another version (pytest 8.2 under pytest-bdd 7.0) may not even
+    import. Never drops a line: a package can be loaded with no import (a server, a
+    DB driver, a plugin), and a wrong drop breaks the app."""
     manifest = dest / "requirements.txt"
     if not manifest.is_file():
         return  # none (the scaffold derives one from imports) or pyproject-only
     text = manifest.read_text(encoding="utf-8")
     imported = _imported_modules(dest)
     installed = _host_distributions()
+    harness = {_normalized(_dist_for(lib, installed)) for lib in _harness_test_libraries()}
     kept = text.splitlines()
     declared: set[str] = set()
-    for line in kept:
+    for i, line in enumerate(kept):
         spec = re.sub(r"(^|\s)#.*$", "", line).strip()
         dist = requirement_name(spec) if spec and not spec.startswith("-") else None
-        if dist is not None:
-            declared.add(_normalized(dist))
+        if dist is None:
+            continue
+        declared.add(_normalized(dist))
+        if _normalized(dist) in harness and (pin := _pin(dist)) != dist:
+            marker = spec.partition(";")[2].strip()
+            kept[i] = f"{pin}; {marker}" if marker else pin
     added = [
         _pin(_dist_for(lib, installed))
         for lib in _harness_test_libraries()

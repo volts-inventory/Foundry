@@ -658,13 +658,14 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return seen
 
 
-# `pytest>=1` installs offline ("already satisfied" from Foundry's copy) and is no
-# exact pin, so it takes the install path.
+# `pluggy>=0.1` installs offline ("already satisfied" from Foundry's copy) and is no
+# exact pin, so it takes the install path (a pytest line would be repinned to
+# Foundry's own version, which needs no install).
 _CACHEABLE = {
     "app.py": "VALUE = 42\n",
     "test_app.py": _APP["test_app.py"],
     "smoke.py": "import app\n",
-    "requirements.txt": "pytest>=1\n",
+    "requirements.txt": "pluggy>=0.1\n",
 }
 
 
@@ -676,7 +677,7 @@ def test_the_run_reuses_one_install_per_manifest(
         gates = _gates(tmp_path, _CACHEABLE, rt)
         assert all(g.status is GateStatus.PASS for g in gates.values()), gates
     assert len(built) == 1
-    changed = {**_CACHEABLE, "requirements.txt": "pytest>=2\n"}
+    changed = {**_CACHEABLE, "requirements.txt": "pluggy>=0.2\n"}
     assert _gates(tmp_path, changed, rt)["build"].status is GateStatus.PASS
     assert len(built) == 2 and built[0] != built[1]
     _gates(tmp_path, _CACHEABLE, _Rt())  # another run never shares

@@ -352,3 +352,13 @@ def test_review_request_lists_the_plans_pinned_constraints_and_must_haves() -> N
     assert "old rule" not in text
     assert "MH-1 (must-have): rolls NdM expressions" in text
     assert "5,000-digit number" in _SOP and "2,000 nested brackets" in _SOP
+
+
+def test_review_sop_demands_a_running_command_for_a_runtime_finding() -> None:
+    # The notes bench app's race was flagged with `grep -n self._conn db.py` as its
+    # evidence: the repro gate could not reproduce it, and it shipped.
+    from foundry.agents.quality.reviewer_critic import _SOP
+
+    assert "must carry a command that EXERCISES that behaviour" in _SOP
+    assert "Never grep or cat as evidence of runtime behaviour" in _SOP
+    assert "allowed only for a static finding" in _SOP

@@ -124,6 +124,20 @@ def terminal_gates_pass(state: FactoryState) -> bool:
     write never reaches here, L5), so the guard cannot be tricked by an
     unattested status-flipped copy.
     """
+    # A review finding Foundry re-ran and saw again is an attested defect: it holds
+    # the release until a later check decides it no longer reproduces (a check that
+    # ERRORed decided nothing).
+    repro = max(
+        (
+            g
+            for g in state.get("gates") or ()
+            if g.name == "repro" and g.status is not GateStatus.ERROR
+        ),
+        key=lambda g: g.seq,
+        default=None,
+    )
+    if repro is not None and repro.status is GateStatus.FAIL:
+        return False
     return _gates_all_pass(_latest_by_name(state), TERMINAL_PASS_GATES)
 
 

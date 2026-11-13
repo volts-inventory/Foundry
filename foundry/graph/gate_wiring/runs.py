@@ -388,17 +388,11 @@ def planned_properties(state: FactoryState, resolve: ArtifactResolver) -> dict[s
     """property id -> "<contract>: <statement>" for the properties of every newest
     contract a live ticket implements (a dropped ticket's contract proves nothing)."""
     from foundry.agents.implementation.tickets import read_tickets
-    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
-    from foundry.schemas.architecture import InterfaceContract
+    from foundry.agents.implementation.tickets.packet import live_contracts
 
     implemented = {name for t in read_tickets(state, resolve) for name in t.implements}
-    newest: dict[str, InterfaceContract] = {}
-    for a in sorted(
-        (a for a in state.get("artifacts") or () if a.kind == CONTRACT_KIND), key=lambda a: a.seq
-    ):
-        body = resolve(a)
-        if isinstance(body, InterfaceContract):
-            newest[body.name] = body
+    # A property its owning ticket reported as contradicting the spec is waived.
+    newest = live_contracts(state, resolve)
     out: dict[str, str] = {}
     for c in newest.values():
         if c.name in implemented:
@@ -542,13 +536,11 @@ def wave_owned_tests(
         read_tickets,
         task_id_for_ticket,
     )
-    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
-    from foundry.agents.implementation.tickets.packet import _newest_by, ticket_properties
-    from foundry.schemas.architecture import InterfaceContract
+    from foundry.agents.implementation.tickets.packet import live_contracts, ticket_properties
 
     tickets = read_tickets(state, resolve)
     built = built_task_ids(state)
-    contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+    contracts = live_contracts(state, resolve)
     files: list[str] = []
     properties: dict[str, str] = {}
     for t in tickets:

@@ -408,6 +408,10 @@ def test_a_spec_conflict_naming_a_property_drops_it_from_the_live_contracts() ->
     live = live_contracts(state, resolve)  # type: ignore[arg-type]
     assert live["hash_password"].properties == ("PR6: verify round-trips",)
     assert live["roll"].properties == ("PR1: in range",)
+    # The final and wave Test gates read the same waived set.
+    from foundry.graph.gate_wiring.runs import planned_properties
+
+    assert set(planned_properties(state, resolve)) == {"PR6", "PR1"}  # type: ignore[arg-type]
 
 
 # ---- guarded imports and the shipped manifest ------------------------------------

@@ -5,6 +5,7 @@ wall-clock cap and the local server check. No network: local servers are fakes."
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -453,6 +454,63 @@ def test_local_mode_defaults_to_three_fix_attempts_and_one_slot(
 # ---- structured output on the local server ----------------------------------------
 
 
+class FakeStream:
+    """A streamed chat completion: the chunks the OpenAI SDK yields, and whether
+    the client closed it (how an aborted call stops the server)."""
+
+    def __init__(self, chunks: list[Any]) -> None:
+        self.chunks = chunks
+        self.read = 0
+        self.closed = False
+
+    def __iter__(self) -> Any:
+        for chunk in self.chunks:
+            if self.closed:
+                return
+            self.read += 1
+            yield chunk
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _chunk(model: str, delta: Any = None, finish: str | None = None, usage: Any = None) -> Any:
+    choices = [] if delta is None else [SimpleNamespace(delta=delta, finish_reason=finish)]
+    return SimpleNamespace(model=model, id="cmpl-s", choices=choices, usage=usage)
+
+
+def _stream_of(response: Any) -> FakeStream:
+    """``response`` (a non-streamed completion) as the stream a server sends:
+    reasoning a word a chunk, then the content, then each tool call in two
+    argument pieces, then a usage-only chunk."""
+    choice = response.choices[0]
+    message = choice.message
+    model = response.model
+    chunks = [
+        _chunk(model, SimpleNamespace(reasoning=word, content=None))
+        for word in re.findall(r"\s*\S+", str(getattr(message, "reasoning", "") or ""))
+    ]
+    if message.content:
+        chunks.append(_chunk(model, SimpleNamespace(content=message.content)))
+    for i, tc in enumerate(getattr(message, "tool_calls", None) or ()):
+        args = tc.function.arguments
+        half = len(args) // 2
+        for n, part in enumerate((args[:half], args[half:])):
+            fn = SimpleNamespace(name=tc.function.name if n == 0 else None, arguments=part)
+            delta = SimpleNamespace(
+                content=None,
+                tool_calls=[SimpleNamespace(index=i, id=tc.id if n == 0 else None, function=fn)],
+            )
+            chunks.append(_chunk(model, delta))
+    chunks.append(_chunk(model, SimpleNamespace(content=None), finish=choice.finish_reason))
+    chunks.append(_chunk(model, usage=response.usage))
+    return FakeStream(chunks)
+
+
+def _served(params: dict[str, Any], response: Any) -> Any:
+    return _stream_of(response) if params.get("stream") else response
+
+
 class _FakeCompletions:
     def __init__(self, reject_schema: bool, text: str) -> None:
         self.reject_schema = reject_schema
@@ -464,12 +522,13 @@ class _FakeCompletions:
         if self.reject_schema and "response_format" in params:
             raise RuntimeError("Error code: 400 - 'response_format' json_schema not supported")
         message = SimpleNamespace(content=self.text)
-        return SimpleNamespace(
+        response = SimpleNamespace(
             model=params["model"],
             id="cmpl-1",
             choices=[SimpleNamespace(message=message, finish_reason="stop")],
             usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
         )
+        return _served(params, response)
 
 
 def _local_client(reject_schema: bool, text: str) -> Any:
@@ -957,12 +1016,13 @@ class _ThinkingCompletions:
             if self.inline
             else SimpleNamespace(content=answer, reasoning=thought)
         )
-        return SimpleNamespace(
+        response = SimpleNamespace(
             model=params["model"],
             id=f"cmpl-{n}",
             choices=[SimpleNamespace(message=message, finish_reason="stop")],
             usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
         )
+        return _served(params, response)
 
 
 @pytest.mark.parametrize("inline", [False, True])
@@ -1100,12 +1160,13 @@ class _ToolCompletions:
             message = SimpleNamespace(content="", tool_calls=calls)
         else:
             message = SimpleNamespace(content=json.dumps(self.actions.pop(0)))
-        return SimpleNamespace(
+        response = SimpleNamespace(
             model=params["model"],
             id="cmpl-t",
             choices=[SimpleNamespace(message=message, finish_reason="stop")],
             usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
         )
+        return _served(params, response)
 
 
 def _tool_proxy(completions: _ToolCompletions) -> tuple[ModelProviderProxy, LocalOpenAITransport]:
@@ -1431,3 +1492,200 @@ def test_concurrent_remember_keeps_the_reasoning_memory_bounded() -> None:
     for t in threads:
         t.join()
     assert len(transport._reasoning) == lt._REASONING_MEMORY
+
+
+# ---- reasoning budget: a runaway local thought is aborted mid-stream ---------------
+
+
+class _RunawayCompletions:
+    """A local server whose model thinks ``think`` reasoning tokens (one a chunk)
+    before answering (JSON, or a tool call when ``tools``) at any thinking level;
+    with thinking off it answers at once."""
+
+    def __init__(self, think: int, tools: bool = False) -> None:
+        self.think = think
+        self.tools = tools
+        self.calls: list[dict[str, Any]] = []
+        self.streams: list[FakeStream] = []
+
+    def create(self, **params: Any) -> Any:
+        self.calls.append(params)
+        thinks = params.get("reasoning_effort") not in (None, "none")
+        calls = (
+            [SimpleNamespace(id="c1", function=SimpleNamespace(name="run", arguments="{}"))]
+            if self.tools
+            else []
+        )
+        message = SimpleNamespace(
+            content="" if self.tools else '{"answer": "42"}',
+            reasoning=" ".join(["hmm"] * self.think) if thinks else "",
+            tool_calls=calls,
+        )
+        response = SimpleNamespace(
+            model=params["model"],
+            id=f"cmpl-{len(self.calls)}",
+            choices=[SimpleNamespace(message=message, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=50, completion_tokens=self.think + 5),
+        )
+        served = _served(params, response)
+        if isinstance(served, FakeStream):
+            self.streams.append(served)
+        return served
+
+
+def _runaway_proxy(
+    completions: _RunawayCompletions, tmp_path: Path | None = None
+) -> ModelProviderProxy:
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    proxy = _local_proxy(LocalOpenAITransport(client=client))
+    proxy.token_meter = TokenMeter(None)
+    proxy.call_cache = tmp_path
+    return proxy
+
+
+def _stream_client(stream: FakeStream) -> Any:
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=lambda **_: stream))
+    )
+
+
+def test_reasoning_budgets_are_per_call_kind_and_never_squeeze_the_planner() -> None:
+    local = RecordingTransport()
+    proxy = _local_proxy(local)
+    msgs = [{"role": "user", "content": "x"}]
+    proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation")
+    proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", effort="medium")
+    proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation")
+    proxy.complete(
+        "reviewer", "T2", "SOP", msgs, purpose="judgment", effort="low", max_tokens=24576
+    )
+    agent, plan, repair, review = (r["local_reasoning_budget"] for r in local.requests)
+    assert agent == {"low": 8192, "medium": 12288, "xhigh": 24576}
+    # A plan is cut only once its answer could no longer fit under the output cap.
+    assert plan["medium"] == 40960 - 4096 and repair["xhigh"] == 98304 - 4096
+    assert review["low"] == 16384
+    # A call that does not think carries no budget (and is never streamed).
+    off_local = RecordingTransport()
+    off = _local_proxy(off_local)
+    off._local_thinking = "off"
+    off.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation")
+    assert "local_reasoning_budget" not in off_local.requests[0]
+
+
+def test_a_thinking_call_is_streamed_and_reassembled() -> None:
+    completions = _RunawayCompletions(think=40)
+    transport = LocalOpenAITransport(
+        client=SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    )
+    response = transport.send(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}],
+            "local_thinking": True,
+            "local_effort": "medium",
+            "local_reasoning_budget": {"medium": 100},
+        }
+    )
+    sent = completions.calls[0]
+    assert sent["stream"] is True and sent["stream_options"] == {"include_usage": True}
+    assert response.text == '{"answer": "42"}' and response.stop_reason == "stop"
+    assert response.reasoning == " ".join(["hmm"] * 40)
+    assert response.usage["input_tokens"] == 50 and response.usage["output_tokens"] == 45
+    assert completions.streams[0].closed
+
+
+def test_a_streamed_tool_call_is_reassembled_from_its_pieces() -> None:
+    completions = _ToolCompletions(reject_tools=False)
+    proxy, _ = _tool_proxy(completions)
+    result = proxy.complete("node", "T2", "SOP", TOOL_HISTORY, purpose="ideation", tools=TOOLS)
+    assert completions.calls[0]["stream"] is True
+    first, second = result.tool_calls
+    assert first == {"id": "call_1", "name": "read_file", "input": {"path": "a.py"}}
+    assert second["id"] == "tool_call_1" and "not a JSON object" in second["error"]
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_reasoning_past_its_budget_aborts_the_stream(inline: bool) -> None:
+    from foundry.proxy.model_provider_proxy import ThinkingBudgetExceeded
+
+    words = [f"w{i} " for i in range(500)]
+    if inline:
+        chunks = [_chunk("m", SimpleNamespace(content="<think>"))]
+        chunks += [_chunk("m", SimpleNamespace(content=w)) for w in words]
+    else:
+        chunks = [_chunk("m", SimpleNamespace(reasoning=w, content=None)) for w in words]
+    stream = FakeStream([*chunks, _chunk("m", SimpleNamespace(content="{}"), finish="stop")])
+    transport = LocalOpenAITransport(client=_stream_client(stream))
+    with pytest.raises(ThinkingBudgetExceeded) as caught:
+        transport.send(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "x" * 400}],
+                "local_thinking": True,
+                "local_effort": "medium",
+                "local_reasoning_budget": {"medium": 100},
+            }
+        )
+    assert stream.closed and stream.read < len(stream.chunks) // 2
+    partial = caught.value.response
+    assert partial.text == "" and partial.stop_reason == "thinking_budget"
+    assert partial.usage["output_tokens"] == 101 and partial.usage["input_tokens"] >= 100
+    assert partial.reasoning.startswith("w0 w1") and caught.value.budget == 100
+
+
+def test_a_long_answer_after_short_reasoning_is_never_aborted() -> None:
+    chunks = [_chunk("m", SimpleNamespace(reasoning="ok ", content=None))] * 5
+    chunks += [_chunk("m", SimpleNamespace(content="x" * 10)) for _ in range(500)]
+    stream = FakeStream([*chunks, _chunk("m", SimpleNamespace(content=None), finish="length")])
+    response = LocalOpenAITransport(client=_stream_client(stream)).send(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "x"}],
+            "local_thinking": True,
+            "local_effort": "low",
+            "local_reasoning_budget": {"low": 10},
+        }
+    )
+    assert len(response.text) == 5000 and response.stop_reason == "length"
+
+
+def test_a_runaway_agent_turn_is_retried_a_level_lower_metered_and_cached_once(
+    tmp_path: Path,
+) -> None:
+    completions = _RunawayCompletions(think=20000)
+    proxy = _runaway_proxy(completions, tmp_path)
+    msgs = [{"role": "user", "content": "task"}]
+    result = proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", schema=SCHEMA)
+    assert result.parsed == {"answer": "42"}
+    first, retry = completions.calls
+    assert first["reasoning_effort"] == "medium" and retry["reasoning_effort"] == "none"
+    # Aborted just past its 12288-token budget, not run on to the length stop.
+    assert completions.streams[0].closed and completions.streams[0].read < 12400
+    assert "stream" not in retry  # thinking off: nothing to bound
+    note = retry["messages"][-1]["content"]
+    assert note.startswith("task\n\n[Retry 1:") and "'thinking_budget'" in note
+    assert "12288-token budget" in note
+    # The aborted attempt's tokens are metered; only the answer is cached.
+    meter = proxy.token_meter
+    assert meter is not None and meter.local_used >= 12289 + 20005
+    assert len(list(tmp_path.glob("*.json"))) == 1
+    again = proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", schema=SCHEMA)
+    assert again.parsed == {"answer": "42"} and len(completions.calls) == 2
+
+
+def test_a_runaway_tool_turn_steps_down_a_level_at_a_time() -> None:
+    completions = _RunawayCompletions(think=30000, tools=True)
+    proxy = _runaway_proxy(completions)
+    result = proxy.complete(
+        "junior_engineer",
+        "T2",
+        "SOP",
+        TOOL_HISTORY,
+        purpose="ideation",
+        tools=TOOLS,
+        effort="xhigh",
+    )
+    assert [c["reasoning_effort"] for c in completions.calls] == ["xhigh", "medium", "none"]
+    assert [s.read < 30000 for s in completions.streams] == [True, True]
+    assert completions.calls[2]["messages"] == completions.calls[0]["messages"]
+    assert result.tool_calls[0]["name"] == "run"

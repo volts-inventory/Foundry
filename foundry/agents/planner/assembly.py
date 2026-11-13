@@ -14,6 +14,7 @@ from foundry.agents.planner.checks import (
     _contract_findings,
     _coverage_findings,
     _entrypoint_findings,
+    _garbled_step_findings,
     _held_connection_findings,
     _offline_scenario_findings,
     _property_findings,
@@ -36,6 +37,7 @@ from foundry.agents.planner.folds import (
     _fix_covers,
     _fold_test_bindings,
     _form_method_routes,
+    _form_page_routes,
     _lift_described_properties,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
@@ -185,6 +187,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_settle_contracts_file.__name__, more)
     tickets, more = _form_method_routes(tickets, frame.stack, frame.interfaces, frame.ui)
     concerns += fold(_form_method_routes.__name__, more)
+    tickets, more = _form_page_routes(tickets, frame.stack, frame.interfaces, frame.ui)
+    concerns += fold(_form_page_routes.__name__, more)
     type_findings, type_concerns = _type_contract_findings(
         tickets, frame.interfaces, frame.declared, types, frame.contracts_file, frame.design
     )
@@ -207,6 +211,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *stack_findings,
         *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
         *_offline_scenario_findings(criteria),
+        *_garbled_step_findings(criteria),
         *bound_conflicts(frame.constraints, criteria),
         *_branch_findings(criteria, frame.brief),
         # A change build's base tree already owns its roles.

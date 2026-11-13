@@ -1005,24 +1005,26 @@ def _js_client(tickets: Sequence[Ticket], stack: StackDecision) -> bool:
     return False
 
 
-def _form_method_routes(
+_Route = tuple[str, str]  # (method, _route_key(path))
+
+
+def _server_ui_routes(
     tickets: Sequence[Ticket],
     stack: StackDecision | None,
     interfaces: Sequence[InterfaceContract],
     ui: bool,
-) -> tuple[list[Ticket], list[str]]:
-    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
-    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
-    browser edit and delete forms can only POST, so they got 405. Note on the ticket
-    owning each such route (its http contract's implementer, else the entrypoint)
-    that it also serves a POST route the forms submit to."""
+) -> tuple[dict[_Route, str], dict[_Route, str]] | None:
+    """For a server-rendered web UI (a 'ui' capability or template files, no JS
+    client): every route the stack interface and the http contracts declare, as
+    written, and the ticket owning each (its http contract's implementer). None
+    for any other stack."""
     if stack is None or not _web_stack(stack):
-        return list(tickets), []
+        return None
     templated = any(PurePosixPath(f).suffix in _TEMPLATE_SUFFIXES for t in tickets for f in t.files)
     if not (ui or templated) or _js_client(tickets, stack):
-        return list(tickets), []
-    owner_of: dict[tuple[str, str], str] = {}
-    routes: dict[tuple[str, str], str] = {}
+        return None
+    owner_of: dict[_Route, str] = {}
+    routes: dict[_Route, str] = {}
     implementers = {n: t.id for t in tickets for n in t.implements}
     for text, owner in (
         *((r, None) for r in stack.interface),
@@ -1037,6 +1039,86 @@ def _form_method_routes(
             routes.setdefault(key, f"{method} {path}")
             if owner is not None:
                 owner_of.setdefault(key, owner)
+    return routes, owner_of
+
+
+FORM_PAGES_NOTE = "Every form needs a page that renders it"
+# A POST whose last segment names one of these is a form's own page, never the
+# page of the collection above it.
+_FORM_VERBS = frozenset({"new", "edit", "create", "add"})
+# A POST that is a bare button (no fields to fill in) needs no page of its own.
+_BUTTON_ACTIONS = frozenset({"delete", "remove", "logout", "toggle"})
+
+
+def _form_page_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI whose POST form routes (POST /new, POST
+    /notes/{id}/edit) have no GET page rendering the form, or which has no GET /:
+    the user can submit a form no page shows, and the site's root is a 404. Note on
+    the ticket owning each such POST (its http contract's implementer, else the
+    entrypoint) that it also serves the GET page, and on the entrypoint that it
+    serves GET / (the home page or a redirect)."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None or not found[0]:
+        return list(tickets), []
+    routes, owner_of = found
+    gets = {p for m, p in routes if m == "GET"}
+
+    def has_page(path: str) -> bool:
+        parent, _, last = path.rpartition("/")
+        if path in gets or last in _FORM_VERBS:
+            return path in gets
+        return bool({f"{path}/new", f"{path}/edit", parent or "/"} & gets)
+
+    entry = next((t.id for t in _features(tickets) if t.entrypoint), None)
+    needed: dict[str, list[str]] = {}
+    for method, path in routes:
+        last = path.rpartition("/")[2]
+        if (
+            method == "POST"
+            and not path.startswith("/api/")
+            and last not in _BUTTON_ACTIONS
+            and not has_page(path)
+            and (owner := owner_of.get((method, path), entry)) is not None
+        ):
+            form = routes[(method, path)].split(" ", 1)[1]
+            needed.setdefault(owner, []).append(
+                f"GET {form} rendering the form that submits to POST {form}"
+            )
+    if "/" not in gets and entry is not None:
+        needed.setdefault(entry, []).append("GET / (the home page, or a redirect to it)")
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = needed.get(t.id)
+        if not mine or FORM_PAGES_NOTE in t.description:
+            out.append(t)
+            continue
+        note = f"{FORM_PAGES_NOTE} and a browser starts at /: also serve " + "; ".join(mine) + "."
+        out.append(t.model_copy(update={"description": f"{t.description}\n\n{note}".lstrip()}))
+        concerns.append(f"Ticket {t.id}: noted GET page routes: " + "; ".join(mine) + ".")
+    return out, concerns
+
+
+def _form_method_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
+    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
+    browser edit and delete forms can only POST, so they got 405. Note on the ticket
+    owning each such route (its http contract's implementer, else the entrypoint)
+    that it also serves a POST route the forms submit to."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None:
+        return list(tickets), []
+    routes, owner_of = found
     posts = [p for m, p in routes if m == "POST"]
     unformed = [
         k

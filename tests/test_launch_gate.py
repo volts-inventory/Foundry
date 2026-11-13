@@ -163,6 +163,8 @@ class H(BaseHTTPRequestHandler):
         sid, s = self._session()
         hdr = [("Set-Cookie", f"sid={{sid}}; Path=/; HttpOnly")]
         tok = csrf_field(s["csrf"])
+        if BREAK == "csrf":  # a template printing the token helper instead of calling it
+            tok = csrf_field("&lt;function generate_csrf&gt;")
         if self.path == "/signup":
             page = (
                 '<form method="post" action="/signup">' + tok + PW +
@@ -171,6 +173,7 @@ class H(BaseHTTPRequestHandler):
             )
         elif self.path == "/login":
             page = (
+                ('<a href="/help/">Help</a>' if BREAK == "deadlink" else '') +
                 '<a href="/signup">Sign up</a><form method="post" action="/login">' + tok + PW +
                 '<input name="email"><button>Log in</button></form>'
             )
@@ -275,6 +278,24 @@ def test_a_rendered_form_whose_method_the_route_refuses_fails_405(tmp_path: Path
     assert status is GateStatus.FAIL
     bad = [f for f in findings if "405 Method Not Allowed" in f]
     assert bad and "POST /notes/0" in bad[0] and "_method=PUT" in bad[0], findings
+
+
+def test_a_rendered_form_answered_4xx_and_a_signup_that_never_signs_in_fail(
+    tmp_path: Path,
+) -> None:
+    status, findings, launch = _notes(tmp_path, "csrf")
+    assert status is GateStatus.FAIL
+    bad = [f for f in findings if "answers 400" in f and "hidden fields" in f]
+    assert any("POST /signup" in f for f in bad) and any("POST /login" in f for f in bad), findings
+    assert any("never succeeded" in f and "/signup" in f for f in findings), findings
+    assert launch["auth"] == {"signup": "/signup", "authed": False}
+
+
+def test_a_rendered_link_that_404s_fails(tmp_path: Path) -> None:
+    status, findings, _ = _notes(tmp_path, "deadlink")
+    assert status is GateStatus.FAIL
+    bad = [f for f in findings if "link to /help/" in f]
+    assert bad and "on /login answers 404" in bad[0], findings
 
 
 def test_shared_state_that_breaks_under_concurrent_requests_fails(tmp_path: Path) -> None:

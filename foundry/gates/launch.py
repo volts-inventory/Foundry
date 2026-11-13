@@ -404,15 +404,19 @@ def probe(s, out, signed_in):
     seen, order, queue = set(), [], []
     pending, done = [], set()
     st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "post": None,
-          "big": None}
+          "big": None, "signup": None}
+    linked = {}  # a link the app rendered -> the page that rendered it
 
     def harvest(r):
         if not (r.get("html") and r.get("status", 500) < 400 and r.get("page")):
             return
         for f in parse_forms(r["page"], r.get("full", "")):
+            if f["rank"] == 0 and st["signup"] is None:
+                st["signup"] = f["page"]
             if f["key"] not in done and all(f["key"] != p["key"] for p in pending):
                 pending.append(f)
         for link in parse_links(r["page"], r.get("full", ""), s.local):
+            linked.setdefault(link, r["page"])
             if link not in seen and link not in queue:
                 queue.append(link)
 
@@ -424,6 +428,8 @@ def probe(s, out, signed_in):
         st["pages"] += 1
         r = s.go("GET", path)
         if r is not None:
+            if path in linked:
+                r["linked_from"] = linked[path]
             reqs.append(r)
             harvest(r)
             if st["authed"] and st["page"] is None and r.get("html") and r.get("status") == 200:
@@ -585,7 +591,9 @@ def run_http():
             if proc.poll() is None and cfg["oversized"] and st["big"] is not None:
                 out["oversized"] = oversized(sess, st)
 
-        probe(sess, out, signed_in)
+        st = probe(sess, out, signed_in)
+        if st["signup"] is not None:
+            out["auth"] = {"signup": st["signup"], "authed": st["authed"]}
         out["sent"] = sess.sent
         for r in out["routes"]:
             for k in ("full", "html", "page"):
@@ -1123,6 +1131,29 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
                 "method the form really sends, or honor the _method override before routing. "
                 f"Response: {_body(q)}"
             )
+        elif 400 <= status < 500 and status != 429 and form:
+            out.append(
+                f"launch: the form on {form.get('page')} submits {what} with its own hidden "
+                f"fields (a CSRF token included) and plausible values, and the app answers "
+                f"{status}: a form the app renders must work as rendered. Check that the "
+                "template renders each hidden field's real value (a token helper called, not "
+                "printed as a function or left empty) and that the route accepts the field "
+                f"names the form sends. Response: {_body(q)}"
+            )
+        elif status in (404, 405) and q.get("linked_from"):
+            out.append(
+                f"launch: the link to {q.get('path')} on {q['linked_from']} answers {status}: "
+                "a link the app renders must lead to a page — serve that path (exactly as the "
+                f"link spells it) or fix the link. Response: {_body(q)}"
+            )
+    auth = r.get("auth") or {}
+    if auth and not auth.get("authed"):
+        out.append(
+            f"launch: the app renders a signup form ({auth.get('signup')}), but signing up "
+            "and logging in with it never succeeded (every signup/login form answered 4xx or "
+            "worse, or none could be submitted): a user cannot get in. See the form "
+            "answers above."
+        )
     burst = r.get("burst") or {}
     for q in burst.get("failures") or ():
         out.append(

@@ -330,6 +330,20 @@ def test_walk_worktree_excludes_scratch_dirs(tmp_path: Path) -> None:
     assert set(walk_worktree(tmp_path)) == {"src/m.py"}
 
 
+def test_walk_worktree_skips_every_shared_cache_dir_and_file(tmp_path: Path) -> None:
+    from foundry.state.tree_sha import CACHE_DIRS
+
+    for d in CACHE_DIRS:
+        (tmp_path / "src" / d).mkdir(parents=True)
+        (tmp_path / "src" / d / "f").write_text("x")
+    (tmp_path / ".hypothesis" / "examples").mkdir(parents=True)
+    (tmp_path / ".hypothesis" / "examples" / "ab").write_text("db")
+    for name in (".coverage", ".coverage.host.1", "src/m.pyc"):
+        (tmp_path / name).write_text("x")
+    (tmp_path / "src" / "m.py").write_text("M = 1\n")
+    assert set(walk_worktree(tmp_path)) == {"src/m.py"}
+
+
 @pytest.mark.parametrize(
     ("manifest", "kept"),
     [

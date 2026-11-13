@@ -40,31 +40,49 @@ from pathlib import Path
 from foundry.canonical import content_digest
 
 __all__ = [
+    "CACHE_DIRS",
+    "CACHE_GLOBS",
     "DEFAULT_EXCLUDED_DIRS",
     "DEFAULT_EXCLUDED_GLOBS",
     "ExcludePredicate",
     "default_exclude",
     "execution_reuse_key",
+    "is_cache_path",
     "normalized_source_tree",
     "tree_sha",
 ]
 
-# Path segments excluded by default (build outputs, caches, vendored envs).
-DEFAULT_EXCLUDED_DIRS: frozenset[str] = frozenset(
+# Dirs a toolchain run leaves anywhere in a tree (environments, caches, coverage
+# output), never authored source: the one list every walk, diff and shipped tree
+# skips. ``target/`` is not here: it is build output only beside Cargo.toml/pom.xml.
+CACHE_DIRS: frozenset[str] = frozenset(
     {
-        ".git",
-        ".venv",
         "__pycache__",
-        "node_modules",
-        "dist",
-        "build",
         ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
         ".hypothesis",
+        ".tox",
+        ".nox",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".gradle",
+        ".nyc_output",
+        "htmlcov",
+        "coverage",
+        ".parcel-cache",
+        ".turbo",
     }
 )
+# Basenames of the cache and coverage files such a run leaves.
+CACHE_GLOBS: tuple[str, ...] = ("*.pyc", ".coverage", ".coverage.*")
+
+# Path segments excluded by default: the caches plus VCS and build outputs.
+DEFAULT_EXCLUDED_DIRS: frozenset[str] = CACHE_DIRS | {".git", "dist", "build"}
 
 # Basename glob patterns excluded by default.
-DEFAULT_EXCLUDED_GLOBS: tuple[str, ...] = ("*.pyc",)
+DEFAULT_EXCLUDED_GLOBS: tuple[str, ...] = CACHE_GLOBS
 
 # exclude predicate: relative POSIX path -> True if the path must be skipped.
 ExcludePredicate = Callable[[str], bool]
@@ -75,14 +93,19 @@ ExcludePredicate = Callable[[str], bool]
 _EMPTY_LOCKFILE_HASH = content_digest({"kind": "resolved_lockfile_hash", "lockfiles": {}})
 
 
-def default_exclude(rel_posix: str) -> bool:
-    """Default exclude predicate over a relative POSIX path.
+def is_cache_path(rel_posix: str) -> bool:
+    """Whether a relative POSIX path lies in a :data:`CACHE_DIRS` dir or names a
+    :data:`CACHE_GLOBS` file."""
+    parts = rel_posix.split("/")
+    if any(part in CACHE_DIRS for part in parts):
+        return True
+    return any(fnmatch.fnmatch(parts[-1], pat) for pat in CACHE_GLOBS)
 
-    Excludes any path containing a default-excluded segment (``.git``,
-    ``.venv``, ``__pycache__``, ``node_modules``, ``dist``, ``build``,
-    ``.pytest_cache``, ``.hypothesis``) and any basename matching a
-    default-excluded glob (``*.pyc``).
-    """
+
+def default_exclude(rel_posix: str) -> bool:
+    """Default exclude predicate over a relative POSIX path: any path with a
+    :data:`DEFAULT_EXCLUDED_DIRS` segment, or a :data:`DEFAULT_EXCLUDED_GLOBS`
+    basename."""
     parts = rel_posix.split("/")
     if any(part in DEFAULT_EXCLUDED_DIRS for part in parts):
         return True

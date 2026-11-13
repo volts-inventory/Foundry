@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 from foundry.cli import result
 from foundry.graph.gate_wiring import GATE_INPUT_FILES
 from foundry.schemas.gates import FixPass, GateResult, GateStatus
+from foundry.state.tree_sha import is_cache_path
 
 if TYPE_CHECKING:
     from langchain_core.runnables import RunnableConfig
@@ -84,6 +85,8 @@ def _write_shipped_tree(
                 continue
             rel = src.relative_to(stage_root)
             if rel.name in GATE_INPUT_FILES and len(rel.parts) == 1:
+                continue
+            if is_cache_path(rel.as_posix()):
                 continue
             # Defense-in-depth: reject an
             # absolute or '..' relative path before writing under out_root.

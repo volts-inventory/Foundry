@@ -166,7 +166,12 @@ _TICKET_RULES = (
     'duplicate") gets one scenario per branch, each citing it in covers[]. HARD '
     "INPUTS: cover the inputs that break real apps, not only the happy path: invalid, "
     "blank and malformed values, wrong types, non-ASCII text, size limits and the "
-    "boundaries either side of them. FEATURE PAIRS: when the spec lists independent "
+    "boundaries either side of them. CONVENTIONS: when the input is a well-known "
+    "notation or format, accept the variants its users routinely type, not only the "
+    "spec's example (an omitted default like d20 for 1d20, either letter case, "
+    "spaces around operators), with a scenario for each; a numeric option rejects "
+    "values outside its meaningful range (a repeat count of 0 or -2) with an error. "
+    "FEATURE PAIRS: when the spec lists independent "
     "features of one input (operators, flags, options, input kinds), add at least one "
     "scenario combining each pair the spec allows together (subtraction with dice "
     "AND a constant, a filter with a sort): a scenario per feature alone passes while "

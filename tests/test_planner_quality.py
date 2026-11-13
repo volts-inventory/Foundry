@@ -718,3 +718,10 @@ def test_the_sop_says_html_forms_send_only_get_and_post() -> None:
     from foundry.agents.planner.schema import SOP
 
     assert "HTML forms send only GET and POST" in SOP
+
+
+def test_the_sop_asks_for_the_conventional_input_variants() -> None:
+    from foundry.agents.planner.schema import SOP
+
+    assert "accept the variants its users routinely type" in SOP
+    assert "a repeat count of 0 or -2" in SOP

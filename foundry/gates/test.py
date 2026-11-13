@@ -138,6 +138,51 @@ sys.exit(console_main())
 """
 )
 
+# A scoped check's run of a session's own test modules (TestGate.owning): a step
+# module among them runs too, its scenario tests deselected (the BDD run judges
+# those, scoped), so its other tests and an import error in it are judged here.
+# pytest-bdd is registered by module object before the workdir joins sys.path, as
+# in the BDD bootstrap.
+_ISOLATED_PYTEST_OWN_BOOTSTRAP = (
+    _BOOTSTRAP_PREAMBLE
+    + """\
+import pytest
+try:
+    import pytest_bdd.plugin as _bdd_plugin
+    import pytest_bdd.scenario as _bdd_scenario
+    _bdd_registry = getattr(_bdd_scenario, "scenario_wrapper_template_registry", {})
+    _plugins = [_bdd_plugin]
+except ImportError:
+    _bdd_registry, _plugins = {}, []
+
+
+def _is_scenario(item):
+    fn = getattr(item, "function", None)
+    if fn is None:
+        return False
+    try:
+        if fn in _bdd_registry:
+            return True
+    except TypeError:
+        pass
+    return getattr(fn, "__scenario__", None) is not None
+
+
+class _OwnTestsOnly:
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(self, config, items):
+        drop = [i for i in items if _is_scenario(i)]
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = [i for i in items if not _is_scenario(i)]
+"""
+    + ADD_BUILD_SITE
+    + """\
+sys.path.insert(0, wd)
+sys.exit(pytest.main(sys.argv[1:], plugins=[*_plugins, _OwnTestsOnly()]))
+"""
+)
+
 # Env keys handing the BDD bootstrap its gate-owned channel; it pops them before any
 # workdir code runs. The report path is in a fresh temp dir OUTSIDE the workdir and is
 # opened O_EXCL at startup; the per-run nonce is echoed into the report and checked.
@@ -2101,8 +2146,10 @@ class TestGate:
         return gate
 
     def _own_targets(self, workdir: Path) -> tuple[str, ...]:
-        """The test modules of :attr:`own_tests` in ``workdir`` that bind no feature
-        file (a step module's scenarios run, and are judged, through the BDD run)."""
+        """The test modules of :attr:`own_tests` in ``workdir``, step modules too: the
+        own run deselects their scenario tests (the BDD run judges those), and runs
+        the rest, so a property or plain test in a step module, or an import error
+        in one, is the session's own failure."""
         root = Path(workdir)
         found: set[str] = set()
         for entry in self.own_tests:
@@ -2111,12 +2158,7 @@ class TestGate:
             for p in paths:
                 if p.is_file() and not p.is_symlink() and _is_test_module(p.name):
                     found.add(p.relative_to(root).as_posix())
-        found = {f for f in found if PurePosixPath(f).name != "conftest.py"}
-        if not found:
-            return ()
-        features = {r.split("::", 1)[0] for r in trusted_scenarios(workdir)}
-        binding = set(binding_modules(workdir, features)) if features else set()
-        return tuple(sorted(found - binding))
+        return tuple(sorted(f for f in found if PurePosixPath(f).name != "conftest.py"))
 
     def _own_run(self, workdir: Path) -> tuple[tuple[str, ...], int, str, str]:
         """(targets, exit code, stdout, stderr) of the own test modules' run; exit
@@ -2124,7 +2166,7 @@ class TestGate:
         targets = self._own_targets(workdir)
         if not targets:
             return (), _NO_TESTS_COLLECTED, "", ""
-        cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short", "-rfEs")
+        cmd = (sys.executable, "-c", _ISOLATED_PYTEST_OWN_BOOTSTRAP, "-q", "--tb=short", "-rfEs")
         rc, out, err = self._ground(workdir, (*cmd, *targets))
         return targets, rc, out, err
 

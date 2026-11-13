@@ -645,3 +645,71 @@ def test_a_scoped_gate_fails_on_its_own_tests_and_properties(tmp_path: Path) -> 
     # A subtree entry runs every test module under it.
     subtree = scoped.owning(("tests/",), {})
     assert subtree.decide(subtree.execute(root)) is GateStatus.FAIL
+
+
+_STEP_MODULE = """\
+from hypothesis import given, strategies as st
+from pytest_bdd import given, scenarios, then
+
+from dice import total
+
+scenarios("../features/T1.feature")
+
+
+@given("a die")
+def die():
+    pass
+
+
+@then("it totals")
+def totals():
+    assert total(1) == 2
+
+
+class TestDiceProperties:
+    @given(st.integers(min_value=0, max_value=100))
+    def test_pr1_total_is_even(self, n):
+        assert total(n) % 2 == 0
+"""
+
+
+def _step_project(tmp_path: Path, module: str) -> Path:
+    root = _project(tmp_path, module)
+    (root / "features").mkdir()
+    (root / "features" / "T1.feature").write_text(
+        "Feature: dice\n  Scenario: AC-1\n    Given a die\n    Then it totals\n"
+    )
+    return root
+
+
+def test_a_scoped_gate_judges_the_other_tests_of_an_own_step_module(tmp_path: Path) -> None:
+    """Round 4 (notes): T1's `from pytest_bdd import given` shadowed hypothesis's, so
+    its property tests in the step module errored, yet its check and the wave checks
+    passed on the module's scenarios: the own run left step modules out."""
+    root = _step_project(tmp_path, _STEP_MODULE)
+    gate = TestGate(scope=frozenset({"features/T1.feature::AC-1"})).owning(
+        ("tests/test_dice.py",), {"PR1": "total: the total is even"}
+    )
+    obs = gate.execute(root)
+    assert obs.structured["bdd"] == {"features/T1.feature::AC-1": "passed"}
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any("tests/test_dice.py::TestDiceProperties" in f for f in obs.findings), obs.findings
+    # Fixed, the module's scenario is not run again (or failed) by the own run.
+    shutil.rmtree(root / "tests" / "__pycache__", ignore_errors=True)
+    (root / "tests" / "test_dice.py").write_text(
+        _STEP_MODULE.replace("from pytest_bdd import given,", "from pytest_bdd import")
+        .replace('@given("a die")', "@pytest_bdd.given('a die')")
+        .replace("from dice", "import pytest_bdd\nfrom dice")
+    )
+    green = gate.execute(root)
+    assert gate.decide(green) is GateStatus.PASS, green.findings
+    assert green.structured["own_exit_code"] == 0
+
+
+def test_an_import_error_in_an_own_step_module_fails_the_scoped_gate(tmp_path: Path) -> None:
+    root = _step_project(tmp_path, "from dice import nothing\n" + _STEP_MODULE)
+    # Out of scope: the BDD run does not run the module; the own run still does.
+    gate = TestGate(scope=frozenset()).owning(("tests/test_dice.py",), {})
+    obs = gate.execute(root)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any(f.startswith("this ticket's own tests failed") for f in obs.findings)

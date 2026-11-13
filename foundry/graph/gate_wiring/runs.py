@@ -526,14 +526,17 @@ def wave_scenarios(
 
 
 def wave_owned_tests(
-    state: FactoryState, resolve: ArtifactResolver, scope: frozenset[str]
+    state: FactoryState, resolve: ArtifactResolver, carry: Iterable[str] = ()
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """(test files, properties) a wave check's scoped Test gate also judges
     (``TestGate.owning``): every built ticket's files and its contracts' properties
     (id -> "<contract>: <statement>"), as its own session's check judged them
-    (``packet._ticket_check``). A ticket with a scenario outside ``scope`` (its paired
-    ticket is unbuilt, so its tests import code nobody wrote yet) is left to a later
-    wave."""
+    (``packet._ticket_check``) — a ticket whose scenarios are not all in the wave's
+    scope too: only scenarios wait for their carriers, and a check that skipped the
+    ticket's tests passed on failures it never ran. ``carry`` (ledger items,
+    ``gate:ident``: the fix window's initial failures) adds the module of every
+    failing pytest id and every failing property, so a re-check judges each failure
+    its window opened on and cannot close green while one still fails."""
     from foundry.agents.implementation.tickets import (
         built_task_ids,
         read_tickets,
@@ -545,25 +548,28 @@ def wave_owned_tests(
 
     tickets = read_tickets(state, resolve)
     built = built_task_ids(state)
-    criteria = _current_criteria(state, resolve).values()
     contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
     files: list[str] = []
     properties: dict[str, str] = {}
     for t in tickets:
         if task_id_for_ticket(t.id) not in built:
             continue
-        own = {
-            scenario_ref(c.ticket_id or t.id, c.id)
-            for c in criteria
-            if c.id in t.scenario_ids or c.ticket_id == t.id
-        }
-        if not own <= scope:
-            continue
         files.extend(t.files)
         for line in ticket_properties(t, tickets, contracts):
             name, _, rest = line.partition(": ")
             pid, _, text = rest.partition(": ")
             properties[pid] = f"{name}: {text}"
+    carried = [i.partition(":")[2] for i in carry if i.startswith("test:")]
+    pids = [i.removeprefix("property:") for i in carried if i.startswith("property:")]
+    if pids:
+        planned = planned_properties(state, resolve)
+        for pid in pids:
+            properties.setdefault(pid, planned.get(pid, f"contract property {pid}"))
+    files.extend(
+        module
+        for i in carried
+        if not i.startswith("property:") and (module := i.split("::", 1)[0]).endswith(".py")
+    )
     return tuple(dict.fromkeys(files)), properties
 
 
@@ -657,6 +663,7 @@ def run_build_gate(
     profile: VerificationProfile | None = None,
     scenarios: frozenset[str] = frozenset(),
     launch: bool = False,
+    carry: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
     when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
@@ -664,8 +671,9 @@ def run_build_gate(
     ``launch`` (the last wave: the whole app is built) the Launch gate.
 
     The full Test gate is left out on purpose: scenarios of tickets not yet built
-    would fail it. Keyed under the same nodes as the final gates, so the final
-    verdicts (a later epoch) supersede every intermediate one."""
+    would fail it. ``carry``: the fix window's initial failures, judged again
+    (:func:`wave_owned_tests`). Keyed under the same nodes as the final gates, so
+    the final verdicts (a later epoch) supersede every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     files = planned_files(state, resolve)
@@ -699,7 +707,7 @@ def run_build_gate(
         ]
         test = _wave_test_gate(profile, runner, scenarios, pyenv) if scenarios else None
         if test is not None:
-            test = test.owning(*wave_owned_tests(state, resolve, scenarios))
+            test = test.owning(*wave_owned_tests(state, resolve, carry))
             # Same tree digest as the build, so the fixer reads both verdicts as this
             # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
             # ever runs on a later tree (a failing wave check is fixed or halts).

@@ -157,6 +157,7 @@ class WaveBuildCheck:
         config: RunnableConfig,
         scenarios: frozenset[str],
         launch: bool = False,
+        carry: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         with tempfile.TemporaryDirectory(prefix="foundry_wave_gate_") as tmp:
             return run_build_gate(
@@ -170,15 +171,25 @@ class WaveBuildCheck:
                 profile=self.profile,
                 scenarios=scenarios,
                 launch=launch,
+                carry=carry,
             )
 
     def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
         scenarios = self._scenarios(state)
         boundary, launch = self._boundary(state, scenarios)
-        out = self._check(state, config, scenarios, launch)
+        window = fix_window(state, boundary, scenarios)
+        # A re-check judges every failure its window opened on, not only what this
+        # tree's tickets own: a pass aimed at one cluster closed the window green
+        # while another cluster's failures, never run again, still failed.
+        opened = min(
+            (p for p in state.get("fix_passes") or () if p.window == window),
+            key=lambda p: (p.pass_no, p.seq),
+            default=None,
+        )
+        carry = opened.failing if opened is not None else ()
+        out = self._check(state, config, scenarios, launch, carry)
         # Escalation and the no-progress note judge this pass, not a restored tree.
         own: list[GateResult] = list(out.get("gates") or ())
-        window = fix_window(state, boundary, scenarios)
         unbuilt = self._unbuilt_waves(state)
         base = advanced_from(state, window) if self.fix_policy.until_cap else None
         reverted = keep_best(
@@ -190,7 +201,7 @@ class WaveBuildCheck:
             rt=self.rt,
             resolve=self.resolve,
             resolve_blob=self.resolve_blob,
-            rerun=lambda s: self._check(s, config, scenarios, launch),
+            rerun=lambda s: self._check(s, config, scenarios, launch, carry),
             policy=self._policy,
             unbuilt_waves=unbuilt,
             carried=frozenset(base.failing) if base else frozenset(),

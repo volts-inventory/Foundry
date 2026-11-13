@@ -306,8 +306,9 @@ def _cluster_gates(
     return scope_gates(failed, cluster), (
         f"this pass fixes ONE failure cluster: {cluster.key} ({len(cluster.items)} "
         "failure(s), listed below); every one of them is yours",
-        f"other failures, handled by another pass ({shown}): not yours and not "
-        "pre-existing; don't touch them",
+        f"other failures, each the target of a later pass of this fix loop ({shown}): "
+        "the re-check after your pass still judges them and the next passes go after "
+        "them; not yours and not pre-existing; don't touch them",
     )
 
 

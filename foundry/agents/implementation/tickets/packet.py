@@ -87,26 +87,39 @@ def _newest_by(
 _PROPERTY_ID = re.compile(r"\bPR\d+\b", re.IGNORECASE)
 
 
-def conflicted_properties(state: FactoryState) -> frozenset[str]:
+def conflicted_properties(
+    state: FactoryState, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> frozenset[str]:
     """The contract property ids a build session's spec-conflict report names: the
     spec contradicts them, so no gate requires them (the build manifest lists the
-    report)."""
+    report). Only the reporting ticket's own properties: one session must not waive
+    a property another ticket proves."""
     from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
 
-    return frozenset(
-        pid.upper()
-        for t in state.get("gate_triage") or ()
-        if t.name == SPEC_CONFLICT_TRIAGE
-        for pid in _PROPERTY_ID.findall(str(t.explanation))
-    )
+    by_task = {f"task/{t.id}": t for t in tickets}  # ticket ids are their task ids
+    out: set[str] = set()
+    for note in state.get("gate_triage") or ():
+        ticket = by_task.get(note.run_against)
+        if note.name != SPEC_CONFLICT_TRIAGE or ticket is None:
+            continue
+        own = {
+            line.split(": ", 2)[1].upper() for line in ticket_properties(ticket, tickets, contracts)
+        }
+        out |= {pid.upper() for pid in _PROPERTY_ID.findall(str(note.explanation))} & own
+    return frozenset(out)
 
 
 def live_contracts(state: FactoryState, resolve: ArtifactResolver) -> dict[str, InterfaceContract]:
     """The newest contract per name, without the properties a spec conflict names."""
+    from foundry.agents.implementation.tickets.tasks import read_tickets
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
     contracts: dict[str, InterfaceContract] = _newest_by(
         state, resolve, CONTRACT_KIND, InterfaceContract, "name"
     )
-    dropped = conflicted_properties(state)
+    if not any(t.name == SPEC_CONFLICT_TRIAGE for t in state.get("gate_triage") or ()):
+        return contracts
+    dropped = conflicted_properties(state, read_tickets(state, resolve), contracts)
     if not dropped:
         return contracts
     return {

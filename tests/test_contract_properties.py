@@ -375,25 +375,39 @@ def test_the_planner_emits_no_unsatisfiable_property() -> None:
 
 def test_a_spec_conflict_naming_a_property_drops_it_from_the_live_contracts() -> None:
     contract = _contract("hash_password", "PR6: verify round-trips", "PR7: no substring leak")
-    handle = Artifact(kind="interface_contract", uri="cas://c", produced_by="planner", seq=_SEQ)
-    state: dict[str, object] = {"artifacts": [handle]}
+    roll = _contract("roll", "PR1: in range")
+    auth = _ticket("auth", files=("auth.py", "tests/test_auth.py"), implements=("hash_password",))
+    dice = _ticket("dice", files=("dice.py", "tests/test_dice.py"), implements=("roll",))
+    bodies: dict[str, object] = {"cas://c": contract, "cas://r": roll, "cas://a": auth}
+    bodies["cas://d"] = dice
+    handles = [
+        Artifact(kind="interface_contract", uri="cas://c", produced_by="planner", seq=_SEQ),
+        Artifact(kind="interface_contract", uri="cas://r", produced_by="planner", seq=_SEQ),
+        Artifact(kind="ticket", uri="cas://a", produced_by="planner", seq=_SEQ),
+        Artifact(kind="ticket", uri="cas://d", produced_by="planner", seq=_SEQ),
+    ]
+    state: dict[str, object] = {"artifacts": handles}
 
-    def resolve(a: Artifact) -> InterfaceContract:
-        return contract
+    def resolve(a: Artifact) -> object:
+        return bodies[a.uri]
 
-    def note(name: str, text: str) -> GateTriage:
+    def note(name: str, task: str, text: str) -> GateTriage:
         return GateTriage(
-            name=name, run_against="task/auth", explanation=text, produced_by="p", seq=_SEQ
+            name=name, run_against=f"task/{task}", explanation=text, produced_by="p", seq=_SEQ
         )
 
     assert live_contracts(state, resolve)["hash_password"] is contract  # type: ignore[arg-type]
     state["gate_triage"] = [
-        note(SPEC_CONFLICT_TRIAGE, "pr7 says the hash never holds the password; 'a' is in hex"),
-        note("adapter-report", "PR6 is fine"),
+        note(SPEC_CONFLICT_TRIAGE, "auth", "pr7 says the hash never holds it; 'a' is in hex"),
+        note("adapter-report", "auth", "PR6 is fine"),
+        # Another ticket cannot waive a property it does not prove.
+        note(SPEC_CONFLICT_TRIAGE, "dice", "PR6 contradicts SC-2"),
     ]
-    assert conflicted_properties(state) == {"PR7"}  # type: ignore[arg-type]
+    contracts = {"hash_password": contract, "roll": roll}
+    assert conflicted_properties(state, [auth, dice], contracts) == {"PR7"}  # type: ignore[arg-type]
     live = live_contracts(state, resolve)  # type: ignore[arg-type]
     assert live["hash_password"].properties == ("PR6: verify round-trips",)
+    assert live["roll"].properties == ("PR1: in range",)
 
 
 # ---- guarded imports and the shipped manifest ------------------------------------

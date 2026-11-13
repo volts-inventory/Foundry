@@ -208,7 +208,7 @@ from foundry.agents.planner.split import ask_split, split_items, split_problem
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
 from foundry.gates.app_checks import app_check_constraints
 from foundry.proxy.model_provider_proxy import (
-    _LOCAL_THINKING_MAX_TOKENS,
+    _LOCAL_PLAN_MAX_TOKENS,
     OutputLimitReached,
     ProxyUnavailable,
     StructuredOutputError,
@@ -278,7 +278,7 @@ _FIRST_EFFORT: Effort = "medium"
 _REPAIR_EFFORT: Effort = "medium"
 # The proxy's own budget at that effort: the cap shrinks nothing, it only makes a
 # reply cut at length raise instead of re-rolling into the same cut.
-_REPAIR_MAX_TOKENS = _LOCAL_THINKING_MAX_TOKENS["medium"]
+_REPAIR_MAX_TOKENS = _LOCAL_PLAN_MAX_TOKENS
 _DELTA_EFFORT: Effort = "medium"
 _DELTA_MAX_TOKENS = 32_000
 _LENGTH_STOPS = frozenset({"length", "max_tokens"})

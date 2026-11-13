@@ -389,8 +389,11 @@ def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None
     assert deps.files == ("requirements.txt",)
     assert "Flask" in deps.description and "pinned with ==" in deps.description
     assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
-    # The owner can still extend it.
-    assert "requirements.txt" in next(t for t in rest if t.id == entry["id"]).files
+    # The late owner loses it: its edit would change what every earlier wave installs.
+    owner = next(t for t in rest if t.id == entry["id"])
+    assert "requirements.txt" not in owner.files
+    assert f"is written by ticket {HARNESS_TICKET_ID}" in owner.description
+    assert f"{entry['id']}: {entry['title']}" in deps.description
 
 
 def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:

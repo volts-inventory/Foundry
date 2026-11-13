@@ -29,7 +29,7 @@ from foundry.agents.planner.schema import (
     NODE_ID,
     TICKET_KIND,
 )
-from foundry.schemas.architecture import InterfaceContract, SystemDesign
+from foundry.schemas.architecture import ADR, InterfaceContract, SystemDesign
 from foundry.schemas.implementation import Epic, StackDecision, Ticket
 from foundry.schemas.product import PRD, AcceptanceCriterion, CriteriaCritique, IntentBrief
 
@@ -171,6 +171,14 @@ def _prior_plan(
     interfaces = tuple((name, _prose(rt, i.spec_uri)) for name, i in contracts.items())
     declared = frozenset(name for name, i in contracts.items() if _declaration_only(i))
     intent = _newest_intent(state, rt)
+    adrs = (
+        sorted(
+            (a for a in _newest_by_id(state, rt, "adr", ADR).values() if a.id in design.adr_ids),
+            key=lambda a: design.adr_ids.index(a.id),
+        )
+        if design
+        else []
+    )
     brief = (
         "PLAN (from the previous pass):\n"
         f"Product: {prd.title}\n{_clip(_prose(rt, prd.prd_uri))}"
@@ -178,6 +186,11 @@ def _prior_plan(
             f"\nArchitecture: {design.title}\n{_clip(_prose(rt, design.design_uri))}\n"
             f"Components: {', '.join(design.components) or '(none)'}"
             if design
+            else ""
+        )
+        + (
+            "\nDecisions:\n" + "\n".join(f"- {a.id} {a.title}: {a.decision}" for a in adrs)
+            if adrs
             else ""
         )
         + _goals_text(intent)

@@ -14,6 +14,7 @@ from foundry.agents.planner.checks import (
     _contract_findings,
     _coverage_findings,
     _entrypoint_findings,
+    _garbled_step_findings,
     _held_connection_findings,
     _offline_scenario_findings,
     _property_findings,
@@ -29,6 +30,7 @@ from foundry.agents.planner.folds import (
     _add_contract_deps,
     _add_read_deps,
     _assign_shared_types,
+    _declare_dependencies,
     _drop_dangling_refs,
     _drop_orphan_scenarios,
     _drop_self_consumes,
@@ -36,11 +38,14 @@ from foundry.agents.planner.folds import (
     _fix_covers,
     _fold_test_bindings,
     _form_method_routes,
+    _form_page_routes,
     _lift_described_properties,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
+    _own_harness_files,
     _own_scenario_bindings,
     _own_stack_files,
+    _settle_contracts_file,
     _wire_entrypoint,
     stack_files,
 )
@@ -82,6 +87,7 @@ class _Frame:
     constraints: tuple[tuple[str, str], ...] = ()  # the plan's pinned (id, text)
     contracts_file: str = ""  # where the contract data types go
     ui: bool = False  # the PRD declares a 'ui' capability
+    dependencies: tuple[str, ...] = ()  # the plan's stack.dependencies, as manifest entries
 
 
 @dataclass(frozen=True)
@@ -129,13 +135,19 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     )
     generated = (
         *frame.generated,
-        *_python_deps_ticket(tickets, frame.generated, frame.stack, base, frame.tickets_seq),
+        *_python_deps_ticket(
+            tickets, frame.generated, frame.stack, base, frame.tickets_seq, frame.dependencies
+        ),
     )
     tickets, more = _attach_generated(tickets, generated, frame.tickets_seq)
     concerns += more
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)
         concerns += fold(repair.__name__, more)
+    tickets, more = _own_harness_files(tickets)
+    concerns += fold(_own_harness_files.__name__, more)
+    tickets, more = _declare_dependencies(tickets, frame.dependencies)
+    concerns += fold(_declare_dependencies.__name__, more)
     tickets, more, stack_findings = _own_stack_files(
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
@@ -175,8 +187,14 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_assign_shared_types.__name__, more)
     tickets, more = _drop_dangling_refs(tickets, base.files if base is not None else ())
     concerns += fold(_drop_dangling_refs.__name__, more)
+    tickets, more = _settle_contracts_file(
+        tickets, frame.contracts_file, owned_types.values(), base.files if base is not None else ()
+    )
+    concerns += fold(_settle_contracts_file.__name__, more)
     tickets, more = _form_method_routes(tickets, frame.stack, frame.interfaces, frame.ui)
     concerns += fold(_form_method_routes.__name__, more)
+    tickets, more = _form_page_routes(tickets, frame.stack, frame.interfaces, frame.ui)
+    concerns += fold(_form_page_routes.__name__, more)
     type_findings, type_concerns = _type_contract_findings(
         tickets, frame.interfaces, frame.declared, types, frame.contracts_file, frame.design
     )
@@ -199,6 +217,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *stack_findings,
         *_coverage_findings(tickets, criteria, frame.brief, run=frame.run, change=base is not None),
         *_offline_scenario_findings(criteria),
+        *_garbled_step_findings(criteria),
         *bound_conflicts(frame.constraints, criteria),
         *_branch_findings(criteria, frame.brief),
         # A change build's base tree already owns its roles.

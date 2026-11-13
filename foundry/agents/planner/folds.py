@@ -25,6 +25,7 @@ from foundry.gates.profiles import ONE_TYPE_PER_FILE, SOURCE_SUFFIXES, pytest_bd
 from foundry.schemas.architecture import PROPERTY_KINDS
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
     Difficulty,
     Specialty,
     StackDecision,
@@ -134,6 +135,185 @@ def _own_stack_files(
         ],
         (),
     )
+
+
+# Repo-root files that configure some language's build or test harness: the test
+# runner reads them to collect and run every ticket's tests.
+_HARNESS_CONFIG = re.compile(
+    r"pyproject\.toml|setup\.cfg|pytest\.ini|tox\.ini|requirements(?:-dev)?\.txt"
+    r"|package(?:-lock)?\.json|tsconfig(?:\.[\w-]+)?\.json|\.babelrc|\.mocharc\.\w+"
+    r"|(?:jest|vitest|vite|babel|cucumber)\.config\.(?:[cm]?[jt]s|json)"
+    r"|cucumber\.(?:json|[cm]?js)|Cargo\.(?:toml|lock)|go\.(?:mod|sum)|pom\.xml"
+    r"|(?:build|settings)\.gradle(?:\.kts)?"
+)
+
+
+def _writes_tests(t: Ticket) -> bool:
+    return t.specialty is Specialty.TEST or any(
+        PurePosixPath(f).name.startswith("test_")
+        or PurePosixPath(f).stem.endswith(("_test", ".test", ".spec"))
+        or any(p in ("tests", "test", "step_definitions", "__tests__") for p in f.split("/")[:-1])
+        for f in t.files
+    )
+
+
+def _own_harness_files(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Move the build/test harness config (the harness ticket's files, and any
+    repo-root manifest or runner config: pyproject.toml, package.json, tsconfig.json,
+    jest/vitest config, Cargo.toml, go.mod, ...) off every later ticket onto the
+    first-wave ticket every test-writing ticket depends on: the harness ticket when
+    there is one. Left on a last-wave ticket, its edit (a dice CLI ticket changing
+    ``bdd_features_base_dir``) broke the test collection of every ticket built
+    before it. With no such first-wave ticket it stays where it is."""
+    harness = next((t for t in tickets if t.id == HARNESS_TICKET_ID), None)
+    config = set(harness.files) if harness is not None else set()
+
+    def is_config(path: str) -> bool:
+        return path in config or ("/" not in path and bool(_HARNESS_CONFIG.fullmatch(path)))
+
+    claims = {
+        t.id: files
+        for t in tickets
+        if t.id not in _GENERATED_TICKETS and (files := [f for f in t.files if is_config(f)])
+    }
+    target = harness
+    if target is None and claims:
+        deps = {t.id: t.depends_on for t in tickets}
+        later = [t.id for t in tickets if _writes_tests(t) or t.id in claims]
+        target = next(
+            (
+                t
+                for t in tickets
+                if t.id not in _GENERATED_TICKETS
+                and t.files
+                and set(t.depends_on) <= _GENERATED_TICKETS
+                and all(t.id == w or t.id in _ancestors(deps, w) for w in later)
+            ),
+            None,
+        )
+    if target is None:
+        return list(tickets), []
+    moved = {tid: files for tid, files in claims.items() if tid != target.id}
+    if not moved:
+        return list(tickets), []
+    by_id = {t.id: t for t in tickets}
+    listed = _uniq(f for files in moved.values() for f in files)
+    take = (
+        f" Also write {', '.join(listed)}, the build/test config every later ticket's "
+        "tests run under (listed by "
+        + "; ".join(f"{tid}: {by_id[tid].title}" for tid in moved)
+        + "): declare up front every dependency and setting their work needs, since "
+        "they may not edit it."
+    )
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        if t.id == target.id:
+            t = t.model_copy(
+                update={
+                    "files": (*t.files, *(f for f in listed if f not in t.files)),
+                    "description": t.description + take,
+                }
+            )
+        elif t.id in moved:
+            names = ", ".join(moved[t.id])
+            t = t.model_copy(
+                update={
+                    "files": tuple(f for f in t.files if f not in moved[t.id]),
+                    "description": t.description
+                    + f" {names} (the build/test config every ticket's tests run under) "
+                    f"is written by ticket {target.id} before any test runs: never edit it.",
+                }
+            )
+            concerns.append(
+                f"Ticket {t.id}: moved the harness config {names} to {target.id}, which "
+                "every test-writing ticket follows."
+            )
+        out.append(t)
+    return out, concerns
+
+
+_MANIFEST = re.compile(
+    r"requirements\.txt|pyproject\.toml|package\.json|Cargo\.toml|go\.mod|pom\.xml"
+    r"|build\.gradle(?:\.kts)?|Gemfile|composer\.json"
+)
+DEPENDENCIES_NOTE = "Declare every third-party dependency the plan names"
+
+
+def _declare_dependencies(
+    tickets: Sequence[Ticket], dependencies: Sequence[str]
+) -> tuple[list[Ticket], list[str]]:
+    """Give the plan's ``stack.dependencies`` to the ticket that owns the package
+    manifest (the harness ticket, else the first ticket writing a repo-root
+    manifest; after :func:`_own_harness_files` that is a first-wave one). No later
+    ticket may edit the manifest, so a library only an ADR named (bcrypt) went
+    undeclared and its ticket faked it with pbkdf2."""
+    if not dependencies:
+        return list(tickets), []
+    owner = next((t for t in tickets if t.id == HARNESS_TICKET_ID), None) or next(
+        (t for t in tickets if any("/" not in f and _MANIFEST.fullmatch(f) for f in t.files)),
+        None,
+    )
+    if owner is None:
+        return list(tickets), [
+            f"No ticket writes a package manifest to declare {', '.join(dependencies)}."
+        ]
+    if DEPENDENCIES_NOTE in owner.description:
+        return list(tickets), []
+    manifests = [f for f in owner.files if _MANIFEST.fullmatch(PurePosixPath(f).name)]
+    note = (
+        f" {DEPENDENCIES_NOTE} in {' / '.join(manifests) or 'the package manifest'}, "
+        f"as given: {', '.join(dependencies)}. Later tickets cannot edit it, so each "
+        "must be there before they build."
+    )
+    return [
+        t.model_copy(update={"description": t.description + note}) if t.id == owner.id else t
+        for t in tickets
+    ], [f"Ticket {owner.id}: declares the plan's dependencies {', '.join(dependencies)}."]
+
+
+def _settle_contracts_file(
+    tickets: Sequence[Ticket],
+    contracts_file: str,
+    homes: Collection[str],
+    existing: Collection[str] = (),
+) -> tuple[list[Ticket], list[str]]:
+    """When no ticket writes ``contracts_file`` (no contract is a data type, so
+    there is no contracts ticket; the shared-type fold put the types in their
+    owners' modules), point each ticket's mention of it at where the shared types
+    live (``homes``): a ticket told to import "the data types from contracts.py"
+    codes against a file nothing builds. The file is otherwise only the plan's raw
+    stack field (no StackDecision carries it), so the mentions are all there is to
+    clear."""
+    if (
+        not contracts_file
+        or contracts_file in existing
+        or any(contracts_file in t.files for t in tickets)
+    ):
+        return list(tickets), []
+    unique = _uniq(homes)
+    home = (
+        unique[0]
+        if len(unique) == 1
+        else "the module the shared-type notes name"
+        if unique
+        else "the module that defines them"
+    )
+    name = PurePosixPath(contracts_file).name
+    mention = re.compile(
+        rf"(?<![\w/.-])(?:{re.escape(contracts_file)}|{re.escape(name)})(?![\w/-])"
+    )
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        title, description = mention.sub(home, t.title), mention.sub(home, t.description)
+        if (title, description) != (t.title, t.description):
+            t = t.model_copy(update={"title": title, "description": description})
+            concerns.append(
+                f"Ticket {t.id}: no ticket writes {contracts_file}; its mention now names {home}."
+            )
+        out.append(t)
+    return out, concerns
 
 
 def _is_python_test(path: str) -> bool:
@@ -692,13 +872,14 @@ def _assign_shared_types(
     declared: Collection[str],
     language: str,
     types: Mapping[str, str] | None = None,
-) -> tuple[list[Ticket], list[str], set[str]]:
+) -> tuple[list[Ticket], list[str], dict[str, str]]:
     """Give each data type several tickets' contracts name, but the contracts file
     does not declare, one owner: the first such ticket none of the others precede.
     It defines the type in its first source file (in its own file beside it where
     the language wants one public type per file); the others depend on it and
     import it from there. No repair call: a local re-plan for this cost ~30 min,
-    and the build's duplicate-type check still catches a second copy.
+    and the build's duplicate-type check still catches a second copy. Returns
+    (tickets, concerns, each owned type's home file).
 
     ``types`` are the data types the design prose defines with their fields
     (``spec_text.design_types``): a type found there carries its field list, and
@@ -727,7 +908,7 @@ def _assign_shared_types(
     added: dict[str, list[str]] = {}
     new_files: dict[str, list[str]] = {}
     concerns: list[str] = []
-    owned: set[str] = set()
+    owned: dict[str, str] = {}  # type name -> its home file
     covered: set[str] = set()  # defined by a shared type's owner beside it
     for name, ids in shared.items():
         owner = next(
@@ -746,7 +927,7 @@ def _assign_shared_types(
             home = str(PurePosixPath(home).with_name(name + PurePosixPath(home).suffix))
             if home not in by_id[owner].files:
                 new_files.setdefault(owner, []).append(home)
-        owned.add(name)
+        owned[name] = home
         covered.update(with_referenced([name], types))
         others = [i for i in ids if i != owner]
         notes.setdefault(owner, []).append(
@@ -863,24 +1044,26 @@ def _js_client(tickets: Sequence[Ticket], stack: StackDecision) -> bool:
     return False
 
 
-def _form_method_routes(
+_Route = tuple[str, str]  # (method, _route_key(path))
+
+
+def _server_ui_routes(
     tickets: Sequence[Ticket],
     stack: StackDecision | None,
     interfaces: Sequence[InterfaceContract],
     ui: bool,
-) -> tuple[list[Ticket], list[str]]:
-    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
-    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
-    browser edit and delete forms can only POST, so they got 405. Note on the ticket
-    owning each such route (its http contract's implementer, else the entrypoint)
-    that it also serves a POST route the forms submit to."""
+) -> tuple[dict[_Route, str], dict[_Route, str]] | None:
+    """For a server-rendered web UI (a 'ui' capability or template files, no JS
+    client): every route the stack interface and the http contracts declare, as
+    written, and the ticket owning each (its http contract's implementer). None
+    for any other stack."""
     if stack is None or not _web_stack(stack):
-        return list(tickets), []
+        return None
     templated = any(PurePosixPath(f).suffix in _TEMPLATE_SUFFIXES for t in tickets for f in t.files)
     if not (ui or templated) or _js_client(tickets, stack):
-        return list(tickets), []
-    owner_of: dict[tuple[str, str], str] = {}
-    routes: dict[tuple[str, str], str] = {}
+        return None
+    owner_of: dict[_Route, str] = {}
+    routes: dict[_Route, str] = {}
     implementers = {n: t.id for t in tickets for n in t.implements}
     for text, owner in (
         *((r, None) for r in stack.interface),
@@ -895,6 +1078,86 @@ def _form_method_routes(
             routes.setdefault(key, f"{method} {path}")
             if owner is not None:
                 owner_of.setdefault(key, owner)
+    return routes, owner_of
+
+
+FORM_PAGES_NOTE = "Every form needs a page that renders it"
+# A POST whose last segment names one of these is a form's own page, never the
+# page of the collection above it.
+_FORM_VERBS = frozenset({"new", "edit", "create", "add"})
+# A POST that is a bare button (no fields to fill in) needs no page of its own.
+_BUTTON_ACTIONS = frozenset({"delete", "remove", "logout", "toggle"})
+
+
+def _form_page_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI whose POST form routes (POST /new, POST
+    /notes/{id}/edit) have no GET page rendering the form, or which has no GET /:
+    the user can submit a form no page shows, and the site's root is a 404. Note on
+    the ticket owning each such POST (its http contract's implementer, else the
+    entrypoint) that it also serves the GET page, and on the entrypoint that it
+    serves GET / (the home page or a redirect)."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None or not found[0]:
+        return list(tickets), []
+    routes, owner_of = found
+    gets = {p for m, p in routes if m == "GET"}
+
+    def has_page(path: str) -> bool:
+        parent, _, last = path.rpartition("/")
+        if path in gets or last in _FORM_VERBS:
+            return path in gets
+        return bool({f"{path}/new", f"{path}/edit", parent or "/"} & gets)
+
+    entry = next((t.id for t in _features(tickets) if t.entrypoint), None)
+    needed: dict[str, list[str]] = {}
+    for method, path in routes:
+        last = path.rpartition("/")[2]
+        if (
+            method == "POST"
+            and not path.startswith("/api/")
+            and last not in _BUTTON_ACTIONS
+            and not has_page(path)
+            and (owner := owner_of.get((method, path), entry)) is not None
+        ):
+            form = routes[(method, path)].split(" ", 1)[1]
+            needed.setdefault(owner, []).append(
+                f"GET {form} rendering the form that submits to POST {form}"
+            )
+    if "/" not in gets and entry is not None:
+        needed.setdefault(entry, []).append("GET / (the home page, or a redirect to it)")
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = needed.get(t.id)
+        if not mine or FORM_PAGES_NOTE in t.description:
+            out.append(t)
+            continue
+        note = f"{FORM_PAGES_NOTE} and a browser starts at /: also serve " + "; ".join(mine) + "."
+        out.append(t.model_copy(update={"description": f"{t.description}\n\n{note}".lstrip()}))
+        concerns.append(f"Ticket {t.id}: noted GET page routes: " + "; ".join(mine) + ".")
+    return out, concerns
+
+
+def _form_method_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
+    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
+    browser edit and delete forms can only POST, so they got 405. Note on the ticket
+    owning each such route (its http contract's implementer, else the entrypoint)
+    that it also serves a POST route the forms submit to."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None:
+        return list(tickets), []
+    routes, owner_of = found
     posts = [p for m, p in routes if m == "POST"]
     unformed = [
         k

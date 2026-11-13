@@ -169,9 +169,18 @@ from foundry.agents.planner.prompt import (
     _user_content,
     latest_spec_failure,
 )
-from foundry.agents.planner.readers import _int, _newest_by_id, _objs, _section, _str, _strs
+from foundry.agents.planner.readers import (
+    _int,
+    _newest_by_id,
+    _objs,
+    _section,
+    _str,
+    _strs,
+    _uniq,
+)
 from foundry.agents.planner.schema import (
     _DEFAULT_CONTRACTS_FILE,
+    CODE_CONTRACT_KINDS,
     DELIVERABLES,
     DELTA_SCHEMA,
     DELTA_SOP,
@@ -613,7 +622,13 @@ def make_planner_node(
                 )
             inputs = (
                 _intake_text(state) + sizing,
-                _plan_brief(payload, brief),
+                _plan_brief(
+                    payload,
+                    brief,
+                    contracts=any(
+                        i.kind in CODE_CONTRACT_KINDS and _declaration_only(i) for i in interfaces
+                    ),
+                ),
                 _interfaces_text(
                     (_str(i.get("name")), _contract_text(i))
                     for i in _objs(payload.get("interfaces"))
@@ -708,6 +723,9 @@ def make_planner_node(
             contracts_file=_str(raw_stack.get("contracts_file")).strip()
             or _DEFAULT_CONTRACTS_FILE.get(language, ""),
             ui=_has_ui(_strs(_section(payload, "prd").get("required_capabilities"))),
+            dependencies=_uniq(
+                d for d in _strs(raw_stack.get("dependencies")) if "\n" not in d and len(d) <= 120
+            ),
         )
         return _Draft(
             payload=payload,

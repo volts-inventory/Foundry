@@ -635,6 +635,81 @@ def test_form_routes_are_left_alone_with_a_post_alias_or_a_js_client_or_no_ui() 
     assert _form_method_routes(tickets, None, ifaces, ui=True)[1] == []
 
 
+def test_a_server_rendered_form_route_gets_a_page_and_the_site_a_root() -> None:
+    # The notes review: POST /new and POST /<id>/edit with no GET rendering either
+    # form, and no GET /.
+    from foundry.agents.planner.folds import FORM_PAGES_NOTE, _form_page_routes
+
+    tickets, web, _ = _form_plan()
+    web = web.model_copy(
+        update={
+            "interface": (
+                "GET /notes",
+                "POST /notes",
+                "POST /new",
+                "POST /<id>/edit",
+                "GET /notes/<id>",
+                "POST /notes/<id>/tags",
+                "POST /notes/<id>/delete",
+                "POST /api/notes",
+            )
+        }
+    )
+    edit = _iface("edit_note", "http", "POST /<id>/edit -> 302")
+    notes = tickets[0].model_copy(update={"implements": ("edit_note",)})
+    out, concerns = _form_page_routes([notes, tickets[1]], web, [edit], ui=False)
+    by_id = {t.id: t for t in out}
+    assert "GET /<id>/edit rendering the form that submits to POST /<id>/edit" in (
+        by_id["notes"].description
+    )
+    app = by_id["app"].description
+    assert app.startswith("Wire it.") and FORM_PAGES_NOTE in app
+    assert "GET /new rendering the form that submits to POST /new" in app
+    assert "GET / (the home page, or a redirect to it)" in app
+    # Its own page, the page above it, a button action and a JSON route need none.
+    for satisfied in ("POST /notes ", "POST /notes/<id>/tags", "/delete", "/api/"):
+        assert satisfied not in app + by_id["notes"].description
+    assert len(concerns) == 2
+    assert _form_page_routes(out, web, [edit], ui=False) == (out, [])
+    # Every page served: nothing to note; nor without a server-rendered UI.
+    served = web.model_copy(
+        update={
+            "interface": ("GET /", "GET /new", "POST /new", "GET /<id>/edit", "POST /<id>/edit")
+        }
+    )
+    assert _form_page_routes(tickets, served, [], ui=False) == (tickets, [])
+    api = [t.model_copy(update={"files": ("notes/routes.py",)}) for t in tickets]
+    assert _form_page_routes(api, web, [], ui=False) == (api, [])
+
+
+def test_a_step_that_is_a_json_fragment_or_a_placeholder_is_a_finding() -> None:
+    # The first planner call emitted `...'Hello world'],` then
+    # `criticaality_placeholder_ignore_me_note_2:` as steps; both shipped.
+    from foundry.agents.planner.checks import _garbled_step_findings, finding_kind
+
+    def crit(cid: str, *then: str) -> AcceptanceCriterion:
+        return _criterion(cid, "T1", then=then)
+
+    bad = crit(
+        "AC01",
+        "the tags are ['greeting', 'Hello world'],",
+        "criticaality_placeholder_ignore_me_note_2:",
+        "the list is [1, 2",
+        "the title is TODO placeholder",
+    )
+    (finding,) = _garbled_step_findings([bad])
+    assert finding_kind(finding) == "scenario-garbled-step"
+    assert all(repr(s) in finding for s in bad.then)
+    fine = crit(
+        "AC02",
+        "the list is [1, 2]",
+        'the output is "a, b"',
+        "the search box shows the placeholder 'Search notes'",
+        "the page says: Saved",
+    )
+    assert _garbled_step_findings([fine]) == ()
+
+
 def test_the_sop_says_html_forms_send_only_get_and_post() -> None:
     from foundry.agents.planner.schema import SOP
 

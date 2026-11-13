@@ -521,6 +521,42 @@ def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple
     )
 
 
+_BARE_KEY = re.compile(r"^[\"']?[A-Za-z_][\w-]*[\"']?\s*:$")
+# "placeholder" in an identifier or as the step's last word; an HTML input's
+# placeholder text ("the box shows the placeholder 'Search'") is a real step.
+_PLACEHOLDER = re.compile(r"(?i)[a-z0-9]_placeholder|placeholder_[a-z0-9]|\bplaceholder\W*$")
+
+
+def _garbled(step: str) -> bool:
+    s = step.strip()
+    return (
+        s.endswith((",", "[", "{"))
+        or s.count("[") != s.count("]")
+        or s.count("{") != s.count("}")
+        or bool(_BARE_KEY.match(s))
+        or bool(_PLACEHOLDER.search(s))
+    )
+
+
+def _garbled_step_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
+    """A step that is a fragment of the reply's JSON (ends in a comma or an open
+    bracket, unbalanced brackets, a bare ``key:``) or names a placeholder: a local
+    planner once emitted ``...'Hello world'],`` then
+    ``criticaality_placeholder_ignore_me_note_2:`` as steps, and both shipped to the
+    feature file."""
+    out: list[str] = []
+    for c in criteria:
+        bad = [s for s in (*c.given, *c.when, *c.then) if _garbled(s)]
+        if bad:
+            out.append(
+                f"Scenario {c.id} has step text that is not a step: "
+                + "; ".join(repr(s) for s in bad)
+                + ". Write each step as one plain phrase: no JSON punctuation, keys or "
+                "placeholders."
+            )
+    return tuple(out)
+
+
 def _size_findings(
     tickets: Sequence[Ticket], ceilings: Ceilings, protected: Collection[str] = ()
 ) -> tuple[str, ...]:
@@ -939,6 +975,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"^Scenario \S+ is not owned by a live ticket", "scenario-orphan"),
         (r"^Scenario \S+ covers unknown id", "scenario-unknown-cover"),
         (r"^Scenario \S+ asserts that installing dependencies", "scenario-offline-install"),
+        (r"^Scenario \S+ has step text that is not a step", "scenario-garbled-step"),
         (r"has no covering scenario", "goal-uncovered"),
         (r"^Feature ticket \S+ has no scenarios", "ticket-no-scenarios"),
         (r"^Ticket \S+ is over its size ceiling", "ticket-oversized"),

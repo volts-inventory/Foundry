@@ -1658,6 +1658,36 @@ def test_an_undeclared_sandbox_install_is_noted_and_refuses_done_once(tmp_path: 
     assert refusal.startswith(f"OBSERVATION:\nERROR: not done —\n- {_BCRYPT_NOTE}")
 
 
+def test_an_install_by_a_ticket_without_the_manifest_says_use_declared_libraries(
+    tmp_path: Path,
+) -> None:
+    # The manifest is the harness ticket's: "add it there" cannot succeed, and a
+    # local engineer told so faked bcrypt with pbkdf2 instead.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "requirements.txt").write_text("flask\n")
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": _FAKE_PIP},
+                {"action": "done", "summary": "built"},
+                {"action": "done", "summary": "again"},
+            ],
+            seen,
+        )
+    )
+    packet = make_packet(src)
+    packet = packet.model_copy(update={"task": {**packet.task, "files": ["app/auth.py"]}})
+    with Sandbox(src) as sb:
+        adapter.run(packet.model_copy(update={"worktree_path": str(sb.worktree)}), sb)
+    note = observations(seen[1])[0]
+    assert "belongs to another ticket" in note and "missing-dependency: bcrypt" in note
+    assert "add it there" not in note
+    refusal = observations(seen[2])[1]
+    assert "use only declared libraries" in refusal and "Declare them now" not in refusal
+
+
 def test_a_declared_or_insisted_install_ends_the_session(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

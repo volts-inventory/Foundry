@@ -310,7 +310,7 @@ def test_a_plan_with_no_property_is_a_finding_only_for_a_real_input_domain() -> 
 
 
 def test_the_plan_sop_puts_properties_on_contracts_over_feature_combinations() -> None:
-    assert "never in a ticket description" in SOP
+    assert "never in its description or a ticket's" in SOP
     assert "never only one feature or a single-term case" in SOP
 
 

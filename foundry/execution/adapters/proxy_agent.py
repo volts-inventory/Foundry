@@ -1281,6 +1281,12 @@ def _undeclared_done(st: _Loop) -> str | None:
     if not missing:
         return None
     st.install_refused = True
+    if st.files is not None and not any(m in st.files for m in _MANIFESTS):
+        return (
+            "ERROR: not done —"
+            + "".join(f"\n- {_install_note(d, st)}" for d in missing)
+            + "\nRewrite the code to use only declared libraries, then declare done."
+        )
     return (
         "ERROR: not done —"
         + "".join(f"\n- {_install_note(d)}" for d in missing)
@@ -1391,12 +1397,24 @@ def _pip_launcher(prefix: list[str]) -> bool:
     )
 
 
-def _install_note(dist: str) -> str:
-    return (
+_MANIFESTS = ("requirements.txt", "pyproject.toml")
+
+
+def _install_note(dist: str, st: _Loop | None = None) -> str:
+    head = (
         f"`{dist}` is installed only in this sandbox; the gates install only what "
-        "requirements.txt / pyproject [project].dependencies declares, so add it there "
-        "(or a types-* stub for typing)"
+        "requirements.txt / pyproject [project].dependencies declares"
     )
+    if st is not None and st.files is not None and not any(m in st.files for m in _MANIFESTS):
+        # A planned manifest belongs to the harness ticket: telling this ticket to
+        # add it there sent a local engineer to fake bcrypt with pbkdf2 instead.
+        return (
+            f"{head}, and the manifest belongs to another ticket, not yours: use only "
+            "the libraries it declares, never substitute a different library or a "
+            f"hand-rolled stand-in, and report `missing-dependency: {dist}` in done's "
+            "triage"
+        )
+    return f"{head}, so add it there (or a types-* stub for typing)"
 
 
 def _install_notes(st: _Loop, cmd: str, observation: str) -> str:
@@ -1413,7 +1431,7 @@ def _install_notes(st: _Loop, cmd: str, observation: str) -> str:
 
     st.installed.extend(d for d in dists if d not in st.installed)
     return "".join(
-        f"\nNOTE: {_install_note(d)}" for d in undeclared_distributions(dists, st.worktree)
+        f"\nNOTE: {_install_note(d, st)}" for d in undeclared_distributions(dists, st.worktree)
     )
 
 

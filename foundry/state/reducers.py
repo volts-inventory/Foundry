@@ -42,7 +42,7 @@ from foundry.schemas.journal import JournalEntry
 # persisted signed verdicts under them, and dropping a name here would let an
 # unsigned write under it into the channel (and the release manifest).
 DETERMINISTIC_GATES = frozenset(
-    {"spec", "design", "build", "test", "security", "audit", "supply_chain", "e2e"}
+    {"spec", "design", "build", "test", "security", "audit", "supply_chain", "e2e", "repro"}
 )
 # Gate names that are judgment verdicts (class 4/5) — binding-gated, latch-aware.
 JUDGMENT_VERDICTS = frozenset({"review", "threat_review", "release"})

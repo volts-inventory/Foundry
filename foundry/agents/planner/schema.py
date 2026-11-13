@@ -102,7 +102,10 @@ _TICKET_RULES = (
     "separate agent session and gate run, and every hand-off between tickets is a "
     "chance to mismatch. A ticket is one coherent slice of the product: its closely "
     "related behaviours and their files; tickets meet at interface contracts. State "
-    "what each ticket must do and why, not how to implement it. NAMES: name every "
+    "what each ticket must do and why, not how to implement it, and never restate "
+    "what its own fields carry (the signatures of the contracts it implements or "
+    "consumes, its scenarios, its files): its build session gets those verbatim. "
+    "NAMES: name every "
     "ticket id, module and test file after its domain (ticket stats -> stats.py, "
     "ticket cli -> features/cli.feature and tests/test_cli.py), never after a "
     "ticket number (T3, T3.feature, test_T2.py): the gate names a ticket's feature "
@@ -134,7 +137,12 @@ _TICKET_RULES = (
     "(test_x_routes.py + test_x_service.py): only one binds the scenarios and the "
     "rest are dropped (checked). Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
-    "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
+    "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. The package "
+    "manifest and the build/test config (pyproject.toml, package.json, tsconfig.json, "
+    "a jest/vitest config, Cargo.toml, go.mod, ...) belong to the first-wave ticket "
+    "every test depends on (the harness ticket when there is one), never to a later "
+    "feature ticket: an edit there changes how every earlier ticket's tests run "
+    "(checked and repaired). "
     "Where a scope cap speaks of ownership units, it means the files across your "
     "tickets.\n"
     "SCENARIOS (the acceptance criteria): each feature ticket carries its executable "
@@ -195,7 +203,8 @@ SOP = (
     "SC-2, ... (keep an id once given); scenarios cite them in covers[]. Declare "
     "deliverable: 'library' (only code other programs import), 'cli', 'service' or "
     "'app'.\n"
-    "PRD: the problem, user stories and prioritization; declare "
+    "PRD: the problem, user stories and prioritization (cite the must-haves by id, "
+    "never restate them); declare "
     "required_capabilities (e.g. 'ui', 'ml') — they drive specialist routing.\n"
     "EPICS: group the work into epics (ids E1, E2, ... in delivery order; at most "
     f"{MAX_EPICS}). A SMALL build (one epic, at most {MAX_TICKETS} tickets) returns "
@@ -214,10 +223,17 @@ SOP = (
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
     "micro-USD (never a float); a short risk register; done-for-this-iteration.\n"
     "ARCHITECTURE: choose the component decomposition; write ADRs WITH rejected "
-    "alternatives; define interface/API contracts FIRST (tickets reference them): "
+    "alternatives. ONCE: each fact goes in exactly one field, and anywhere else is "
+    "cited by its id or name (ADR-2, PR1, a contract name), never restated: every "
+    "decision ONLY in adrs[] (decision: one line; body: the why, not the decision "
+    "again), never in design.body; design.body is the overview the other fields do "
+    "not carry (components, data flow, the design of anything no contract declares) "
+    "and never repeats an ADR, a contract's signature or a scenario. Define "
+    "interface/API contracts FIRST (tickets reference them): "
     "every seam between tickets is a contract with a name, a kind (function | class "
     "| type for code seams; http | cli | event for the rest), its signature written "
-    "in the chosen language, its inputs, outputs and errors, and a description. "
+    "in the chosen language, its inputs, outputs and errors, and a description of "
+    "what it does that does not repeat them. "
     "Declare only what crosses a ticket boundary: the data types and errors tickets "
     "pass between them, and the functions or classes one ticket calls in another. "
     "Prefer plain functions; never a Protocol, ABC, interface or factory unless two "
@@ -248,7 +264,7 @@ SOP = (
     "features: at least one property per contract ranges over inputs mixing several "
     "features at once (an expression mixing every operator, multiple terms, "
     "modifiers together), never only one feature or a single-term case. Write them "
-    "in the contract's properties[], never in a ticket description. Leave "
+    "in the contract's properties[], never in its description or a ticket's. Leave "
     "properties[] empty for "
     "data types, trivial accessors and http/cli/event seams. The implementing "
     "ticket, or its paired test ticket, writes one property-based test per "
@@ -353,8 +369,8 @@ _GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID, SKELETON
 
 # What the harness ticket always writes, on top of the plan's harness_files: the
 # manifest and lockfile it adds the runner to, and the runner's entry file, so its
-# description never asks for a file outside its scope. A feature ticket may list
-# them too (to add its own deps): overlapping scopes run in separate waves.
+# description never asks for a file outside its scope. A feature ticket listing
+# one loses it to this ticket (``folds._own_harness_files``).
 _DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml",),
     "typescript": ("package.json", "package-lock.json", "tsconfig.json", "cucumber.json"),

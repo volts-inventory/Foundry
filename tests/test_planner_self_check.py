@@ -30,13 +30,18 @@ from foundry.agents.planner import (
     _wire_entrypoint,
     make_planner_node,
 )
+from foundry.agents.planner.build import _plan_brief
 from foundry.agents.planner.checks import (
     _shared_type_findings,
     _type_contract_findings,
     _wiring_findings,
     finding_kind,
 )
-from foundry.agents.planner.folds import _assign_shared_types, _drop_dangling_refs
+from foundry.agents.planner.folds import (
+    _assign_shared_types,
+    _drop_dangling_refs,
+    _settle_contracts_file,
+)
 from foundry.agents.planner.spec_text import bound_conflicts, design_types, with_referenced
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
@@ -1081,14 +1086,14 @@ def test_a_shared_undeclared_type_gets_one_owner_in_code_not_a_repair() -> None:
     assert concerns == [
         "Shared type DiceExpression: owned by PARSER in dice/parser.py, imported by EVAL, CLI."
     ]
-    assert owned == {"DiceExpression"}
+    assert owned == {"DiceExpression": "dice/parser.py"}
     assert _shared_type_findings(out, [_PARSE, _EVALUATE], frozenset(), owned) == ()
     # A type no user can own (none writes a source file) is still a plan finding.
     bare = [t.model_copy(update={"files": ()}) for t in tickets]
     assert _assign_shared_types(bare, [_PARSE, _EVALUATE], frozenset(), "python") == (
         bare,
         [],
-        set(),
+        {},
     )
     assert len(_shared_type_findings(bare, [_PARSE, _EVALUATE], frozenset())) == 1
 
@@ -1107,7 +1112,7 @@ def test_a_shared_type_in_java_gets_its_own_file_in_the_owner_ticket() -> None:
     (parser, evaluator), _, owned = _assign_shared_types(
         tickets, [parse, total], frozenset(), "java"
     )
-    assert owned == {"Roll"}
+    assert owned == {"Roll": "src/main/java/dice/Roll.java"}
     assert parser.files[-1] == "src/main/java/dice/Roll.java"
     assert "from src/main/java/dice/Roll.java" in evaluator.description
 
@@ -1166,7 +1171,7 @@ def test_a_shared_type_the_design_defines_carries_its_fields_and_the_types_they_
     (parser, evaluator), concerns, owned = _assign_shared_types(
         tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python", types
     )
-    assert owned == {"RollExpression"}
+    assert owned == {"RollExpression": "dice/parser.py"}
     assert (
         "Its fields, from the design (define the types they use beside it): "
         "RollExpression(terms: list[SignedTerm]); "
@@ -1180,7 +1185,7 @@ def test_a_shared_type_the_design_defines_carries_its_fields_and_the_types_they_
     (alone,), concerns, owned = _assign_shared_types(
         tickets[:1], [_ROLL_PARSE], frozenset(), "python", types
     )
-    assert owned == set()
+    assert owned == {}
     assert "Define the data type RollExpression. Its fields, from the design" in alone.description
     assert concerns == ["Type RollExpression: ticket PARSER defines it with the design's fields."]
     # No design definition: the notes stay as they were.
@@ -1207,6 +1212,75 @@ def test_reads_of_files_no_ticket_writes_and_unknown_dependencies_are_dropped() 
         "Ticket PARSER: dropped reads contracts.py, which no ticket writes.",
         "Ticket PARSER: dropped depends_on contracts, GONE, which no ticket has.",
     ]
+
+
+def test_a_contracts_file_no_ticket_writes_is_renamed_to_the_shared_types_home() -> None:
+    # A local dice plan named contracts.py, but no contract was a data type: the
+    # shared-type fold put RollExpression in diceroll/__init__.py, while T1 and T2
+    # still said "data types from contracts.py".
+    def said(t: Ticket, text: str) -> Ticket:
+        return t.model_copy(update={"description": text})
+
+    tickets = [
+        said(
+            _with_files(_t("T1", implements=("parse",)), "diceroll/__init__.py"),
+            "Parse notation into the data types from contracts.py.",
+        ),
+        said(
+            _with_files(_t("T2", implements=("total",)), "diceroll/roll.py"),
+            "Total a roll; import RollExpression from `contracts.py` (see contracts.pyc).",
+        ),
+    ]
+    tickets, _, owned = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python"
+    )
+    assert owned == {"RollExpression": "diceroll/__init__.py"}
+    (t1, t2), concerns = _settle_contracts_file(tickets, "contracts.py", owned.values())
+    assert t1.description.startswith("Parse notation into the data types from diceroll/__init__")
+    assert "import RollExpression from `diceroll/__init__.py` (see contracts.pyc)" in (
+        t2.description
+    )
+    assert "contracts.py" not in t1.description + t2.description.replace("contracts.pyc", "")
+    assert len(concerns) == 2
+    # A nested path is matched by its name too; with no home the mention is generic.
+    (bare,), _ = _settle_contracts_file(
+        [said(_t("A"), "Use the types in src/contracts.ts and contracts.ts.")],
+        "src/contracts.ts",
+        (),
+    )
+    assert bare.description == (
+        "Use the types in the module that defines them and the module that defines them."
+    )
+    # Written by a ticket, or already in the base tree: left alone.
+    owner = [_with_files(said(_t("contracts"), "x"), "contracts.py"), tickets[0]]
+    assert _settle_contracts_file(owner, "contracts.py", ()) == (owner, [])
+    assert _settle_contracts_file(tickets, "contracts.py", (), ("contracts.py",)) == (
+        tickets,
+        [],
+    )
+
+
+def test_the_epic_brief_names_the_contracts_file_only_when_one_is_written() -> None:
+    payload = {
+        "stack": {"language": "python", "contracts_file": "contracts.py"},
+        "adrs": [{"id": "ADR-1", "title": "Seeded RNG", "decision": "random.Random(seed)"}],
+    }
+    assert "contracts file" in _plan_brief(payload)
+    brief = _plan_brief(payload, contracts=False)
+    assert "contracts.py" not in brief
+    # The ADRs reach the epic calls from adrs[], not a design body restating them.
+    assert "Decisions:\n- ADR-1 Seeded RNG: random.Random(seed)" in brief
+
+
+def test_the_sop_asks_for_each_fact_once() -> None:
+    # A local dice plan restated ADR-1..4 in design.body (~1.8k chars of a 33k-token
+    # reply that took ~25 minutes).
+    from foundry.agents.planner.schema import EPIC_SOP, SOP
+
+    assert "every decision ONLY in adrs[]" in SOP and "never in design.body" in SOP
+    for sop in (SOP, EPIC_SOP):
+        assert "never restate what its own fields carry" in sop
+        assert "belong to the first-wave ticket every test depends on" in sop
 
 
 def test_design_types_for_the_contracts_file_without_type_contracts_are_a_finding() -> None:

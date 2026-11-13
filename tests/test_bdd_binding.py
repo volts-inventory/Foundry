@@ -15,6 +15,7 @@ from foundry.agents.implementation.tickets import (
     scenario_verify,
 )
 from foundry.agents.planner import _build_tickets, _own_stack_files, stack_files
+from foundry.agents.planner.folds import _own_harness_files
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import BDD_KEY, TestGate
 from foundry.schemas.gates import GateStatus
@@ -610,3 +611,55 @@ def test_the_shared_state_hint_names_the_other_modules_writing_the_value(
     assert "'testuser' (tests/test_auth.py, tests/test_t2.py)" in hint
     assert "(auth.py" not in hint and " auth.py" not in hint and "hashed_secret" not in hint
     assert shared_state_hints("E   AssertionError: assert 1 == 2\n", tmp_path) == ()
+
+
+# ---- the harness config belongs to the first wave -------------------------------
+
+
+def test_a_late_ticket_loses_the_harness_config_to_the_harness_ticket() -> None:
+    # A local dice plan: pyproject.toml belonged to T3, the last-wave CLI ticket, whose
+    # change to bdd_features_base_dir broke T1's and T2's test collection.
+    harness = _ticket("bdd-harness", ("pyproject.toml",))
+    tickets = [
+        harness,
+        _ticket("T1", ("dice/parser.py", "tests/test_t1.py"), depends_on=("bdd-harness",)),
+        _ticket("T2", ("dice/roll.py", "tests/test_t2.py"), depends_on=("bdd-harness", "T1")),
+        _ticket(
+            "T3",
+            ("dice/cli.py", "pyproject.toml", "pytest.ini", "tests/test_t3.py"),
+            depends_on=("bdd-harness", "T2"),
+        ),
+    ]
+    out, concerns = _own_harness_files(tickets)
+    h, t1, t2, t3 = out
+    assert h.files == ("pyproject.toml", "pytest.ini")
+    assert "T3: T3" in h.description and "declare up front" in h.description
+    assert t3.files == ("dice/cli.py", "tests/test_t3.py")
+    assert "pyproject.toml, pytest.ini (the build/test config" in t3.description
+    assert "written by ticket bdd-harness" in t3.description
+    assert (t1, t2) == (tickets[1], tickets[2]) and len(concerns) == 1
+    # Nothing to move: unchanged.
+    assert _own_harness_files(out) == (out, [])
+
+
+def test_without_a_harness_ticket_the_config_goes_to_the_first_wave_ticket_tests_follow() -> None:
+    # Language-agnostic: a TypeScript jest config, a Rust and a Go manifest alike.
+    for config in ("jest.config.ts", "tsconfig.json", "Cargo.toml", "go.mod"):
+        tickets = [
+            _ticket("core", ("src/core.ts", "src/core.test.ts")),
+            _ticket("api", ("src/api.ts",), depends_on=("core",)),
+            _ticket("cli", ("src/cli.ts", config), depends_on=("api",)),
+        ]
+        out, concerns = _own_harness_files(tickets)
+        assert out[0].files == ("src/core.ts", "src/core.test.ts", config), config
+        assert config not in out[2].files and concerns
+    # No first-wave ticket precedes every test-writing ticket: left as planned.
+    split = [
+        _ticket("a", ("src/a.ts", "src/a.test.ts")),
+        _ticket("b", ("src/b.ts", "src/b.test.ts")),
+        _ticket("cli", ("src/cli.ts", "package.json"), depends_on=("a", "b")),
+    ]
+    assert _own_harness_files(split) == (split, [])
+    # A nested file of the same name is not the root config.
+    nested = [_ticket("a", ("src/a.ts",)), _ticket("b", ("web/package.json",), depends_on=("a",))]
+    assert _own_harness_files(nested) == (nested, [])

@@ -398,11 +398,21 @@ def _tagged(epic_id: str, gaps: Iterable[str]) -> tuple[str, ...]:
     return tuple(f"[{epic_id}] {g}" for g in gaps)
 
 
-def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> str:
-    """What every epic call needs of call 1's plan besides the epics and contracts."""
+def _plan_brief(
+    payload: dict[str, Any], intent: IntentBrief | None = None, *, contracts: bool = True
+) -> str:
+    """What every epic call needs of call 1's plan besides the epics and contracts.
+    ``contracts``: some contract is a data type, so a contracts ticket writes the
+    contracts file; without one no ticket does, and naming it sends tickets to
+    import from a file nothing builds."""
     prd, design = _section(payload, "prd"), _section(payload, "design")
     constraints = [f"- {_str(c.get('text'))}" for c in _objs(payload.get("pinned_constraints"))]
     stack = _section(payload, "stack")
+    # The design body no longer restates the ADRs, so their decisions come from adrs[].
+    decisions = [
+        f"- {_str(a.get('id'))} {_str(a.get('title'))}: {_str(a.get('decision'))}"
+        for a in _objs(payload.get("adrs"))
+    ]
     return (
         "PLAN (from the lead planner):\n"
         f"Stack: {_str(stack.get('language')) or '(unset)'}"
@@ -410,7 +420,7 @@ def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> s
         + (
             f"; contracts file (written for you, never list it in files): "
             f"{_str(stack.get('contracts_file'))}"
-            if stack.get("contracts_file")
+            if contracts and stack.get("contracts_file")
             else ""
         )
         + "\n"
@@ -418,6 +428,7 @@ def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> s
         f"Architecture: {_str(design.get('title'))}\n"
         f"{_str(design.get('body'))[:_BRIEF_CAP]}\n"
         f"Components: {', '.join(_strs(design.get('components'))) or '(none)'}"
+        + ("\nDecisions:\n" + "\n".join(decisions) if decisions else "")
         + (
             "\nPinned constraints (apply to every ticket):\n" + "\n".join(constraints)
             if constraints

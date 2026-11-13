@@ -39,8 +39,10 @@ from foundry.agents.planner.folds import (
     _lift_described_properties,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
+    _own_harness_files,
     _own_scenario_bindings,
     _own_stack_files,
+    _settle_contracts_file,
     _wire_entrypoint,
     stack_files,
 )
@@ -136,6 +138,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)
         concerns += fold(repair.__name__, more)
+    tickets, more = _own_harness_files(tickets)
+    concerns += fold(_own_harness_files.__name__, more)
     tickets, more, stack_findings = _own_stack_files(
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )
@@ -175,6 +179,10 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_assign_shared_types.__name__, more)
     tickets, more = _drop_dangling_refs(tickets, base.files if base is not None else ())
     concerns += fold(_drop_dangling_refs.__name__, more)
+    tickets, more = _settle_contracts_file(
+        tickets, frame.contracts_file, owned_types.values(), base.files if base is not None else ()
+    )
+    concerns += fold(_settle_contracts_file.__name__, more)
     tickets, more = _form_method_routes(tickets, frame.stack, frame.interfaces, frame.ui)
     concerns += fold(_form_method_routes.__name__, more)
     type_findings, type_concerns = _type_contract_findings(

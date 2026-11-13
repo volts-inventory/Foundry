@@ -287,8 +287,8 @@ def _python_deps_ticket(
     framework), when no generated ticket writes one. The wave checks install
     only what a manifest declares: left to a late ticket (often the entrypoint), every
     earlier check runs without the framework and fails on ModuleNotFoundError, which
-    the fixer may not repair in a later wave's file. The planned owner keeps the file
-    too, so it can still extend it (overlapping scopes run in separate waves)."""
+    the fixer may not repair in a later wave's file. The planned owner then loses
+    the file to this ticket (``folds._own_harness_files``)."""
     if (
         stack is None
         or stack.language != "python"

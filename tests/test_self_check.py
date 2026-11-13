@@ -1092,6 +1092,28 @@ def test_a_write_completing_the_ticket_runs_the_check_and_ends_green(
     assert len(calls) == 3  # the opening, then one per completing write
 
 
+def test_an_edit_completing_the_ticket_runs_the_check_and_ends_green(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    edit = {"action": "edit_file", "path": "app.py"}
+    result, seen, calls = _run_loop(
+        tmp_path,
+        monkeypatch,
+        [
+            {**edit, "edits": [{"old": "x = 1\n", "new": "x = 2\n"}]},
+            {**edit, "edits": [{"old": "x = 2\n", "new": "x = 2  # OK\n"}]},
+            {"action": "done", "summary": "never asked"},
+        ],
+        start={"app.py": "x = 1\n"},
+    )
+    obs = _observations(seen)
+    assert obs[0].startswith("OBSERVATION:\nedited app.py")
+    assert "CHECK (run by itself" in obs[0] and "app.py:1: error: not done yet" in obs[0]
+    assert len(seen) == 2 and result.turns_used == 2
+    assert WRITE_GREEN_DONE in [t.explanation for t in result.triage]
+    assert len(calls) == 3  # the opening, then one per edit
+
+
 def test_no_check_runs_by_itself_while_a_ticket_file_is_unbuilt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

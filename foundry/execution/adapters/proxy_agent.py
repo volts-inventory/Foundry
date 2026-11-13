@@ -9,8 +9,8 @@ stays the sole credential holder and the lineage observer — and works over ANY
 configured backend (Anthropic API, OpenAI, the CLIs-as-completion).
 
 The loop is a schema-constrained ReAct cycle: each turn the model returns ONE
-action as JSON — ``write_file`` / ``delete_file`` / ``read_file`` / ``run`` /
-``done`` — which the adapter executes against the :class:`Sandbox` (writes
+action as JSON — ``write_file`` / ``edit_file`` / ``delete_file`` / ``read_file`` /
+``run`` / ``done`` — which the adapter executes against the :class:`Sandbox` (writes
 stay inside the cage; ``run`` rides ``Sandbox.run``'s scrubbed env + hard-kill)
 and feeds the observation back. Bounded by ``packet.turn_budget``; the result
 is the same authored-tree ``full-file-snapshot`` contract the claude-code
@@ -97,7 +97,11 @@ __all__ = ["ACTION_SCHEMA", "TOOLS", "ProxyAgentAdapter"]
 _EPILOGUE = (
     "You are an agentic engineer working in a disposable sandbox worktree. Each "
     "turn, reply with EXACTLY ONE action as JSON conforming to the given schema:\n"
-    '  {"action": "write_file", "path": "<rel>", "content": "<full file>"}\n'
+    '  {"action": "write_file", "path": "<rel>", "content": "<full file>"}'
+    "   # a new file, or a full rewrite\n"
+    '  {"action": "edit_file", "path": "<rel>", "edits": [{"old": "<exact text>", '
+    '"new": "<replacement>"}, ...]}'
+    "   # prefer it to change an existing file; each old must occur exactly once\n"
     '  {"action": "read_file", "path": "<rel>", "start_line": 1, "end_line": 200}'
     "   # line range optional (1-based, inclusive); omit it to read the whole file\n"
     '  {"action": "search", "pattern": "<regex>", "path": "<optional rel dir>"}\n'
@@ -128,16 +132,18 @@ _MAX_CALLS_PER_TURN = 8
 
 _NATIVE_EPILOGUE = (
     "You are an agentic engineer working in a disposable sandbox worktree. Work by "
-    "calling the provided tools: read_file, search, write_file (the full file), "
-    "delete_file, run (build/test inside the sandbox), and done when finished. You "
+    "calling the provided tools: read_file, search, edit_file (exact replacements: "
+    "prefer it to change an existing file), write_file (the full file: for a new "
+    "file), delete_file, run (build/test inside the sandbox), and done when finished. You "
     f"may call several tools in one turn (at most {_MAX_CALLS_PER_TURN}); they run "
     "in order. Write real, complete code (no placeholders). Run the build/tests and "
     "fix failures before calling done."
 )
 _NATIVE_CHECK_EPILOGUE = (
     "You are an agentic engineer working in a disposable sandbox worktree. Work by "
-    "calling the provided tools: read_file, search, write_file (the full file), "
-    "delete_file, run (a command inside the sandbox), check (the gates themselves on "
+    "calling the provided tools: read_file, search, edit_file (exact replacements: "
+    "prefer it to change an existing file), write_file (the full file: for a new "
+    "file), delete_file, run (a command inside the sandbox), check (the gates themselves on "
     "this tree), and done when finished. You "
     f"may call several tools in one turn (at most {_MAX_CALLS_PER_TURN}); they run "
     f"in order. {_CHECK_CLOSE}"
@@ -172,6 +178,10 @@ def _tool(name: str, description: str, required: tuple[str, ...], **props: Any) 
 
 
 _STR = {"type": "string"}
+# The actions that change a file: each goes through the write scope, the fence and
+# the green-check bookkeeping; the first two may also complete the ticket's files.
+_WRITES = ("write_file", "edit_file", "delete_file")
+_FILE_WRITES = ("write_file", "edit_file")
 _LINE = {"type": "integer", "minimum": 1}
 # Anthropic tool shape; the OpenAI-compatible transports convert it.
 TOOLS: tuple[dict[str, Any], ...] = (
@@ -193,10 +203,29 @@ TOOLS: tuple[dict[str, Any], ...] = (
     ),
     _tool(
         "write_file",
-        "Write the FULL content of a worktree file.",
+        "Write the FULL content of a worktree file: for a new file. To change an "
+        "existing file, prefer edit_file.",
         ("path", "content"),
         path=_STR,
         content=_STR,
+    ),
+    _tool(
+        "edit_file",
+        "Change an existing worktree file by exact replacements, applied in order: "
+        "each `old` must occur exactly once in the file (include enough surrounding "
+        "lines to make it unique) and is replaced by `new`. All edits apply or none "
+        "do. Prefer this to write_file for any change to an existing file.",
+        ("path", "edits"),
+        path=_STR,
+        edits={
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"old": _STR, "new": _STR},
+                "required": ["old", "new"],
+                "additionalProperties": False,
+            },
+        },
     ),
     _tool("delete_file", "Delete a worktree file.", ("path",), path=_STR),
     _tool("run", "Run a shell command (build/tests) inside the sandbox.", ("cmd",), cmd=_STR),
@@ -226,7 +255,7 @@ _REASON = {
 
 
 def _reason_tools(tools: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ...]:
-    """``tools`` with write_file/delete_file taking the optional fence ``reason``."""
+    """``tools`` with the file writes taking the optional fence ``reason``."""
     return tuple(
         {
             **t,
@@ -235,7 +264,7 @@ def _reason_tools(tools: tuple[dict[str, Any], ...]) -> tuple[dict[str, Any], ..
                 "properties": {**t["input_schema"]["properties"], "reason": _REASON},
             },
         }
-        if t["name"] in ("write_file", "delete_file")
+        if t["name"] in _WRITES
         else t
         for t in tools
     )
@@ -360,6 +389,7 @@ _LIST_MAX = 200
 _LOW_TURNS = 5
 _ACTIVITY: dict[str, tuple[str, str | None]] = {
     "write_file": ("writing", "path"),
+    "edit_file": ("editing", "path"),
     "read_file": ("reading", "path"),
     "delete_file": ("deleting", "path"),
     "run": ("running", "cmd"),
@@ -813,7 +843,7 @@ class ProxyAgentAdapter:
             st.stopped = st.done = True
             self._activity(act)
             return None
-        if st.green and action not in ("write_file", "delete_file"):
+        if st.green and action not in _WRITES:
             if st.green_turn != st.turn:
                 st.green_turn = st.turn
                 st.green_idle += 1
@@ -882,10 +912,10 @@ class ProxyAgentAdapter:
         tree_then = st.tree
         st.tree = _tree_state(worktree)
         st.repeats[fp] = (count, st.tree)
-        if action in ("write_file", "delete_file") or (st.tree != tree_then and action != "check"):
+        if action in _WRITES or (st.tree != tree_then and action != "check"):
             st.green = False
             st.green_idle = 0
-        if action == "write_file" and not observation.startswith("ERROR"):
+        if action in _FILE_WRITES and not observation.startswith("ERROR"):
             st.autocheck = True
         elif action == "check":
             st.autocheck = False
@@ -944,7 +974,7 @@ class ProxyAgentAdapter:
         write_check: tuple[str, ...] | None = None,
     ) -> str:
         action = act.get("action")
-        if action in ("write_file", "delete_file") and files is not None:
+        if action in _WRITES and files is not None:
             # The ticket's diff is cut back to its files after the session; refusing
             # here lets the model correct a stray path (contract.py for contracts.py)
             # instead of building on a write that will be discarded.
@@ -976,6 +1006,28 @@ class ProxyAgentAdapter:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             obs = f"wrote {rel} ({len(content)} chars){note}"
+            if target.suffix == ".py" and write_check is not None:
+                obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix(), write_check)
+            return obs
+        if action == "edit_file":
+            rel = str(act.get("path", ""))
+            target = _contained(worktree, rel)
+            if not target.is_file():
+                return f"ERROR: not edited — {rel} does not exist. Create it with write_file."
+            edited, lines = _apply_edits(rel, target.read_text(encoding="utf-8"), act.get("edits"))
+            if edited is None:
+                return (
+                    f"ERROR: not edited — {lines}\nThe file is unchanged: no edit of this "
+                    "call was applied."
+                )
+            error, note = _syntax_check(rel, edited)
+            if error is not None:
+                return (
+                    f"ERROR: edit rejected — after these edits {rel} {error}\nThe file is "
+                    "unchanged: no edit of this call was applied. Fix the edits and repeat."
+                )
+            target.write_text(edited, encoding="utf-8")
+            obs = f"edited {rel}: {lines} ({len(edited)} chars now){note}"
             if target.suffix == ".py" and write_check is not None:
                 obs += _mypy_advisory(sandbox, PurePosixPath(rel).as_posix(), write_check)
             return obs
@@ -1068,7 +1120,7 @@ def _fenced(st: _Loop, act: dict[str, Any]) -> str | None:
     makes the cross-file edit deliberate, and leaves a line a reviewer can judge."""
     from foundry.agents.implementation.tickets import in_write_scope
 
-    if st.fence is None or act.get("action") not in ("write_file", "delete_file"):
+    if st.fence is None or act.get("action") not in _WRITES:
         return None
     raw = str(act.get("path", ""))
     rel = PurePosixPath(raw).as_posix() if raw else raw
@@ -1094,7 +1146,7 @@ def _new_unowned(st: _Loop, act: dict[str, Any]) -> str | None:
     shipped as dead code."""
     from foundry.gates.ownership import owns
 
-    if st.owned is None or act.get("action") != "write_file":
+    if st.owned is None or act.get("action") not in _FILE_WRITES:
         return None
     raw = str(act.get("path", ""))
     rel = PurePosixPath(raw).as_posix().removeprefix("./") if raw else raw
@@ -1134,7 +1186,7 @@ def _revert_fenced_out(st: _Loop, before: dict[str, bytes] | str) -> str:
     """Undo what a fenced session's ``run`` did outside its target — ``sed -i``, a
     heredoc, ``rm`` — and say so. A shell command is never parsed: the tree is
     compared before and after, so the fence holds however the edit was spelled, and
-    a deliberate cross-file edit goes through ``write_file`` with its ``reason``."""
+    a deliberate cross-file edit goes through ``edit_file`` with its ``reason``."""
     if isinstance(before, str):
         return before
     try:
@@ -1159,8 +1211,8 @@ def _revert_fenced_out(st: _Loop, before: dict[str, bytes] | str) -> str:
         + ", ".join(reverted)
         + ". Edit only: "
         + ", ".join(st.fence or ())
-        + ". If the failure really needs another file changed, use write_file (or "
-        "delete_file) with a `reason` saying why — not a shell command."
+        + ". If the failure really needs another file changed, use edit_file (or "
+        "write_file, delete_file) with a `reason` saying why — not a shell command."
     )
 
 
@@ -1210,7 +1262,7 @@ def _unchanged_done(st: _Loop, triage: list[str]) -> str | None:
         "session: only file edits are kept, a summary or plan of what to change is "
         "discarded, and so is a package installed in this sandbox (declare it, e.g. a "
         "types-* stub, in the project's dependency manifest). "
-        "Make the changes now (write_file), re-run the build/typecheck and "
+        "Make the changes now (edit_file or write_file), re-run the build/typecheck and "
         "the tests, then declare done. If the task truly needs no change, call done "
         "again." + (f"\nYour triage names this unfinished work:{todo}" if todo else "")
     )
@@ -1232,8 +1284,8 @@ def _undeclared_done(st: _Loop) -> str | None:
     return (
         "ERROR: not done —"
         + "".join(f"\n- {_install_note(d)}" for d in missing)
-        + "\nDeclare them now (write_file), then declare done. If the project does not "
-        "import them, call done again."
+        + "\nDeclare them now (edit_file or write_file), then declare done. If the "
+        "project does not import them, call done again."
     )
 
 
@@ -1757,7 +1809,8 @@ def _summarize(act: dict[str, Any]) -> str:
 
 
 def _fingerprint(act: dict[str, Any]) -> tuple[str, ...]:
-    content = hashlib.sha256(str(act.get("content", "")).encode("utf-8")).hexdigest()
+    body = json.dumps([act.get("content", ""), act.get("edits")], sort_keys=True, default=str)
+    content = hashlib.sha256(body.encode("utf-8")).hexdigest()
     keys = ("action", "path", "cmd", "pattern", "start_line", "end_line")
     return (*(str(act.get(k)) for k in keys), content)
 
@@ -1843,6 +1896,70 @@ def _tree_state(worktree: Path) -> str:
                 continue
             h.update(f"{path}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
     return h.hexdigest()
+
+
+# Lines of the file shown around a failed edit's closest line or first match.
+_EDIT_CONTEXT = 2
+_EDIT_EXCERPT_MAX = 600
+_EDIT_MATCHES_SHOWN = 5
+
+
+def _apply_edits(rel: str, text: str, edits: Any) -> tuple[str | None, str]:
+    """``(new text, where the edits landed)`` for ``edits`` applied in order to
+    ``text``, or ``(None, why)`` at the first edit whose ``old`` is not exactly once
+    in the text as the earlier edits left it. A full rewrite to fix two type errors
+    cost a local model ~2.3k output tokens and two minutes a time."""
+    if not isinstance(edits, list) or not edits:
+        return None, 'no "edits" given: pass a list of {"old": ..., "new": ...}'
+    spans: list[str] = []
+    for i, edit in enumerate(edits, 1):
+        old = edit.get("old") if isinstance(edit, dict) else None
+        new = edit.get("new") if isinstance(edit, dict) else None
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None, f'edit {i}: needs string "old" and "new"'
+        if not old:
+            return None, f'edit {i}: "old" is empty: give the exact text to replace'
+        count = text.count(old)
+        if count != 1:
+            return None, _edit_miss(rel, text, old, i, count)
+        at = text.index(old)
+        first = text.count("\n", 0, at) + 1
+        last = first + max(0, new.rstrip("\n").count("\n"))
+        spans.append(f"line {first}" if last == first else f"lines {first}-{last}")
+        text = text[:at] + new + text[at + len(old) :]
+    return text, f"{len(edits)} replacement{'s' if len(edits) > 1 else ''} at " + ", ".join(spans)
+
+
+def _edit_miss(rel: str, text: str, old: str, i: int, count: int) -> str:
+    """Why edit ``i`` did not apply, with a short excerpt of ``text``: around the
+    first match when ``old`` is ambiguous, around the line closest to its first line
+    when it is absent."""
+    lines = text.splitlines()
+
+    def excerpt(at: int) -> str:
+        lo, hi = max(0, at - _EDIT_CONTEXT), min(len(lines), at + _EDIT_CONTEXT + 1)
+        return "\n".join(f"{n + 1:>5}| {lines[n]}" for n in range(lo, hi))[:_EDIT_EXCERPT_MAX]
+
+    if count:
+        nums = [text.count("\n", 0, m.start()) for m in re.finditer(re.escape(old), text)]
+        where = ", ".join(str(n + 1) for n in nums[:_EDIT_MATCHES_SHOWN])
+        return (
+            f"edit {i}: `old` occurs {count} times in {rel} (at lines {where}); include "
+            f"more surrounding lines to make it unique. Near line {nums[0] + 1}:\n"
+            + excerpt(nums[0])
+        )
+    head = next((ln.strip() for ln in old.splitlines() if ln.strip()), "")
+    scores = [difflib.SequenceMatcher(None, head, ln.strip()).ratio() for ln in lines]
+    best = max(range(len(scores)), key=scores.__getitem__, default=-1)
+    near = (
+        f" The closest line is {best + 1}:\n{excerpt(best)}"
+        if best >= 0 and scores[best] >= 0.5
+        else ""
+    )
+    return (
+        f"edit {i}: `old` not found in {rel} (it must match the file exactly, "
+        f"whitespace included; re-read the file if unsure).{near}"
+    )
 
 
 def _syntax_check(rel: str, content: str) -> tuple[str | None, str]:

@@ -1945,3 +1945,125 @@ def test_the_action_schema_rejects_a_write_without_its_path() -> None:
     assert not _admits(ACTION_SCHEMA, {"action": "check"})
     assert _admits(_FENCED_SCHEMAS[id(ACTION_SCHEMA)], {**write, "reason": "r"})
     assert not _admits(ACTION_SCHEMA, {**write, "reason": "r"})
+    edit = {"action": "edit_file", "path": "a.py", "edits": [{"old": "1", "new": "2"}]}
+    assert _admits(ACTION_SCHEMA, edit)
+    assert not _admits(ACTION_SCHEMA, {"action": "edit_file", "path": "a.py"})
+    assert _admits(_FENCED_SCHEMAS[id(ACTION_SCHEMA)], {**edit, "reason": "r"})
+
+
+# ---- edit_file: exact replacements instead of a full rewrite -------------------------
+
+
+def _edit(path: str, *pairs: tuple[str, str], **extra: Any) -> dict[str, Any]:
+    edits = [{"old": o, "new": n} for o, n in pairs]
+    return {"action": "edit_file", "path": path, "edits": edits, **extra}
+
+
+_APP = "def area(w: int, h: int) -> int:\n    return w * h\n\n\nX = 1\nY = 1\n"
+
+
+def test_an_edit_replaces_one_exact_span(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        recording([_edit("app.py", ("X = 1\n", "X = 2\n")), {"action": "done"}], seen)
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"app.py": _APP.replace("X = 1", "X = 2")}
+    assert observations(seen[1])[0].startswith(
+        "OBSERVATION:\nedited app.py: 1 replacement at line 5"
+    )
+
+
+def test_a_native_edit_applies_several_replacements_in_order(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    edit = _edit(
+        "app.py",
+        ("w: int, h: int) -> int:", "w: float, h: float) -> float:"),
+        ("X = 1\nY = 1\n", "X = 1\nY = 2\nZ = 3\n"),
+        ("Z = 3", "Z = 4"),  # matched against the earlier edit's text
+    )
+    edit.pop("action")
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns([[("edit_file", edit)], [("done", {"summary": "ok"})]], seen),
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"]["app.py"] == (
+        "def area(w: float, h: float) -> float:\n    return w * h\n\n\nX = 1\nY = 2\nZ = 4\n"
+    )
+    assert results_of(seen[1])[0]["content"].startswith(
+        "edited app.py: 3 replacements at line 1, lines 5-7, line 7"
+    )
+
+
+def test_a_missing_or_ambiguous_edit_leaves_the_file_unchanged(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    actions = [
+        # The first edit would apply; the second's text is absent: neither lands.
+        _edit("app.py", ("X = 1", "X = 2"), ("    return w * hh", "    return 0")),
+        _edit("app.py", (" = 1\n", " = 2\n")),
+        _edit("app.py", ("X = 1", "X = 2"), ("X = 2", "X = (")),
+        _edit("missing.py", ("a", "b")),
+        {"action": "done"},
+    ]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+        assert (sb.worktree / "app.py").read_text() == _APP
+    assert body["files"] == {}
+    missing, ambiguous, broken, absent = (
+        o.removeprefix("OBSERVATION:\n") for o in observations(seen[-1])
+    )
+    assert missing.startswith("ERROR: not edited — edit 2: `old` not found in app.py")
+    assert "The closest line is 2:\n    1| def area" in missing
+    assert "    2|     return w * h" in missing
+    assert "no edit of this call was applied" in missing
+    assert ambiguous.startswith(
+        "ERROR: not edited — edit 1: `old` occurs 2 times in app.py (at lines 5, 6)"
+    )
+    assert "    5| X = 1" in ambiguous
+    assert broken.startswith("ERROR: edit rejected — after these edits app.py")
+    assert absent.startswith("ERROR: not edited — missing.py does not exist")
+
+
+def test_an_edit_outside_the_tickets_files_or_a_fixers_target_is_refused(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "other.py").write_text("O = 1\n")
+    (src / "app.py").write_text("A = 1\n")
+    (src / "tests" / "test_b.py").write_text("B = 1\n")
+    seen: list[list[dict[str, Any]]] = []
+    actions = [_edit("other.py", ("O = 1", "O = 2")), {"action": "done"}]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(_ticket_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {}
+    assert "other.py is outside this ticket's files" in observations(seen[1])[0]
+
+    seen = []
+    actions = [
+        _edit("app.py", ("A = 1", "A = 2")),
+        _edit("app.py", ("A = 1", "A = 3"), reason="the test imports A"),
+        _edit("tests/test_b.py", ("B = 1", "B = 2")),
+        {"action": "done", "summary": "fixed"},
+    ]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    refused = observations(seen[-1])[0]
+    assert "app.py is outside this fix pass's target" in refused and "`reason`" in refused
+    assert body["files"] == {"app.py": "A = 3\n", "tests/test_b.py": "B = 2\n"}
+    assert any(t.explanation.startswith("fix pass changed app.py") for t in result.triage)

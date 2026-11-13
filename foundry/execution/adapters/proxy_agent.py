@@ -154,7 +154,8 @@ _SPEC_CONFLICT_RULE = (
     "If the spec contradicts itself (a scenario's example breaks a pinned constraint "
     "or another scenario), never special-case that example or rewrite its input to "
     "dodge the rule: implement the general rule, and list in done's triage an entry "
-    f"starting '{_SPEC_CONFLICT_PREFIX}' that quotes both statements."
+    f"starting '{_SPEC_CONFLICT_PREFIX}' that quotes both statements; when one is a "
+    "contract property, name the property id, e.g. PR3."
 )
 UPSTREAM_DEFECT_PREFIX = "upstream-defect:"
 # A downstream session once diagnosed a route bug in a dependency's file, then

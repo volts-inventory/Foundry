@@ -12,6 +12,7 @@ from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import pinned_texts
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.tickets.constants import (
+    CONTRACT_KIND,
     FAIL_TRIAGE,
     MAX_TICKET_ATTEMPTS,
     NODE_ID,
@@ -81,6 +82,56 @@ def _newest_by(
             if k not in newest or handle.seq > newest[k][0]:
                 newest[k] = (handle.seq, body)
     return {k: v[1] for k, v in newest.items()}
+
+
+_PROPERTY_ID = re.compile(r"\bPR\d+\b", re.IGNORECASE)
+
+
+def conflicted_properties(
+    state: FactoryState, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> frozenset[str]:
+    """The contract property ids a build session's spec-conflict report names: the
+    spec contradicts them, so no gate requires them (the build manifest lists the
+    report). Only the reporting ticket's own properties: one session must not waive
+    a property another ticket proves."""
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    by_task = {f"task/{t.id}": t for t in tickets}  # ticket ids are their task ids
+    out: set[str] = set()
+    for note in state.get("gate_triage") or ():
+        ticket = by_task.get(note.run_against)
+        if note.name != SPEC_CONFLICT_TRIAGE or ticket is None:
+            continue
+        own = {
+            line.split(": ", 2)[1].upper() for line in ticket_properties(ticket, tickets, contracts)
+        }
+        out |= {pid.upper() for pid in _PROPERTY_ID.findall(str(note.explanation))} & own
+    return frozenset(out)
+
+
+def live_contracts(state: FactoryState, resolve: ArtifactResolver) -> dict[str, InterfaceContract]:
+    """The newest contract per name, without the properties a spec conflict names."""
+    from foundry.agents.implementation.tickets.tasks import read_tickets
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    contracts: dict[str, InterfaceContract] = _newest_by(
+        state, resolve, CONTRACT_KIND, InterfaceContract, "name"
+    )
+    if not any(t.name == SPEC_CONFLICT_TRIAGE for t in state.get("gate_triage") or ()):
+        return contracts
+    dropped = conflicted_properties(state, read_tickets(state, resolve), contracts)
+    if not dropped:
+        return contracts
+    return {
+        name: c.model_copy(
+            update={
+                "properties": tuple(
+                    p for p in c.properties if p.partition(":")[0].strip().upper() not in dropped
+                )
+            }
+        )
+        for name, c in contracts.items()
+    }
 
 
 def _contract_body(rt: AgentRuntime, contract: InterfaceContract) -> str:
@@ -289,13 +340,12 @@ def _ticket_check(
     tests in them and its contracts' properties. The session that completes the app
     (every other ticket built, or the entrypoint once its dependencies are) also
     runs the Launch gate; a red launch is the entrypoint's own."""
-    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
     from foundry.agents.implementation.tickets.tasks import built_task_ids, read_tickets
     from foundry.gates.self_check import CheckSpec
     from foundry.graph.gate_wiring import wave_scenarios
 
     tickets = read_tickets(state, resolve)
-    contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+    contracts = live_contracts(state, resolve)
     properties: dict[str, str] = {}
     for line in ticket_properties(ticket, tickets, contracts):
         name, _, rest = line.partition(": ")

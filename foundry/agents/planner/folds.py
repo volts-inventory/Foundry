@@ -233,6 +233,45 @@ def _own_harness_files(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[st
     return out, concerns
 
 
+_MANIFEST = re.compile(
+    r"requirements\.txt|pyproject\.toml|package\.json|Cargo\.toml|go\.mod|pom\.xml"
+    r"|build\.gradle(?:\.kts)?|Gemfile|composer\.json"
+)
+DEPENDENCIES_NOTE = "Declare every third-party dependency the plan names"
+
+
+def _declare_dependencies(
+    tickets: Sequence[Ticket], dependencies: Sequence[str]
+) -> tuple[list[Ticket], list[str]]:
+    """Give the plan's ``stack.dependencies`` to the ticket that owns the package
+    manifest (the harness ticket, else the first ticket writing a repo-root
+    manifest; after :func:`_own_harness_files` that is a first-wave one). No later
+    ticket may edit the manifest, so a library only an ADR named (bcrypt) went
+    undeclared and its ticket faked it with pbkdf2."""
+    if not dependencies:
+        return list(tickets), []
+    owner = next((t for t in tickets if t.id == HARNESS_TICKET_ID), None) or next(
+        (t for t in tickets if any("/" not in f and _MANIFEST.fullmatch(f) for f in t.files)),
+        None,
+    )
+    if owner is None:
+        return list(tickets), [
+            f"No ticket writes a package manifest to declare {', '.join(dependencies)}."
+        ]
+    if DEPENDENCIES_NOTE in owner.description:
+        return list(tickets), []
+    manifests = [f for f in owner.files if _MANIFEST.fullmatch(PurePosixPath(f).name)]
+    note = (
+        f" {DEPENDENCIES_NOTE} in {' / '.join(manifests) or 'the package manifest'}, "
+        f"as given: {', '.join(dependencies)}. Later tickets cannot edit it, so each "
+        "must be there before they build."
+    )
+    return [
+        t.model_copy(update={"description": t.description + note}) if t.id == owner.id else t
+        for t in tickets
+    ], [f"Ticket {owner.id}: declares the plan's dependencies {', '.join(dependencies)}."]
+
+
 def _settle_contracts_file(
     tickets: Sequence[Ticket],
     contracts_file: str,

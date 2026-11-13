@@ -281,10 +281,11 @@ def _python_deps_ticket(
     stack: StackDecision | None,
     base: BaseView | None,
     seq: Seq,
+    dependencies: Sequence[str] = (),
 ) -> list[Ticket]:
     """A wave-0 ticket declaring a new Python build's dependencies in the manifest a
     planned ticket owns (requirements.txt when none does and the stack names a
-    framework), when no generated ticket writes one. The wave checks install
+    framework or ``dependencies``), when no generated ticket writes one. The wave checks install
     only what a manifest declares: left to a late ticket (often the entrypoint), every
     earlier check runs without the framework and fails on ModuleNotFoundError, which
     the fixer may not repair in a later wave's file. The planned owner then loses
@@ -298,7 +299,7 @@ def _python_deps_ticket(
     ):
         return []
     manifests = tuple(m for m in _PY_MANIFESTS if any(m in t.files for t in tickets))
-    if not manifests and stack.framework.strip():
+    if not manifests and (stack.framework.strip() or dependencies):
         # No ticket owns a manifest, yet the framework is third-party: unowned, the
         # only manifest is the import-derived scaffold, which is never installed.
         manifests = ("requirements.txt",)

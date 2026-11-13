@@ -30,6 +30,7 @@ from foundry.agents.planner.folds import (
     _add_contract_deps,
     _add_read_deps,
     _assign_shared_types,
+    _declare_dependencies,
     _drop_dangling_refs,
     _drop_orphan_scenarios,
     _drop_self_consumes,
@@ -86,6 +87,7 @@ class _Frame:
     constraints: tuple[tuple[str, str], ...] = ()  # the plan's pinned (id, text)
     contracts_file: str = ""  # where the contract data types go
     ui: bool = False  # the PRD declares a 'ui' capability
+    dependencies: tuple[str, ...] = ()  # the plan's stack.dependencies, as manifest entries
 
 
 @dataclass(frozen=True)
@@ -133,7 +135,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     )
     generated = (
         *frame.generated,
-        *_python_deps_ticket(tickets, frame.generated, frame.stack, base, frame.tickets_seq),
+        *_python_deps_ticket(
+            tickets, frame.generated, frame.stack, base, frame.tickets_seq, frame.dependencies
+        ),
     )
     tickets, more = _attach_generated(tickets, generated, frame.tickets_seq)
     concerns += more
@@ -142,6 +146,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         concerns += fold(repair.__name__, more)
     tickets, more = _own_harness_files(tickets)
     concerns += fold(_own_harness_files.__name__, more)
+    tickets, more = _declare_dependencies(tickets, frame.dependencies)
+    concerns += fold(_declare_dependencies.__name__, more)
     tickets, more, stack_findings = _own_stack_files(
         tickets, frame.stack, frozenset(base.files) if base is not None else frozenset()
     )

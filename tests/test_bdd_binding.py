@@ -15,7 +15,8 @@ from foundry.agents.implementation.tickets import (
     scenario_verify,
 )
 from foundry.agents.planner import _build_tickets, _own_stack_files, stack_files
-from foundry.agents.planner.folds import _own_harness_files
+from foundry.agents.planner.folds import _declare_dependencies, _own_harness_files
+from foundry.agents.planner.stack import _python_deps_ticket
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import BDD_KEY, TestGate
 from foundry.schemas.gates import GateStatus
@@ -663,3 +664,33 @@ def test_without_a_harness_ticket_the_config_goes_to_the_first_wave_ticket_tests
     # A nested file of the same name is not the root config.
     nested = [_ticket("a", ("src/a.ts",)), _ticket("b", ("web/package.json",), depends_on=("a",))]
     assert _own_harness_files(nested) == (nested, [])
+
+
+def test_the_plans_dependencies_go_to_the_manifest_owner_up_front() -> None:
+    # The notes bench: ADR-2 named bcrypt, the auth ticket could not edit the
+    # harness-owned requirements file, and it faked bcrypt with pbkdf2.
+    deps = ("flask==3.0.3", "bcrypt==4.2.0")
+    tickets = [
+        _ticket("bdd-harness", ("requirements.txt",)),
+        _ticket("auth", ("app/auth.py",), depends_on=("bdd-harness",)),
+    ]
+    out, concerns = _declare_dependencies(tickets, deps)
+    assert "requirements.txt, as given: flask==3.0.3, bcrypt==4.2.0" in out[0].description
+    assert out[1] == tickets[1] and len(concerns) == 1
+    assert _declare_dependencies(out, deps) == (out, [])
+    # No harness ticket: the first ticket writing a root manifest, in any language.
+    rust = [_ticket("core", ("src/lib.rs", "Cargo.toml")), _ticket("cli", ("src/main.rs",))]
+    assert 'serde = "1"' in _declare_dependencies(rust, ('serde = "1"',))[0][0].description
+    # None to declare, or nobody to declare them: unchanged.
+    assert _declare_dependencies(tickets, ()) == (tickets, [])
+    bare = [_ticket("a", ("src/a.go",))]
+    out, concerns = _declare_dependencies(bare, ("github.com/google/uuid",))
+    assert out == bare and "github.com/google/uuid" in concerns[0]
+
+
+def test_declared_dependencies_alone_get_a_python_deps_ticket() -> None:
+    stack = StackDecision(language="python", test="python3 -m pytest -q")
+    tickets = [_ticket("auth", ("app/auth.py",))]
+    assert _python_deps_ticket(tickets, (), stack, None, _SEQ) == []
+    (deps,) = _python_deps_ticket(tickets, (), stack, None, _SEQ, ("bcrypt==4.2.0",))
+    assert deps.files == ("requirements.txt",)

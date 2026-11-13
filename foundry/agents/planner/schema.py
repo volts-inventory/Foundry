@@ -315,6 +315,13 @@ SOP = (
     "contracts_file is the source file the contract data types and errors are "
     "written to (e.g. src/contracts.ts, contracts.py); harness_files are the package manifest and "
     "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
+    "dependencies lists every third-party library the project's code and tests "
+    "use, each as its manifest entry (pinned where the ecosystem pins, e.g. "
+    'bcrypt==4.2.0, express@4.19.2, serde = "1"): above all every library an ADR, a '
+    "contract or the framework names. The first-wave ticket owning the manifest "
+    "declares them all, and no later ticket may edit it, so a library left out "
+    "here cannot be used (an ADR naming bcrypt, left out here, got a pbkdf2 "
+    "imitation). "
     "cucumber-js step files go under features/step_definitions/. The ids "
     f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are reserved: never plan a "
     f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes the "
@@ -474,6 +481,7 @@ _STACK_SCHEMA: dict[str, Any] = {
         "notes": {"type": "string"},
         "contracts_file": {"type": "string"},
         "harness_files": _STR_ARRAY,
+        "dependencies": _STR_ARRAY,
     },
     "required": [
         "language",
@@ -490,6 +498,7 @@ _STACK_SCHEMA: dict[str, Any] = {
         "interface",
         "contracts_file",
         "harness_files",
+        "dependencies",
     ],
     "additionalProperties": False,
 }

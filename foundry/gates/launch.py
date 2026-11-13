@@ -22,7 +22,11 @@ app's command in its own process group and drives it:
   ``<cmd> --help``). FAIL on a traceback, a missing-entry/import error, a
   command that never exits with stdin closed, or (an app that must launch) a
   ``--help`` that exits non-zero. A scenario command's own non-zero exit is the
-  scenario's answer, not a launch verdict.
+  scenario's answer, not a launch verdict. Then hostile input (a 10k-char string,
+  2000 nested brackets, a 5000-digit number, an empty string) goes where a scenario
+  passes the app its input (its last positional argument, or a pipe into it): a
+  traceback, panic, uncaught error or crash signal FAILs, a clean error does not.
+  An http app's rendered POST form is also sent once with a 1 MB field: a 5xx FAILs.
 
 When the stack declares the spec's ``interface``, a cli option/subcommand its
 ``--help`` does not list FAILs (an unrequested extra option is advisory only), and
@@ -75,12 +79,14 @@ _MAX_REQUESTS = 80
 _MAX_PAGES = 10
 _MAX_FORMS = 12
 _BURST = 12
+_OVERSIZED = 1_000_000  # the oversized form field's length
+_FUZZ_S = 10.0  # each hostile-input cli run's time limit
 
 # The trusted driver: argv[1] is its JSON config; its last stdout line is the result.
 _LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
 
 _DRIVER = r"""
-import html, http.client, json, os, re, signal, socket, subprocess, sys, threading, time
+import html, http.client, json, os, re, shlex, signal, socket, subprocess, sys, threading, time
 LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
 from urllib.parse import urlencode, urljoin, urlsplit
 
@@ -92,11 +98,17 @@ MARK = cfg["mark"]
 TAIL = 4000
 
 
-def spawn(cmd, env):
+def spawn(cmd, env, data=None):
     proc = subprocess.Popen(
-        ["/bin/sh", "-c", cmd], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, env=env, start_new_session=True,
+        ["/bin/sh", "-c", cmd], stdin=subprocess.DEVNULL if data is None else subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, start_new_session=True,
     )
+    if data is not None:
+        try:  # well under a pipe buffer: never blocks on an app that does not read
+            proc.stdin.write(data.encode())
+            proc.stdin.close()
+        except OSError:
+            pass
     buf = []
 
     def drain():
@@ -146,7 +158,37 @@ def run_cli():
             rc = None
         kill(proc)
         runs.append({"cmd": cmd, "rc": rc, "output": text(buf, t)})
-    return {"runs": runs}
+    return {"runs": runs, "fuzz": run_fuzz()}
+
+
+# Generic hostile inputs for the app's main argument or stdin: each must get a clean
+# error (or an answer), never a traceback, a panic or a crash.
+HOSTILE = (
+    ("a 10000-character string", "x" * 10000),
+    ("2000 nested brackets", "(" * 2000 + "1" + ")" * 2000),
+    ("a 5000-digit number", "9" * 5000),
+    ("an empty string", ""),
+)
+
+
+def run_fuzz():
+    out = []
+    for via, prefix, suffix in cfg["fuzz"]:
+        for label, value in HOSTILE:
+            if via == "stdin":
+                cmd, data, show = prefix, value + "\n" if value else "", f"<{label}> | {prefix}"
+            else:
+                cmd, data = f"{prefix} {shlex.quote(value)}{suffix}", None
+                show = f"{prefix} <{label}>{suffix}"
+            proc, buf, t = spawn(cmd, dict(os.environ), data)
+            try:
+                rc = proc.wait(timeout=cfg["fuzz_s"])
+            except subprocess.TimeoutExpired:
+                rc = None
+            kill(proc)
+            out.append({"cmd": show, "input": label, "via": via, "rc": rc,
+                        "output": text(buf, t)})
+    return out
 
 
 FORM = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.I | re.S)
@@ -161,6 +203,7 @@ LOGOUT = re.compile(r"log.?out|sign.?out", re.I)
 LEAVE = re.compile(r"log.?out|sign.?out|delete|destroy|remove", re.I)
 ASSET = re.compile(r"\.(css|js|mjs|map|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|pdf|zip)$", re.I)
 REDIRECTS = (301, 302, 303, 307, 308)
+BIG_RUN = re.compile(r"x{1000,}")
 DATES = {"date": "2024-01-01", "datetime-local": "2024-01-01T12:00", "time": "12:00",
          "month": "2024-01", "week": "2024-W01"}
 
@@ -248,7 +291,10 @@ class Session:
             conn.request(method, path, body=body, headers=h)
             resp = conn.getresponse()
             self.keep(resp)
-            data = resp.read(262144).decode("utf-8", "replace")
+            # A page that shows the oversized field back: read past it and cut it out,
+            # or the forms after it (a logout) are lost to the cap.
+            data = resp.read(4 * cfg["oversized"] + 262144).decode("utf-8", "replace")
+            data = BIG_RUN.sub("x[...]", data)[:262144]
             ctype = resp.getheader("Content-Type", "") or ""
             return {"status": resp.status, "full": data, "html": "html" in ctype.lower(),
                     "location": resp.getheader("Location", "") or ""}
@@ -295,7 +341,7 @@ def parse_forms(page, body):
         method = "POST" if a.get("method", "get").lower() == "post" else "GET"
         u = urlsplit(urljoin(page, a.get("action") or page))
         action = (u.path or "/") + (f"?{u.query}" if u.query else "")
-        fields, pw, submit = [], 0, None
+        fields, pw, submit, texts = [], 0, None, []
         for tag, raw in INPUT.findall(inner):
             f = attrs(raw)
             name, kind = f.get("name"), f.get("type", "text").lower()
@@ -316,6 +362,7 @@ def parse_forms(page, body):
                     fields.append((name, f.get("value", "on")))
             else:
                 fields.append((name, f.get("value") or fill(name, kind, f)))
+                texts.append(name)
         for raw, opts in SELECT.findall(inner):
             f = attrs(raw)
             values = [v for v in (attrs(o).get("value") for o in OPTION.findall(opts)) if v]
@@ -336,7 +383,7 @@ def parse_forms(page, body):
             rank = 2
         key = (method, override, norm(action), " ".join(sorted(n for n, _ in fields)))
         out.append({"page": page, "method": method, "action": action, "fields": fields,
-                    "override": override, "rank": rank, "key": key})
+                    "override": override, "rank": rank, "key": key, "texts": texts})
     return out
 
 
@@ -356,15 +403,20 @@ def probe(s, out, signed_in):
     reqs = out["requests"]
     seen, order, queue = set(), [], []
     pending, done = [], set()
-    st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "post": None}
+    st = {"pages": 0, "forms": 0, "authed": False, "recrawled": False, "page": None, "post": None,
+          "big": None, "signup": None}
+    linked = {}  # a link the app rendered -> the page that rendered it
 
     def harvest(r):
         if not (r.get("html") and r.get("status", 500) < 400 and r.get("page")):
             return
         for f in parse_forms(r["page"], r.get("full", "")):
+            if f["rank"] == 0 and st["signup"] is None:
+                st["signup"] = f["page"]
             if f["key"] not in done and all(f["key"] != p["key"] for p in pending):
                 pending.append(f)
         for link in parse_links(r["page"], r.get("full", ""), s.local):
+            linked.setdefault(link, r["page"])
             if link not in seen and link not in queue:
                 queue.append(link)
 
@@ -376,6 +428,8 @@ def probe(s, out, signed_in):
         st["pages"] += 1
         r = s.go("GET", path)
         if r is not None:
+            if path in linked:
+                r["linked_from"] = linked[path]
             reqs.append(r)
             harvest(r)
             if st["authed"] and st["page"] is None and r.get("html") and r.get("status") == 200:
@@ -408,6 +462,9 @@ def probe(s, out, signed_in):
             st["authed"] = True
         if g["rank"] == 2 and g["method"] == "POST" and ok:
             st["post"] = (g["action"], g["fields"])
+        if g["method"] == "POST" and g["texts"] and g["rank"] < 3:
+            if st["big"] is None or (g["rank"] == 2 and st["big"]["rank"] != 2):
+                st["big"] = g
         harvest(r)
         return True
 
@@ -475,6 +532,24 @@ def burst(s, st):
     return {"sent": len(got), "statuses": statuses, "failures": bad[:3], "count": len(bad)}
 
 
+def oversized(s, st):
+    # One rendered POST form again, each text field holding an oversized value: the
+    # app may refuse it (413/400), never answer it with a server error.
+    f = st["big"]
+    s.deadline = max(s.deadline, time.monotonic() + cfg["request_s"] * 2)
+    page = s.go("GET", f["page"], limit=s.sent + 6)
+    if page is None:
+        return None
+    found = parse_forms(page["page"], page.get("full", "")) if page.get("page") else []
+    g = next((x for x in found if x["key"] == f["key"]), f)
+    big = "x" * cfg["oversized"]
+    fields = [(n, big if n in g["texts"] else v) for n, v in g["fields"]]
+    r = s.go("POST", g["action"], fields, follow=0, limit=s.sent + 1)
+    if r is not None:
+        r["fields"] = g["texts"]
+    return r
+
+
 def excerpt(body):
     i = body.rfind("Traceback (most recent call last)")
     if i >= 0:
@@ -513,13 +588,18 @@ def run_http():
                 out["routes"].append(r or {"method": m, "path": p, "error": "probe budget spent"})
             if proc.poll() is None and cfg["burst"]:
                 out["burst"] = burst(sess, st)
+            if proc.poll() is None and cfg["oversized"] and st["big"] is not None:
+                out["oversized"] = oversized(sess, st)
 
-        probe(sess, out, signed_in)
+        st = probe(sess, out, signed_in)
+        if st["signup"] is not None:
+            out["auth"] = {"signup": st["signup"], "authed": st["authed"]}
         out["sent"] = sess.sent
         for r in out["routes"]:
             for k in ("full", "html", "page"):
                 r.pop(k, None)
-        for r in out["requests"] + out.get("burst", {}).get("failures", []):
+        big = [out["oversized"]] if out.get("oversized") else []
+        for r in out["requests"] + out.get("burst", {}).get("failures", []) + big:
             r["body"] = excerpt(r.pop("full", ""))
             r.pop("html", None)
             r.pop("page", None)
@@ -555,6 +635,9 @@ class LaunchTarget:
     needs: tuple[str, ...] = ()
     source: str = ""  # where the command came from, for the findings
     interface: tuple[str, ...] = ()  # the spec's options/subcommands or routes
+    # The cli hostile-input probes: (via, prefix, suffix); via "argument" runs
+    # ``prefix <input> suffix``, via "stdin" runs ``prefix`` with the input on stdin.
+    fuzz: tuple[tuple[str, str, str], ...] = ()
 
 
 # ---- the target: stack fields, else the run command, else the entry's files ----
@@ -658,17 +741,81 @@ def _probes(lines: Iterable[str]) -> tuple[tuple[tuple[str, str], ...], tuple[st
     return tuple(("GET", p) for p in gets), tuple(dict.fromkeys(posts))
 
 
+def _program_names(cmd: str) -> set[str]:
+    """The names a scenario may call the app by (``dice`` for ``python -m dice``)."""
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return set()
+    if not argv:
+        return set()
+    return {PurePosixPath(argv[-1]).stem, PurePosixPath(argv[0]).name} - _INTERPRETERS - {""}
+
+
+_SHELL_OPS = frozenset({"|", "||", "&&", ";", "<", ">", ">>", "&", "2>&1"})
+
+
+def _fuzz_targets(
+    cmd: str, runs: Iterable[str], lines: Iterable[str], subcommands: Iterable[str]
+) -> tuple[tuple[str, str, str], ...]:
+    """Where the app takes user input, as its scenarios invoke it: the last
+    positional argument of the first scenario run that has one (``2d6`` in ``py -m
+    dice roll 2d6``; not a subcommand, an option or an option's value), and a
+    scenario that pipes into the app (``echo 2d6 | dice``) for stdin."""
+    try:
+        base = shlex.split(cmd)
+    except ValueError:
+        return ()
+    subs = set(subcommands)
+    out: list[tuple[str, str, str]] = []
+    for run in runs:
+        try:
+            words = shlex.split(run)
+        except ValueError:
+            continue
+        if words[: len(base)] != base or _SHELL_OPS & set(words):
+            continue
+        args = words[len(base) :]
+        spots = [
+            i
+            for i, a in enumerate(args)
+            if not a.startswith("-")
+            and a not in subs
+            and not (i and args[i - 1].startswith("-") and "=" not in args[i - 1])
+        ]
+        if spots:
+            i = spots[-1]
+            prefix = " ".join([cmd, *map(shlex.quote, args[:i])])
+            suffix = "".join(f" {shlex.quote(a)}" for a in args[i + 1 :])
+            out.append(("argument", prefix, suffix))
+            break
+    names = _program_names(cmd)
+    for line in lines:
+        for a, b in _QUOTED.findall(line):
+            text = " ".join((a or b).split())
+            if "|" not in text:
+                continue
+            right = text.rsplit("|", 1)[1].strip()
+            try:
+                words = shlex.split(right)
+            except ValueError:
+                continue
+            if not words or _SHELL_OPS & set(words):
+                continue
+            if right.startswith(" ".join(cmd.split())):
+                return (*out, ("stdin", right, ""))
+            if words[0] in names:
+                return (*out, ("stdin", " ".join([cmd, *map(shlex.quote, words[1:])]), ""))
+    return tuple(out)
+
+
 def _cli_runs(cmd: str, lines: Iterable[str]) -> tuple[str, ...]:
     """The scenarios' quoted commands that invoke this app: one starting with the
     launch command, or with its program name (``dice roll`` for ``python -m dice``,
     run as ``python -m dice roll``)."""
-    try:
-        argv = shlex.split(cmd)
-    except ValueError:
+    names = _program_names(cmd)
+    if not names:
         return ()
-    if not argv:
-        return ()
-    names = {PurePosixPath(argv[-1]).stem, PurePosixPath(argv[0]).name} - _INTERPRETERS - {""}
     out: list[str] = []
     for line in lines:
         for a, b in _QUOTED.findall(line):
@@ -735,15 +882,14 @@ def launch_target(
             kind, cmd, required, probes, posts, needs=needs, source=source, interface=interface
         )
     # A security_abuse scenario's command is meant to be refused: no launch verdict.
-    runs = _cli_runs(
-        cmd,
-        (
-            s
-            for c in criteria
-            if (not owners or c.ticket_id in owners) and not c.security_abuse
-            for s in c.when
-        ),
-    )
+    whens = [
+        s
+        for c in criteria
+        if (not owners or c.ticket_id in owners) and not c.security_abuse
+        for s in c.when
+    ]
+    runs = _cli_runs(cmd, whens)
+    fuzz = _fuzz_targets(cmd, runs, whens, _cli_interface(interface)[1]) if cmd else ()
     # A subcommand's own options show only in its own --help.
     helps = (f"{cmd} --help", *_sub_helps(cmd, interface))
     return LaunchTarget(
@@ -754,6 +900,7 @@ def launch_target(
         needs=needs,
         source=source,
         interface=interface,
+        fuzz=fuzz,
     )
 
 
@@ -861,6 +1008,56 @@ _ENTRY_ERROR = re.compile(
 )
 
 
+# A crash on hostile input in any runtime: _TRACEBACK's, a Rust panic, a JVM's
+# uncaught exception, a Go/Rust fatal error (stack overflow), a C crash message.
+_CRASH = re.compile(
+    _TRACEBACK.pattern + r"|panicked at |^Exception in thread \"|^fatal (?:runtime )?error: |"
+    r"has overflowed its stack|Segmentation fault|Aborted \(core dumped\)|RangeError: ",
+    re.M,
+)
+_CRASH_SIGNALS = frozenset(
+    {signal.SIGSEGV, signal.SIGABRT, signal.SIGBUS, signal.SIGILL, signal.SIGFPE}
+)
+
+
+def _signalled(rc: int | None) -> bool:
+    """The app died on a crash signal: a negative code (the shell exec'd it) or the
+    shell's 128+N for a child it waited on."""
+    if rc is None:
+        return False
+    return (-rc if rc < 0 else rc - 128) in _CRASH_SIGNALS
+
+
+def _squash(text: str) -> str:
+    """A long run of one character (the echoed hostile input) cut to a note."""
+    return re.sub(r"(.)\1{39,}", lambda m: f"{m[1] * 8}…[{len(m[0])} of {m[1]!r}]", text)
+
+
+def _fuzz_findings(r: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """(failures, advisories) of the hostile-input probes: a traceback, panic,
+    uncaught error or crash signal FAILs; a clean non-zero exit is the app's answer;
+    a run that never finished is only advisory."""
+    fails: list[str] = []
+    slow: list[str] = []
+    for q in r.get("fuzz") or ():
+        rc, text = q.get("rc"), str(q.get("output", ""))
+        how = "on stdin" if q.get("via") == "stdin" else "as its input argument"
+        if _CRASH.search(text) or _signalled(rc):
+            fails.append(
+                f"launch: `{q.get('cmd')}` crashed (exit {rc}) given {q.get('input')} {how}: "
+                "hostile input must get a clean error message and a non-zero exit, never a "
+                "traceback, panic or crash — bound the input's size, digits and nesting "
+                "depth before parsing it, and catch the error at the entry point. "
+                f"Its output:\n{_tail(_squash(text))}"
+            )
+        elif rc is None:
+            slow.append(
+                f"launch (advisory): `{q.get('cmd')}` did not finish given {q.get('input')} "
+                f"{how} — reject oversized input up front instead of working through it"
+            )
+    return fails, slow
+
+
 def _program_missing(cmd: str, text: str) -> bool:
     """The shell could not find the launch command's program itself."""
     try:
@@ -934,6 +1131,29 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
                 "method the form really sends, or honor the _method override before routing. "
                 f"Response: {_body(q)}"
             )
+        elif 400 <= status < 500 and status != 429 and form:
+            out.append(
+                f"launch: the form on {form.get('page')} submits {what} with its own hidden "
+                f"fields (a CSRF token included) and plausible values, and the app answers "
+                f"{status}: a form the app renders must work as rendered. Check that the "
+                "template renders each hidden field's real value (a token helper called, not "
+                "printed as a function or left empty) and that the route accepts the field "
+                f"names the form sends. Response: {_body(q)}"
+            )
+        elif status in (404, 405) and q.get("linked_from"):
+            out.append(
+                f"launch: the link to {q.get('path')} on {q['linked_from']} answers {status}: "
+                "a link the app renders must lead to a page — serve that path (exactly as the "
+                f"link spells it) or fix the link. Response: {_body(q)}"
+            )
+    auth = r.get("auth") or {}
+    if auth and not auth.get("authed"):
+        out.append(
+            f"launch: the app renders a signup form ({auth.get('signup')}), but signing up "
+            "and logging in with it never succeeded (every signup/login form answered 4xx or "
+            "worse, or none could be submitted): a user cannot get in. See the form "
+            "answers above."
+        )
     burst = r.get("burst") or {}
     for q in burst.get("failures") or ():
         out.append(
@@ -942,6 +1162,14 @@ def _http_findings(r: dict[str, Any], cmd: str) -> list[str]:
             "one at a time): state shared across the server's threads (one DB connection "
             "or cursor, a global) breaks under the real threaded server — open a "
             f"connection per request or guard the shared state. Response: {_body(q)}"
+        )
+    big = r.get("oversized") or {}
+    if int(big.get("status", 0)) >= 500:
+        out.append(
+            f"launch: {_what(big)} with a {_OVERSIZED // 1_000_000} MB value in its form "
+            f"field(s) {', '.join(big.get('fields') or ())} answered {big['status']}: an "
+            "oversized field must be refused cleanly (413 or 400 with a message), never a "
+            f"server error — cap the request body and field lengths. Response: {_body(big)}"
         )
     for q in r.get("routes") or ():
         if q.get("status") in (404, 405, 501):
@@ -980,7 +1208,7 @@ def _cli_findings(r: dict[str, Any], launch: str) -> list[str]:
                 f"launch: `{cmd}` exited {rc}; --help must print usage and exit 0. "
                 f"Its output:\n{_tail(text)}"
             )
-    return out + _cli_interface_findings(r, launch)[0]
+    return out + _cli_interface_findings(r, launch)[0] + _fuzz_findings(r)[0]
 
 
 class LaunchGate:
@@ -1006,22 +1234,34 @@ class LaunchGate:
         self._pyenv = pyenv
         self._seal_key = seal_key
         runs = len(target.runs) if target.kind == "cli" else 1
+        fuzz_s = min(cli_s, _FUZZ_S)
+        fuzz = len(target.fuzz) * 4 if target.kind == "cli" else 0  # 4 hostile inputs each
         self._routes = _routes(target.interface) if target.kind == "http" else ()
         # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
         self._timeout_s = (
             boot_s
-            + request_s * (len(target.probes) + len(self._routes) + 2)
+            + request_s * (len(self._routes) + len(target.probes) + 4)
             + (cli_s + 10) * runs
+            + (fuzz_s + 10) * fuzz
             + 30
         )
         # The http probe stops starting requests at probe_s, inside that timeout:
-        # after it one request may be in flight, each declared route and the burst
-        # (barrier wait + two hops) take a request_s each, then the kill and join.
-        probe_s = self._timeout_s - boot_s - request_s * (len(self._routes) + 5) - 20
+        # after it one request may be in flight, each declared route, the burst
+        # (barrier wait + two hops) and the oversized form (a GET and the POST) take a
+        # request_s each, then the kill and join.
+        probe_s = (
+            self._timeout_s
+            - boot_s
+            - request_s * (len(self._routes) + 7)
+            - 20
+            - (fuzz_s + 10) * fuzz
+        )
         self._cfg = {
             "boot_s": boot_s,
             "request_s": request_s,
             "cli_s": cli_s,
+            "fuzz_s": fuzz_s,
+            "oversized": _OVERSIZED,
             "probe_s": max(probe_s, request_s),
             "max_requests": _MAX_REQUESTS,
             "max_pages": _MAX_PAGES,
@@ -1060,6 +1300,7 @@ class LaunchGate:
             "probes": [list(p) for p in t.probes],
             "posts": list(t.posts),
             "runs": list(t.runs),
+            "fuzz": [list(f) for f in t.fuzz] if t.kind == "cli" else [],
             "routes": [list(p) for p in self._routes],
             "launch_id": (launch_id := secrets.token_hex(16)),
         }
@@ -1104,7 +1345,7 @@ class LaunchGate:
                 0, f"launch FAILED: Foundry started `{t.cmd}`{source} as a {t.kind} app"
             )
         if t.kind == "cli":
-            findings += _cli_interface_findings(result, t.cmd)[1]
+            findings += _cli_interface_findings(result, t.cmd)[1] + _fuzz_findings(result)[1]
         result.update(cmd=t.cmd, pinned=True)
         return observe(
             self.name,

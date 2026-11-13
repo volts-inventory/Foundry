@@ -269,3 +269,86 @@ def test_review_request_says_when_no_diff_is_resolvable() -> None:
         role="Reviewer",
     )
     assert "no diff text to review" in _review_request_text(transport)
+
+
+def test_a_truncated_review_diff_still_shows_the_entrypoint_and_templates() -> None:
+    from foundry.agents._common import emit_artifact
+    from foundry.agents.quality import reviewer_critic
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.graph.gate_wiring import TICKET_KIND
+    from foundry.schemas.implementation import Specialty, Ticket
+    from foundry.state.seq import Seq
+
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    rt.cas = ArtifactStore()
+    diff = (
+        "--- a/lib.py\n+++ b/lib.py\n"
+        + "+x = 1\n" * reviewer_critic._DIFF_CHAR_CAP
+        + "--- a/app.py\n+++ b/app.py\n+ENTRY_MARK\n"
+        + "--- /dev/null\n+++ b/templates/login.html\n+TEMPLATE_MARK {{ csrf_token }}\n"
+    )
+    state = _diff_state(rt.cas, {"T-A": diff})
+    seq = Seq("run-R", 1, 0, "planner", 0)
+    ticket = Ticket(
+        id="T-A",
+        title="app",
+        specialty=Specialty.BACKEND,
+        files=("app.py", "lib.py"),
+        entrypoint=True,
+        seq=seq,
+    )
+    state["artifacts"].append(emit_artifact(ticket, TICKET_KIND, "planner", seq, store=rt.cas))
+    review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
+    text = _review_request_text(transport)
+    assert "TRUNCATED" in text and "ENTRY_MARK" in text and "TEMPLATE_MARK" in text
+    # lib.py is an entrypoint ticket's file too, but too big to pin whole.
+    retry = reviewer_critic.trimmed_diff(diff, "", lambda p: p == "app.py")
+    assert retry.index("ENTRY_MARK") < retry.index("x = 1")
+
+
+def test_review_request_lists_the_plans_pinned_constraints_and_must_haves() -> None:
+    """No check verifies a pinned constraint ("never prints a traceback"): the review
+    gets each as a criterion, with the hostile-input checklist to break it."""
+    from foundry.agents._common import emit_artifact
+    from foundry.agents.quality.reviewer_critic import _SOP
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.architecture import ConstraintScope, PinnedConstraint
+    from foundry.schemas.product import IntentBrief
+    from foundry.state.seq import Seq
+
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    rt.cas = ArtifactStore()
+    state = _diff_state(rt.cas, {"T-A": "+++ b/dice.py\n+x = 1\n"})
+    seq = Seq("run-R", 1, 0, "planner", 0)
+    brief = IntentBrief(
+        intent="a dice CLI",
+        must_haves=("rolls NdM expressions",),
+        must_have_ids=("MH-1",),
+        seq=seq,
+    )
+    state["artifacts"].append(emit_artifact(brief, "intent_brief", "planner", seq, store=rt.cas))
+
+    def pc(cid: str, text: str, supersedes: str | None = None) -> PinnedConstraint:
+        return PinnedConstraint(
+            id=cid,
+            text=text,
+            scope=ConstraintScope.GLOBAL,
+            source="plan",
+            supersedes=supersedes,
+            seq=seq,
+        )
+
+    state["pinned_constraints"] = [
+        pc("PC-6", "never prints a traceback"),
+        pc("PC-1", "old rule"),
+        pc("PC-7", "exit 2 on bad input", supersedes="PC-1"),
+    ]
+    review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
+    text = _review_request_text(transport)
+    assert "PC-6 (pinned constraint): never prints a traceback" in text
+    assert "PC-7 (pinned constraint): exit 2 on bad input" in text
+    assert "old rule" not in text
+    assert "MH-1 (must-have): rolls NdM expressions" in text
+    assert "5,000-digit number" in _SOP and "2,000 nested brackets" in _SOP

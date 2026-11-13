@@ -810,6 +810,8 @@ _MYPY_TARGET_FLAGS = frozenset({"-p", "--package", "-m", "--module", "-c", "--co
 
 
 def _strict_mypy(m: re.Match[str]) -> str:
+    if m.group(2).startswith(_MYPY_LENIENT.removeprefix("mypy") + " --strict --exclude "):
+        return m.group(0)  # already rewritten: a manifest's command read back by a change
     try:
         args = shlex.split(m.group(2))
     except ValueError:
@@ -852,6 +854,16 @@ def typescript_typecheck(cmd: str) -> str:
     return cmd if "--strict" in cmd else _TSC.sub("tsc --strict", cmd)
 
 
+def stack_typecheck(stack: StackDecision) -> str:
+    """The stack's typecheck command as the build gate runs it (what a shipped
+    BUILD-MANIFEST must name: the declared one may fail where the gate's passed)."""
+    if stack.language == "python":
+        return python_typecheck(stack.typecheck)
+    if stack.language == "typescript":
+        return typescript_typecheck(stack.typecheck)
+    return stack.typecheck
+
+
 _LAUNCH_CONTRACT = (
     "launch = Foundry itself starts {cmd} as a user would (an http app on $PORT/$HOST, "
     "then GET / and the entrypoint scenarios' paths; a CLI with its scenario command "
@@ -873,13 +885,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
-    typecheck = (
-        python_typecheck(stack.typecheck)
-        if python
-        else typescript_typecheck(stack.typecheck)
-        if stack.language == "typescript"
-        else stack.typecheck
-    )
+    typecheck = stack_typecheck(stack)
     steps = [s for s in (build, typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
     install_line = stack_install(stack)

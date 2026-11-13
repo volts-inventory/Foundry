@@ -487,11 +487,88 @@ def _split_build(
     return ([head, *own] if own and head else own), ([head, *other] if other and head else other)
 
 
+# The files that configure a test harness or a module layout, any language: a change
+# to one can stop another ticket's test modules collecting.
+_HARNESS_CONFIG = re.compile(
+    r"(^|/)(pyproject\.toml|setup\.cfg|setup\.py|pytest\.ini|tox\.ini|conftest\.py|"
+    r"package\.json|tsconfig[\w.-]*\.json|"
+    r"(jest|vitest|babel|cucumber|playwright|vite|webpack)\.config\.[cm]?[jt]s|"
+    r"\.babelrc|\.mocharc[\w.-]*|cucumber\.(js|cjs|mjs|json|ya?ml)|go\.mod|go\.work|"
+    r"Cargo\.toml|requirements[\w.-]*\.txt|pom\.xml|build\.gradle(\.kts)?)$"
+)
+_UNIMPORTED = re.compile(r"was not executed — (.+?) binds? it, but pytest failed to import")
+
+
+def _uncollected(findings: Iterable[str]) -> set[str]:
+    from foundry.graph.gate_wiring import failing_ids
+    from foundry.graph.gate_wiring.routing import is_collection_error
+
+    lines = list(findings)
+    mods = {i for i in failing_ids(lines) if is_collection_error(i)}
+    for line in lines:
+        if m := _UNIMPORTED.search(line):
+            mods.update(x.strip() for x in m.group(1).split(","))
+    return mods
+
+
+def _foreign_collection(
+    spec: CheckSpec, g: GateOutcome, before: GateOutcome, changed: Iterable[str]
+) -> tuple[str, ...]:
+    """``g``'s findings, re-advised when a test module the session may not edit
+    stopped collecting during it: "fix the import error" sent a session that broke
+    the harness config into another ticket's module it could not even read. The
+    fix is in the harness/config files the session changed (else owns)."""
+    from foundry.agents.implementation.tickets import in_write_scope
+    from foundry.gates.test import UNCOLLECTED_FIX
+
+    if not spec.own_files:
+        return g.findings
+    was = _uncollected(before.findings)
+    foreign = sorted(
+        m
+        for m in _uncollected(g.findings) - was
+        if not in_write_scope(m.removeprefix("./"), spec.own_files)
+    )
+    if not foreign:
+        return g.findings
+    configs = [p for p in dict.fromkeys(changed) if _HARNESS_CONFIG.search(p)]
+    how = "changed"
+    if not configs:
+        configs = [p for p in spec.own_files if _HARNESS_CONFIG.search(p)]
+        how = "own"
+    names = ", ".join(foreign)
+    one = len(foreign) == 1
+    them = "it" if one else "them"
+    where = (
+        f"the harness/config file{'' if len(configs) == 1 else 's'} you {how} "
+        f"({', '.join(configs)}): a test-runner setting there (a rootdir or base dir, "
+        f"test paths, a plugin, a fixture, a module path) most likely stopped {them} "
+        "collecting — fix that setting"
+        if configs
+        else f"your own changes (a harness setting, a module {them} import{'s' if one else ''})"
+        " — fix it in your files"
+    )
+    note = (
+        f"NOT IN THEIR FILES: {names} {'is' if one else 'are'} another ticket's test "
+        f"module{'' if one else 's'}, not yours to edit, and collected before this "
+        f"session; {'it' if one else 'they'} stopped collecting during it. The cause is "
+        f"{where}, not {names}."
+    )
+    pointer = f"the fix is not in {names} (see NOT IN THEIR FILES above)"
+    out = [note]
+    for line in g.findings:
+        if UNCOLLECTED_FIX in line and any(m in line for m in foreign):
+            line = line.replace(UNCOLLECTED_FIX, pointer)
+        out.append(line)
+    return tuple(out)
+
+
 def judge(
     spec: CheckSpec,
     gates: tuple[GateOutcome, ...],
     start: Mapping[str, GateOutcome] | None = None,
     seconds: float = 0.0,
+    changed: Iterable[str] = (),
 ) -> CheckVerdict:
     """Split ``gates`` against ``start`` (each gate's baseline: its first result that
     judged the tree; a gate with none yet is its own baseline, as in the opening
@@ -532,6 +609,7 @@ def judge(
         red = {r for r, o in g.scenarios.items() if o != "passed"}
         mine = {r for r in red if everything or r in (spec.own_refs or ()) or r not in start_red}
         theirs = red - mine
+        findings = _foreign_collection(spec, g, before, changed)
         if (
             not red
             and before.status is GateStatus.FAIL
@@ -540,14 +618,14 @@ def judge(
         ):
             # Red with no scenario to blame (a module failing to collect) and red at
             # the baseline too: not the session's unless it names the session's files.
-            pre += [head, *g.findings]
+            pre += [head, *findings]
             continue
         if not theirs:
-            yours += [head, *g.findings]
+            yours += [head, *findings]
             continue
         own_lines: list[str] = []
         pre_lines: list[str] = []
-        for line in g.findings:
+        for line in findings:
             ids = set(failing_ids([line]))
             if ids & mine or _mentions([line], spec.own_files):
                 own_lines.append(line)
@@ -665,7 +743,9 @@ class SessionCheck:
         gates = (
             self.spec.base.opening(self.spec) if opening else run_check(self.spec, files, deleted)
         )
-        verdict = judge(self.spec, gates, self._start, time.monotonic() - t0)
+        verdict = judge(
+            self.spec, gates, self._start, time.monotonic() - t0, changed=(*files, *deleted)
+        )
         for g in gates:
             if g.status in (GateStatus.PASS, GateStatus.FAIL):
                 self._start.setdefault(g.name, g)

@@ -347,7 +347,11 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
     update: dict[str, Any] = {}
     stack = state.get("stack")
     if stack is not None:
+        from foundry.gates.profiles import stack_typecheck
+
         update["stack"] = {k: v for k, v in stack.model_dump(mode="json").items() if v}
+        if stack.typecheck:
+            update["stack"]["typecheck"] = stack_typecheck(stack)
     if resolve is None:
         return update
     from foundry.graph.gate_wiring import contract_paths

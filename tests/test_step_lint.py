@@ -245,3 +245,96 @@ def test_cucumber_error_type_checks_are_accepted_for_an_error_then_line(tmp_path
     (go / "steps_test.go").write_text(src.replace(" || !errors.Is(err, ErrInvalid)", ""))
     (note,) = cucumber_weak_step_notes(tmp_path / "go", trusted, "go")[_REF]
     assert "errors.Is(err, ErrInvalid)" in note
+
+
+def test_an_or_with_any_weak_branch_and_an_empty_string_compare_are_weak(
+    tmp_path: Path,
+) -> None:
+    for i, body in enumerate(
+        (
+            "    assert len(items) == n or items\n",
+            '    assert items[0] != ""\n',
+            '    assert items[0] > ""\n',
+            '    assert "" != items[0]\n',
+        )
+    ):
+        (note,) = _notes(tmp_path / str(i), _then(body))
+        assert "only check is truthiness" in note, body
+    assert _notes(tmp_path / "and", _then("    assert len(items) == n and items\n")) == ()
+
+
+def _js_then(check: str) -> str:
+    return (
+        "Given('an empty list', function () { this.items = []; });\n"
+        "When('I add {string}', function (x) { this.items.push(x); });\n"
+        f"Then('the list has {{int}} item', function (n) {{ {check}; }});\n"
+    )
+
+
+def test_cucumber_or_branches_and_empty_compares_are_weak(tmp_path: Path) -> None:
+    js = tmp_path / "js" / "features" / "step_definitions"
+    js.mkdir(parents=True)
+    steps = js / "list.steps.js"
+    for check in (
+        "assert(this.items.length === n || this.items)",
+        'assert.ok(this.items[0] !== "")',
+        "expect(this.items.length > 0).toBe(true)",
+    ):
+        steps.write_text(_js_then(check))
+        notes = cucumber_weak_step_notes(tmp_path / "js", _TRUSTED, "javascript")
+        assert any("truthiness" in x for x in notes.get(_REF, ())), check
+    steps.write_text(_js_then("assert.strictEqual(this.items.length, n)"))
+    assert cucumber_weak_step_notes(tmp_path / "js", _TRUSTED, "javascript") == {}
+    go = tmp_path / "go" / "bdd"
+    go.mkdir(parents=True)
+    (go / "list_steps_test.go").write_text(
+        "package bdd\n\n"
+        "func added(x string) error { items = append(items, x); return nil }\n"
+        'func counted(n int) error { if len(items) != n && out == "" { '
+        'return fmt.Errorf("got %d", len(items)) }; return nil }\n'
+        "func init() { register(func(sc *godog.ScenarioContext) {\n"
+        '\tsc.Step(`^I add "([^"]*)"$`, added)\n'
+        "\tsc.Step(`^the list has (\\d+) item$`, counted)\n"
+        "}) }\n"
+    )
+    (note,) = cucumber_weak_step_notes(tmp_path / "go", _TRUSTED, "go")[_REF]
+    assert "non-empty" in note
+
+
+_ROUTE_TRUSTED = {_REF: [("when", "I GET /notes with --all"), ("then", "the list has 1 item")]}
+
+
+def _route_when(call: str, pattern: str = '"I GET /notes with --all"') -> str:
+    return (
+        "from pytest_bdd import parsers, scenarios, then, when\n\n"
+        'scenarios("../features/T1.feature")\n\n\n'
+        f'@when({pattern}, target_fixture="items")\n'
+        f"def _get(client):\n    return client.get({call})\n"
+    )
+
+
+def test_a_when_step_that_adjusts_the_lines_route_or_flag_is_flagged(tmp_path: Path) -> None:
+    for i, call in enumerate(('"/notes/", "--all"', '"/notes", "--ALL"')):
+        root = _project(tmp_path / str(i), _route_when(call))
+        (note,) = weak_step_notes(root, _ROUTE_TRUSTED)[_REF]
+        assert "never uses the line's" in note, call
+    (note,) = weak_step_notes(_project(tmp_path / "r", _route_when('"/notes/"')), _ROUTE_TRUSTED)[
+        _REF
+    ]
+    assert "route `/notes`" in note and "`/notes/`" in note
+    ok = _project(tmp_path / "ok", _route_when('"/notes", "--all"'))
+    assert weak_step_notes(ok, _ROUTE_TRUSTED) == {}
+    # A captured parameter flows in as written: nothing to compare.
+    param = _route_when('"/notes/"', 'parsers.parse("I GET {path} with --all")')
+    assert weak_step_notes(_project(tmp_path / "p", param), _ROUTE_TRUSTED) == {}
+
+
+def test_a_cucumber_when_step_with_a_variant_quoted_value_is_flagged(tmp_path: Path) -> None:
+    js = tmp_path / "features" / "step_definitions"
+    js.mkdir(parents=True)
+    (js / "notes.steps.js").write_text(
+        "When('I add \"Buy milk\"', async function () { await this.add('buy milk'); });\n"
+    )
+    trusted = {_REF: [("when", 'I add "Buy milk"')]}
+    (note,) = cucumber_weak_step_notes(tmp_path, trusted, "javascript")[_REF]
+    assert "quoted value `Buy milk`" in note and "buy milk" in note

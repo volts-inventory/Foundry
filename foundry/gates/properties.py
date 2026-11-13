@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from foundry.gates.profiles import SOURCE_SUFFIXES, property_testing
@@ -33,6 +33,47 @@ _FAILED = re.compile(r"FAIL|Error|panicked|✗|✕|not ok|Falsifying", re.IGNORE
 _SKIP_LINE = re.compile(r"\bSKIP(PED)?\b|\bskipped\b|\bignored\b|\bpending\b|[↓○]|# SKIP")
 # pytest -rs: "SKIPPED [1] tests/test_props.py:7: reason" names the skip's location.
 _SKIP_AT = re.compile(r"^SKIPPED \[\d+\] (.+?):(\d+): ", re.MULTILINE)
+# One failing test's block in a runner's report: pytest's "___ name ___" (and its
+# "=== FAILURES ===" rule), jest/vitest "●", Go "--- FAIL:", cargo "---- name ----", TAP.
+_BLOCK_HEAD = re.compile(
+    r"^(?:_{3,}\s.*\s_{3,}\s*$|={3,}\s.*\s={3,}\s*$|\s*●\s|\s*--- FAIL:|---- .+ ----\s*$|not ok\b)"
+)
+# Raised while the library built an input, in a fixture's setup, or by the library
+# rejecting the test's own strategy: the test's setup broke, not the invariant.
+_SETUP_FAILED = re.compile(
+    r"while generating|InvalidArgument|FailedHealthCheck|Unsatisfiable|hypothesis\.errors|"
+    r"ERROR at setup|fixture '[^']*' not found|error in (?:a |the )?(?:strategy|arbitrary|fixture)",
+    re.IGNORECASE,
+)
+# State an earlier generated example left behind (a shared database, file, registry).
+_SHARED_STATE = re.compile(
+    r"already exists|duplicate|unique constraint|IntegrityError|FileExistsError|"
+    r"already (?:registered|taken|in use)",
+    re.IGNORECASE,
+)
+# The property's own verdict: an assertion that failed, not an error in its setup.
+_ASSERTION = re.compile(
+    r"AssertionError|^\s*E\s+assert\b|assertion failed|AssertError|\bexpect\(|Expected:",
+    re.MULTILINE,
+)
+_FRAME = re.compile(
+    r"(?:File \")?((?:\.{0,2}/)?[\w.@+-]+(?:/[\w.@+-]+)*\.(?:py|[cm]?[jt]sx?|go|rs|rb|java|kt|cs))"
+    r"(?:\", line |:)\d+"
+)
+_LIBRARY = re.compile(
+    r"site-packages|dist-packages|node_modules|/lib/python|(?:^|/)(?:hypothesis|_pytest|pluggy)/|"
+    r"/go/src/|/pkg/mod/|\.cargo/|rustc/|<frozen"
+)
+_TEST_FILE = re.compile(
+    r"(?:^|/)(?:test_[^/]*|[^/]*_test\.\w+|[^/]*\.(?:test|spec)\.\w+|conftest\.py)$|"
+    r"(?:^|/)(?:tests?|__tests__|spec|step_definitions)/"
+)
+_ISOLATION = (
+    "Each generated example must start from fresh state: function-scoped fixtures "
+    "(tmp_path, a db or app fixture, beforeEach) are set up once per test, not per "
+    "example, so every example after the first sees what the earlier ones wrote; "
+    "create the store, temp dir or app inside the test body for each example"
+)
 # The line that opens the test a skip location sits in.
 _DEFINITION = re.compile(
     r"^\s*(?:async\s+)?(?:def|func|fn|function|void|public)\b|\b(?:it|test)\s*\("
@@ -94,6 +135,53 @@ def _skipped(workdir: Path, ran: str, patterns: Mapping[str, re.Pattern[str]]) -
     return out
 
 
+def _failure_block(output: str, pat: re.Pattern[str]) -> list[str]:
+    """The lines of the report block whose header names the property's test."""
+    lines = output.splitlines()
+    starts = [i for i, ln in enumerate(lines) if _BLOCK_HEAD.match(ln)]
+    for n, i in enumerate(starts):
+        if pat.search(lines[i]):
+            end = starts[n + 1] if n + 1 < len(starts) else len(lines)
+            return lines[i:end]
+    return []
+
+
+def _tree_frames(block: Sequence[str], workdir: Path) -> list[str]:
+    """The tree's own files the block's traceback frames sit in (library frames out)."""
+    root = Path(workdir).resolve()
+    out: list[str] = []
+    for line in block:
+        for m in _FRAME.finditer(line):
+            path = m.group(1)
+            if _LIBRARY.search(path):
+                continue
+            if path.startswith("/"):
+                try:
+                    path = Path(path).resolve().relative_to(root).as_posix()
+                except ValueError:
+                    continue  # outside the tree: an interpreter or library frame
+            out.append(path.removeprefix("./"))
+    return out
+
+
+def _test_side(block: Sequence[str], workdir: Path, tests: Sequence[str]) -> str:
+    """Why a property's failure is the test's own, not the invariant's ("" = it is
+    the invariant's): an error raised generating an input or in a fixture, state an
+    earlier example left behind, or an error (not an assertion) whose frames are all
+    in test files."""
+    text = "\n".join(block)
+    if m := _SETUP_FAILED.search(text):
+        return f"the test's own strategy or fixture raised ({m.group(0)})"
+    if _ASSERTION.search(text):
+        return ""
+    if _SHARED_STATE.search(text):
+        return "state an earlier generated example left behind made a later one fail"
+    frames = _tree_frames(block, workdir)
+    if frames and all(f in tests or _TEST_FILE.search(f) for f in frames):
+        return "every frame of the traceback is in the test's own code"
+    return ""
+
+
 def property_findings(
     workdir: Path,
     properties: Mapping[str, str],
@@ -153,7 +241,16 @@ def property_findings(
             continue
         status[pid] = "covered"
         failing = [ln for ln in fail_lines if pat.search(ln)]
-        if failing:
+        if not failing:
+            continue
+        why = _test_side(_failure_block(output, pat), workdir, where)
+        if why:
+            findings.append(
+                f"property {pid} failing ({', '.join(where)}): {what} — the TEST is wrong, "
+                f"not the implementation: {why}. Fix the test's strategy or fixture, not "
+                f"the implementation. {_ISOLATION}: {failing[0][:300]}"
+            )
+        else:
             findings.append(
                 f"property {pid} failing ({', '.join(where)}): {what} — the invariant "
                 f"does not hold; fix the implementation, not the test: {failing[0][:300]}"

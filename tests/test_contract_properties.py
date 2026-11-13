@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tomllib
 from pathlib import Path
 
@@ -399,3 +400,153 @@ def test_the_shipped_manifest_never_drops_a_requirement(tmp_path: Path) -> None:
     (tmp_path / "requirements.txt").write_text(text)
     _ship_test_manifest(tmp_path)
     assert (tmp_path / "requirements.txt").read_text() == text
+
+
+# ---- a failing property: the invariant's fault, or the test's own? ---------------
+
+_BROKEN_STRATEGY = """\
+from hypothesis import given, strategies as st
+
+from dice import total
+
+
+@st.composite
+def evens(draw):
+    n = draw(st.integers(0, 10))
+    return n + "x"
+
+
+@given(evens())
+def test_pr1_total_is_even(n):
+    assert total(n) % 2 == 0
+"""
+
+
+def test_a_strategy_that_raises_while_generating_blames_the_test(tmp_path: Path) -> None:
+    """The dice run: "TypeError … while generating 'Draw 1' from
+    valid_notation_with_terms()" was reported as "fix the implementation"."""
+    gate = TestGate(properties={"PR1": "total: the total is even"})
+    obs = gate.execute(_project(tmp_path, _BROKEN_STRATEGY))
+    assert gate.decide(obs) is GateStatus.FAIL
+    [finding] = [f for f in obs.findings if f.startswith("property PR1 failing")]
+    assert "the TEST is wrong" in finding and "while generating" in finding, finding
+    assert "fix the implementation, not the test" not in finding
+
+
+def _pytest_block(*body: str) -> str:
+    return "\n".join(
+        (
+            "=================================== FAILURES ===================================",
+            "____________________________ test_pr1_signup_is_unique ____________________________",
+            *body,
+            "=========================== short test summary info ============================",
+            "FAILED tests/test_users.py::test_pr1_signup_is_unique - Error",
+        )
+    )
+
+
+def _users(tmp_path: Path) -> Path:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_users.py").write_text(
+        "from hypothesis import given\n\ndef test_pr1_signup_is_unique(): ...\n"
+    )
+    return tmp_path
+
+
+def _finding(tmp_path: Path, output: str) -> str:
+    _, findings = property_findings(tmp_path, {"PR1": "signup: unique"}, "python", output)
+    [finding] = findings
+    return finding
+
+
+def test_state_shared_across_examples_blames_the_tests_fixture(tmp_path: Path) -> None:
+    """The notes run: a tmp_path DB shared across Hypothesis examples raised
+    DuplicateUsernameError from the store on the second example."""
+    out = _pytest_block(
+        "tests/test_users.py:12: in test_pr1_signup_is_unique",
+        "    store.signup(name)",
+        "app/store.py:40: in signup",
+        "    raise DuplicateUsernameError(name)",
+        "E   app.store.DuplicateUsernameError: Username '0' is taken",
+        "E   Falsifying example: test_pr1_signup_is_unique(tmp_path=..., name='0')",
+    )
+    finding = _finding(_users(tmp_path), out)
+    assert "the TEST is wrong" in finding and "earlier generated example" in finding
+    assert "function-scoped fixtures" in finding and "per example" in finding
+
+
+def test_an_error_only_in_the_tests_frames_blames_the_test(tmp_path: Path) -> None:
+    out = _pytest_block(
+        "tests/test_users.py:12: in test_pr1_signup_is_unique",
+        "    names = sorted(names, key=len) + None",
+        'E   TypeError: can only concatenate list (not "NoneType") to list',
+    )
+    assert "every frame of the traceback is in the test" in _finding(_users(tmp_path), out)
+
+
+def test_a_broken_invariant_still_blames_the_implementation(tmp_path: Path) -> None:
+    root = _users(tmp_path)
+    asserted = _pytest_block(
+        "tests/test_users.py:12: in test_pr1_signup_is_unique",
+        "    assert store.count() == 1",
+        "E   assert 2 == 1",
+    )
+    raised = _pytest_block(
+        "tests/test_users.py:12: in test_pr1_signup_is_unique",
+        "    store.signup(name)",
+        "app/store.py:40: in signup",
+        "    return name.lower() + 1",
+        'E   TypeError: can only concatenate str (not "int") to str',
+    )
+    for out in (asserted, raised):
+        finding = _finding(root, out)
+        assert "fix the implementation, not the test" in finding, finding
+
+
+def test_a_jest_test_failing_in_its_own_code_blames_the_test(tmp_path: Path) -> None:
+    (tmp_path / "test").mkdir()
+    (tmp_path / "test" / "users.test.ts").write_text(
+        "import fc from 'fast-check';\ntest('PR1 signup is unique', () => {});\n"
+    )
+    out = (
+        "  ✕ PR1 signup is unique (5 ms)\n\n"
+        "  ● PR1 signup is unique\n\n"
+        "    TypeError: Cannot read properties of undefined (reading 'map')\n\n"
+        "      at Object.<anonymous> (test/users.test.ts:7:21)\n"
+        "      at node_modules/fast-check/lib/check/runner.js:44:9\n"
+    )
+    _, [finding] = property_findings(tmp_path, {"PR1": "signup: unique"}, "typescript", out)
+    assert "the TEST is wrong" in finding, finding
+
+
+# ---- a scoped check judges the session's own tests and properties ----------------
+
+
+def test_a_scoped_gate_fails_on_its_own_tests_and_properties(tmp_path: Path) -> None:
+    """Round 3: a scoped (wave or ticket) Test gate passed on its scenarios alone, so
+    the property-test bugs of both apps surfaced only at the final gate."""
+    root = _project(tmp_path, _PROPERTY_TEST.format(rest=1))
+    (root / "tests" / "test_other.py").write_text("def test_other():\n    assert False\n")
+    scoped = TestGate(scope=frozenset())
+    own = scoped.owning(("dice.py", "tests/test_dice.py"), {"PR1": "total: the total is even"})
+    assert own.scanner_rule_version != scoped.scanner_rule_version
+    obs = own.execute(root)
+    assert own.decide(obs) is GateStatus.FAIL
+    own_red = "this ticket's own tests failed (tests/test_dice.py"
+    assert any(f.startswith(own_red) for f in obs.findings), obs.findings
+    assert any(f.startswith("property PR1 failing") for f in obs.findings), obs.findings
+    # Another ticket's red test is not run by this session's check.
+    assert not any("test_other" in f for f in obs.findings), obs.findings
+    # (A same-size rewrite in the same second would import the stale bytecode.)
+    shutil.rmtree(root / "tests" / "__pycache__", ignore_errors=True)
+    (root / "tests" / "test_dice.py").write_text(_PROPERTY_TEST.format(rest=0))
+    green = own.execute(root)
+    assert own.decide(green) is GateStatus.PASS, green.findings
+    # A property no test names fails the scoped gate too.
+    missing = scoped.owning(("tests/test_dice.py",), {"PR2": "total: the total is positive"})
+    obs = missing.execute(root)
+    assert obs.structured[PROPERTIES_KEY] == {"PR2": "missing"}
+    assert missing.decide(obs) is GateStatus.FAIL
+    # A subtree entry runs every test module under it.
+    subtree = scoped.owning(("tests/",), {})
+    assert subtree.decide(subtree.execute(root)) is GateStatus.FAIL

@@ -32,6 +32,7 @@ definition actually asserts anything.
 from __future__ import annotations
 
 import ast
+import copy
 import hmac
 import itertools
 import json
@@ -70,6 +71,8 @@ BDD_KEY = "bdd"
 BDD_EXIT_KEY = "bdd_exit_code"
 # {property id: "covered" | "missing" | "skipped"} for every planned contract property.
 PROPERTIES_KEY = "properties"
+# A scoped check's run of the session's own test modules: its exit code.
+OWN_EXIT_KEY = "own_exit_code"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -2077,6 +2080,53 @@ class TestGate:
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # A Python build's declared deps, installed by BuildGate into their own venv.
         self._pyenv = pyenv
+        # A scoped check's own test files (see :meth:`owning`): run and judged too.
+        self.own_tests: tuple[str, ...] = ()
+
+    def owning(self, tests: Sequence[str], properties: Mapping[str, str]) -> TestGate:
+        """This scoped gate also judging one session's own work: the non-scenario
+        tests in its files ``tests`` (paths, or ``dir/`` subtrees) run, and a red one
+        FAILs it; so does one of its contracts' ``properties`` (id -> "<contract>:
+        <statement>") that is missing, skipped or failing. The default pytest harness
+        only: a stack's own test command has no way to run one file."""
+        gate = copy.copy(self)
+        gate.own_tests = tuple(tests) if self._runs_bdd else ()
+        gate.properties = dict(properties) if self._runs_bdd else {}
+        if gate.own_tests or gate.properties:
+            gate.scanner_rule_version = f"{self.scanner_rule_version}:" + commands_digest(
+                own_tests=sorted(gate.own_tests),
+                properties=sorted(gate.properties.items()),
+                language=self.language,
+            )
+        return gate
+
+    def _own_targets(self, workdir: Path) -> tuple[str, ...]:
+        """The test modules of :attr:`own_tests` in ``workdir`` that bind no feature
+        file (a step module's scenarios run, and are judged, through the BDD run)."""
+        root = Path(workdir)
+        found: set[str] = set()
+        for entry in self.own_tests:
+            path = root / entry.rstrip("/")
+            paths = sorted(path.rglob("*.py")) if path.is_dir() else [path]
+            for p in paths:
+                if p.is_file() and not p.is_symlink() and _is_test_module(p.name):
+                    found.add(p.relative_to(root).as_posix())
+        found = {f for f in found if PurePosixPath(f).name != "conftest.py"}
+        if not found:
+            return ()
+        features = {r.split("::", 1)[0] for r in trusted_scenarios(workdir)}
+        binding = set(binding_modules(workdir, features)) if features else set()
+        return tuple(sorted(found - binding))
+
+    def _own_run(self, workdir: Path) -> tuple[tuple[str, ...], int, str, str]:
+        """(targets, exit code, stdout, stderr) of the own test modules' run; exit
+        code 5 (nothing collected) when there are none."""
+        targets = self._own_targets(workdir)
+        if not targets:
+            return (), _NO_TESTS_COLLECTED, "", ""
+        cmd = (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short", "-rfEs")
+        rc, out, err = self._ground(workdir, (*cmd, *targets))
+        return targets, rc, out, err
 
     def _env(self, workdir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
         # The gate-owned env, added on top of the sandbox's host-env allowlist: tell
@@ -2347,12 +2397,31 @@ class TestGate:
                     "normally (a test exited the process or tampered with the run)",
                     *findings,
                 )
-        if self.properties and self.scope is None:
+        ran = f"{out}\n{err}"
+        red = rc != 0
+        if self.scope is not None and (self.own_tests or self.properties):
+            from .pydeps import undeclared_import_hints
+
+            targets, own_rc, own_out, own_err = self._own_run(workdir)
+            structured[OWN_EXIT_KEY] = own_rc
+            if own_rc not in (0, _NO_TESTS_COLLECTED):
+                findings = (
+                    f"this ticket's own tests failed ({', '.join(targets)}; exit {own_rc}) — "
+                    "a scoped check runs them along with its scenarios:",
+                    *undeclared_import_hints(own_out + own_err, workdir),
+                    *shared_state_hints(own_out, workdir),
+                    *(failure_findings(own_out) or (_output_tail(own_err, own_out, own_rc),)),
+                    *findings,
+                )
+            # The scenario run is judged on its scenarios alone: only the own run's
+            # output says which property failed.
+            ran = f"{own_out}\n{own_err}"
+            red = own_rc not in (0, _NO_TESTS_COLLECTED)
+        if self.properties:
             from .properties import property_findings
 
-            ran = f"{out}\n{err}"
             covered, notes = property_findings(
-                workdir, self.properties, self.language, ran if rc != 0 else "", ran=ran
+                workdir, self.properties, self.language, ran if red else "", ran=ran
             )
             if covered:
                 structured[PROPERTIES_KEY] = covered
@@ -2376,9 +2445,17 @@ class TestGate:
         if obs.structured.get(BDD_EXIT_KEY) in MISSING_BINARY_EXIT_CODES:
             return GateStatus.ERROR  # the Cucumber runner's binary is missing
         if self.scope is not None:
-            # A per-wave check: the scoped scenarios alone decide (the rest of the
-            # suite may need tickets not built yet; the final gate runs it all).
+            # A per-wave check: the scoped scenarios decide, and a session's own tests
+            # and properties when it has them (:meth:`owning`); the rest of the suite
+            # may need tickets not built yet, and the final gate runs it all.
+            own_rc = obs.structured.get(OWN_EXIT_KEY)
+            if own_rc is not None and own_rc not in (0, _NO_TESTS_COLLECTED):
+                return GateStatus.FAIL
+            if any(v != "covered" for v in (obs.structured.get(PROPERTIES_KEY) or {}).values()):
+                return GateStatus.FAIL
             scoped = obs.structured.get(BDD_KEY) or {}
+            if not self.scope and own_rc is not None:
+                return GateStatus.PASS
             return (
                 GateStatus.PASS
                 if scoped and all(v == "passed" for v in scoped.values())

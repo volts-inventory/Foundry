@@ -37,7 +37,7 @@ __all__ = [
 
 # Run reports of the base build, not project source: a change writes its own.
 MANIFEST_FILES = frozenset({"BUILD-MANIFEST.json", "BUILD-MANIFEST.md", "DRAFT-STATUS.md"})
-_EXTRA_EXCLUDED_DIRS = frozenset({".mypy_cache", ".ruff_cache", ".run"})
+_EXTRA_EXCLUDED_DIRS = frozenset({".run"})
 _VIEW_FILES_CAP = 400
 _VIEW_TEXT_CAP = 20_000
 

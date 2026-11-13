@@ -74,6 +74,7 @@ from foundry.execution.sandbox import Sandbox
 from foundry.proxy.model_provider_proxy import ToolsUnsupported
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
+from foundry.state.tree_sha import CACHE_DIRS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
@@ -351,6 +352,12 @@ _THRASH_STOP = 6
 _ENV_WARN = 3
 _ENV_STOP = 6
 ENV_LOOP = "env-loop"
+# A red session that has stopped converging ends early, its best-checked tree kept:
+# after this many counted checks in a row that do not beat its best failing-line
+# count, or this many turns past its last check with no done.
+STALLED = "stalled"
+_STALL_CHECKS = 3
+_EXHAUSTED_IDLE = 8
 # Turns after a green check that neither write nor declare done before the session
 # is ended as done.
 _GREEN_IDLE_STOP = 2
@@ -373,14 +380,10 @@ _SEARCH_MAX_FILE = 1_000_000
 # Lines this long are skipped: the model's regex runs in-process, and catastrophic
 # backtracking cost grows with line length.
 _SEARCH_MAX_LINE = 2_000
-_SEARCH_SKIP_DIRS = frozenset(
-    {".git", ".venv", "venv", "node_modules", "__pycache__", "dist", "build"}
-)
+_SEARCH_SKIP_DIRS = CACHE_DIRS | {".git", "dist", "build"}
 # Dirs whose churn is a by-product of re-running the same command (test/lint
 # caches, bytecode) — a change there must not reset the repeat detector.
-_TREE_SKIP_DIRS = frozenset(
-    {".git", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox"}
-)
+_TREE_SKIP_DIRS = CACHE_DIRS | {".git"}
 # The opening lists the worktree's files: without it a session spends turns on
 # find/ls and on reads of files that do not exist.
 _LIST_MAX = 200
@@ -479,6 +482,12 @@ class _Loop:
     masked_at: int = 0  # the turn of the last elision pass
     # The previous model call's prompt: per-message digests and its size in chars.
     prompt: list[tuple[str, int]] = field(default_factory=list)
+    # The fewest own failing lines a counted red check found, and that tree.
+    best_red: int | None = None
+    best_tree: dict[str, bytes] | None = None
+    no_gain: int = 0  # counted red checks since the best one
+    exhausted_turn: int | None = None  # the turn whose check spent the last one
+    stalled: bool = False
 
 
 def _contained(worktree: Path, rel: str) -> Path:
@@ -603,6 +612,7 @@ class ProxyAgentAdapter:
             st.turn = turns
             if not native:
                 self._json_turn(messages, st, sandbox)
+                _exhausted_idle(st)
                 continue
             assert tool_fn is not None
             try:
@@ -619,6 +629,10 @@ class ProxyAgentAdapter:
                 st.verbatim = []
                 st.prompt = []
                 turns -= 1
+                continue
+            _exhausted_idle(st)
+        if st.stalled:
+            _keep_best(st)
         if not st.stopped:
             st.triage.append("turn budget exhausted before 'done' — partial work recorded")
         after = walk_worktree(worktree)
@@ -837,7 +851,7 @@ class ProxyAgentAdapter:
             if refusal := _undeclared_done(st):
                 return refusal, None
             if not _defects(items) and (refusal := _red_done(st)):
-                return refusal, None
+                return None if st.stalled else (refusal, None)
             st.summary = str(act.get("summary", ""))
             st.triage = [str(t) for t in items if str(t).strip()]
             st.stopped = st.done = True
@@ -902,6 +916,8 @@ class ProxyAgentAdapter:
                 observation = self._execute(act, sandbox, worktree, st.files, st.write_check)
         except (ValueError, OSError) as exc:
             observation = f"ERROR: {exc}"
+        if st.stalled:
+            return None
         if guard is not None:
             observation += _revert_fenced_out(st, guard)
         if action == "run":
@@ -1704,8 +1720,66 @@ def _check(st: _Loop) -> str:
         verdict = c.check(files, deleted)
     except Exception as exc:
         return f"ERROR: the check could not run: {type(exc).__name__}: {exc}"
+    _counted(st, verdict)
     st.green = verdict.green
     return render(verdict, left=c.left)
+
+
+def _counted(st: _Loop, verdict: CheckVerdict) -> None:
+    """Track convergence over a counted check: the best red tree so far, and a
+    :data:`STALLED` stop after :data:`_STALL_CHECKS` red checks in a row that do
+    not beat it."""
+    assert st.checker is not None
+    if st.checker.left <= 0 and st.exhausted_turn is None:
+        st.exhausted_turn = st.turn
+    if not verdict.red:
+        return
+    n = _failing_count(verdict)
+    if st.best_red is None or n < st.best_red:
+        st.best_red, st.best_tree, st.no_gain = n, walk_worktree(st.worktree), 0
+        return
+    st.no_gain += 1
+    if st.no_gain >= _STALL_CHECKS:
+        _stall(
+            st,
+            f"{st.no_gain} checks in a row did not improve on its best "
+            f"({st.best_red} failing line(s))",
+        )
+
+
+def _exhausted_idle(st: _Loop) -> None:
+    """After a turn: the :data:`STALLED` stop of a session :data:`_EXHAUSTED_IDLE`
+    turns past the check that spent its last one, still not done."""
+    if st.stopped or st.exhausted_turn is None:
+        return
+    if st.turn - st.exhausted_turn >= _EXHAUSTED_IDLE:
+        _stall(st, f"no checks left and {_EXHAUSTED_IDLE} turns passed without done")
+
+
+def _stall(st: _Loop, why: str) -> None:
+    st.triage.append(f"stopped early: {STALLED} — {why} — partial work recorded")
+    st.stopped = st.stalled = True
+
+
+def _keep_best(st: _Loop) -> None:
+    """Put the worktree back to the best red check's tree: a stalled session's later
+    edits scored no better (or were never checked), and keep-best ranks attempts by
+    that score."""
+    best = st.best_tree
+    if best is None:
+        return
+    now = walk_worktree(st.worktree)
+    changed = sorted(rel for rel in best.keys() | now.keys() if best.get(rel) != now.get(rel))
+    for rel in changed:
+        try:
+            _restore(st.worktree, rel, best.get(rel))
+        except OSError as exc:
+            progress.log(f"proxy-agent: could not restore {rel} to the best check: {exc}")
+    if changed:
+        st.triage.append(
+            f"kept the best check's files ({st.best_red} failing line(s)); "
+            f"undid later edits to: {', '.join(changed[:_DIGEST_PATHS])}"
+        )
 
 
 def _red_done(st: _Loop) -> str | None:
@@ -1727,6 +1801,7 @@ def _red_done(st: _Loop) -> str | None:
         except Exception as exc:
             progress.log(f"proxy-agent: gate check failed at done: {type(exc).__name__}: {exc}")
             return None
+        _counted(st, verdict)
         st.last_check = "check at done: " + _head(render(verdict, left=c.left))
     if not verdict.red:
         return None

@@ -72,6 +72,58 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
     assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
 
 
+def test_tool_caches_a_session_leaves_never_reach_its_diff_or_the_shipped_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.agents.implementation.tickets import note_fix_writes, trim_to_write_scope
+    from foundry.cli import output
+
+    src = tmp_path / "src"
+    src.mkdir()
+    cmd = (
+        "mkdir -p .hypothesis/examples tests/.hypothesis/constants htmlcov && "
+        "echo db > .hypothesis/examples/ab && echo c > tests/.hypothesis/constants/x && "
+        "echo cov > .coverage && echo h > htmlcov/index.html"
+    )
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "run", "cmd": cmd},
+                {"action": "done", "summary": "built mod"},
+            ]
+        )
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        assert json.loads(sb.get_blob(result.diff_uri))["files"] == {"mod.py": "X = 1\n"}
+        # An adapter that did ship them (a unified diff, an older walk) is cut back:
+        # silently for a ticket, and for the fixer whose writes are otherwise kept.
+        leaked = {"mod.py": "X = 1\n", ".hypothesis/examples/ab": "db\n", "a/.coverage": "c"}
+        blob = json.dumps({"kind": "full-file-snapshot", "files": leaked}).encode()
+        leaky = result.model_copy(update={"diff_uri": sb.put_blob(blob), "triage": ()})
+        for cut in (
+            trim_to_write_scope(leaky, sb, ("mod.py",), "t-1"),
+            trim_to_write_scope(leaky, sb, (), "t-1"),
+            note_fix_writes(leaky, sb, "t-1", focus=(), contracts=()),
+        ):
+            assert json.loads(sb.get_blob(cut.diff_uri))["files"] == {"mod.py": "X = 1\n"}
+            assert cut.triage == ()
+
+    def staged(state: Any, root: Path, **_: Any) -> str:
+        for rel in ("mod.py", ".hypothesis/examples/ab", "pkg/__pycache__/m.pyc"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x")
+        return "sha"
+
+    monkeypatch.setattr("foundry.graph.gate_wiring.materialize_workdir", staged)
+    out = tmp_path / "out"
+    output._write_output_tree({}, str(out), resolve=lambda _: None, resolve_blob=lambda _: b"")  # type: ignore[arg-type]
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == [
+        "mod.py"
+    ]
+
+
 def test_a_spec_conflict_reported_at_done_gets_its_own_triage_record(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()

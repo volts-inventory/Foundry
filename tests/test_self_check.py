@@ -24,6 +24,7 @@ from foundry.agents._common import emit_artifact
 from foundry.agents.implementation.tickets import CHECK_RULE, verify_rules
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import (
+    _EXHAUSTED_IDLE,
     CHECK_EXHAUSTED,
     CHECK_OVERRIDDEN,
     CHECK_RED_LAST_TURN,
@@ -31,6 +32,7 @@ from foundry.execution.adapters.proxy_agent import (
     CHECK_UPSTREAM,
     GREEN_AUTO_DONE,
     PENDING_GREEN_DONE,
+    STALLED,
     WRITE_GREEN_DONE,
     ProxyAgentAdapter,
 )
@@ -404,6 +406,7 @@ def _run_loop(
     skip_green: bool = False,
     start: Mapping[str, str] | None = None,
     files: tuple[str, ...] = ("app.py",),
+    bodies: list[dict[str, Any]] | None = None,
 ) -> tuple[Any, list[list[dict[str, Any]]], list[dict[str, str]]]:
     calls: list[dict[str, str]] = []
     monkeypatch.setattr(self_check, "run_check", run or _red_unless("OK", calls))
@@ -422,6 +425,8 @@ def _run_loop(
         (src / rel).write_text(text)
     with Sandbox(src) as sb, check_scope(spec):
         result = ProxyAgentAdapter(_scripted(actions, seen)).run(_packet(turn_budget, files), sb)
+        if bodies is not None:
+            bodies.append(json.loads(sb.get_blob(result.diff_uri)))
     return result, seen, calls
 
 
@@ -536,6 +541,99 @@ def test_a_session_red_after_its_last_check_escalates_like_the_turn_cap(
     assert "CHECK FAILED" in obs[4] and "cached" in obs[4]  # no budget, same tree
     stop = session_stop_reason(result.triage)
     assert stop is not None and stop.startswith(CHECK_EXHAUSTED), result.triage
+
+
+def _red_by_count(calls: list[dict[str, str]]) -> Any:
+    """A fake gate run: app.py's first line ``n = K`` fails the build with K lines."""
+
+    def _run(
+        spec: CheckSpec, files: Mapping[str, str], deleted: Any = ()
+    ) -> tuple[GateOutcome, ...]:
+        calls.append(dict(files))
+        head = files.get("app.py", "n = 1").splitlines()[0]
+        n = int(head.split("=")[1].split("#")[0])
+        lines = tuple(f"app.py:{i}: error: wrong" for i in range(1, n + 1))
+        return (GateOutcome("build", GateStatus.FAIL, lines),)
+
+    return _run
+
+
+def _score(result: Any) -> str | None:
+    return next((t.explanation for t in result.triage if t.name == CHECK_SCORE_TRIAGE), None)
+
+
+def test_checks_that_stop_improving_end_the_session_on_its_best_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actions: list[dict[str, Any]] = []
+    for text in ("n = 3  # best\n", "n = 5\n", "n = 4\n", "n = 3  # tie\n"):
+        actions += [{"action": "write_file", "path": "app.py", "content": text}]
+        actions += [{"action": "check"}]
+    actions.append({"action": "done", "summary": "never reached"})
+    bodies: list[dict[str, Any]] = []
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        actions,
+        turn_budget=40,
+        run=_red_by_count([]),
+        files=_UNFINISHED,
+        bodies=bodies,
+    )
+    assert result.turns_used == 8
+    stop = session_stop_reason(result.triage)
+    assert stop is not None and stop.startswith(f"stopped early: {STALLED}"), result.triage
+    assert _score(result) == "3"
+    assert bodies[0]["files"]["app.py"] == "n = 3  # best\n"
+
+
+def test_turns_past_the_last_check_without_done_end_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actions: list[dict[str, Any]] = [
+        {"action": "write_file", "path": "app.py", "content": "n = 2\n"},
+        {"action": "check"},
+    ]
+    actions += [
+        {"action": "write_file", "path": "app.py", "content": f"n = 2  # blind {i}\n"}
+        for i in range(30)
+    ]
+    bodies: list[dict[str, Any]] = []
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        actions,
+        budget=1,
+        turn_budget=40,
+        run=_red_by_count([]),
+        files=_UNFINISHED,
+        bodies=bodies,
+    )
+    assert result.turns_used == 2 + _EXHAUSTED_IDLE
+    stop = session_stop_reason(result.triage)
+    assert stop is not None and stop.startswith(f"stopped early: {STALLED}"), result.triage
+    assert _score(result) == "2"  # the checked tree is the one recorded
+    assert bodies[0]["files"]["app.py"] == "n = 2\n"
+
+
+def test_checks_that_keep_improving_do_not_stall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actions: list[dict[str, Any]] = []
+    for n in (9, 10, 8, 9, 7, 8, 6):
+        actions += [{"action": "write_file", "path": "app.py", "content": f"n = {n}\n"}]
+        actions += [{"action": "check"}]
+    result, _, _ = _run_loop(
+        tmp_path,
+        monkeypatch,
+        actions,
+        budget=20,
+        turn_budget=len(actions),
+        run=_red_by_count([]),
+        files=_UNFINISHED,
+    )
+    assert result.turns_used == len(actions)
+    assert not any(STALLED in t.explanation for t in result.triage), result.triage
 
 
 def test_an_edit_after_the_last_check_is_not_reported_red(

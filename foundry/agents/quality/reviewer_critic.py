@@ -46,7 +46,7 @@ from foundry.schemas.product import PRD
 from foundry.schemas.quality import ReviewedTree
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -168,16 +168,60 @@ def _reviewed_tree(
 _DIFF_CHAR_CAP = 60_000
 
 
-def _capped(text: str) -> tuple[str, bool]:
+# A template, whatever the stack: a templates/views directory or a template file.
+_TEMPLATE_PATH = re.compile(
+    r"(^|/)(templates?|views?)/|\.(html?|jinja2?|j2|hbs|ejs|tmpl|erb|mustache|njk|liquid)$"
+)
+
+
+def _file_sections(diff: str) -> list[tuple[str, str]]:
+    """``diff`` split per file: (section text, its path or "")."""
+    splitter = _DIFF_FILE_SPLIT if _DIFF_FILE_SPLIT.search(diff) else _HUNK_FILE_SPLIT
+    sections = [x for x in splitter.split(diff) if x.strip()]
+    return [(x, m.group(1) if (m := _DIFF_PATH.search(x)) else "") for x in sections]
+
+
+def _capped(text: str, keep: Callable[[str], bool] | None = None) -> tuple[str, bool]:
     """``text`` cut to :data:`_DIFF_CHAR_CAP` with a ``[TRUNCATED]`` note, and
-    whether it fit whole."""
+    whether it fit whole. A cut keeps the files ``keep`` names (the entrypoint and
+    the templates) in front, whole up to half the cap: a review that missed the
+    composition root and the templates passed their bugs."""
     if len(text) <= _DIFF_CHAR_CAP:
         return text, True
-    note = f"\n\n[TRUNCATED: showing the first {_DIFF_CHAR_CAP} of {len(text)} chars.]"
-    return text[:_DIFF_CHAR_CAP] + note, False
+    pinned = ""
+    for x, path in _file_sections(text):
+        # Whole files only: one too big to fit is skipped, the smaller ones still go.
+        if path and keep and keep(path) and len(pinned) + len(x) <= _DIFF_CHAR_CAP // 2:
+            pinned += x
+    head = ""
+    if pinned:
+        head = (
+            "[The change is truncated below; the entrypoint and template files come "
+            "first, in full:]\n" + pinned + "\n\n[The whole change, in order:]\n"
+        )
+    room = max(_DIFF_CHAR_CAP - len(head), _DIFF_CHAR_CAP // 2)
+    note = f"\n\n[TRUNCATED: showing the first {room} of {len(text)} chars.]"
+    return head + text[:room] + note, False
 
 
-def _diff_text(rt: AgentRuntime, state: FactoryState) -> tuple[str, bool]:
+def _always_shown(rt: AgentRuntime, state: FactoryState) -> Callable[[str], bool]:
+    """Whether a changed path is one the review must always see: a file of an
+    entrypoint ticket (the composition root) or a template."""
+    entry: set[str] = set()
+    if rt.cas is not None:
+        from foundry.agents.implementation.tickets import read_tickets
+
+        try:
+            tickets = read_tickets(state, rt.cas.resolve)
+        except Exception:
+            tickets = ()
+        entry = {f.removeprefix("./") for t in tickets if t.entrypoint for f in t.files}
+    return lambda path: path in entry or bool(_TEMPLATE_PATH.search(path))
+
+
+def _diff_text(
+    rt: AgentRuntime, state: FactoryState, keep: Callable[[str], bool] | None = None
+) -> tuple[str, bool]:
     """The change under review as unified-diff text: every ``feature_diff`` body in
     ``Seq`` order (the order ``materialize_workdir`` applies them), capped at
     :data:`_DIFF_CHAR_CAP`, and whether that text is the whole change (nothing cut
@@ -206,7 +250,7 @@ def _diff_text(rt: AgentRuntime, state: FactoryState) -> tuple[str, bool]:
         parts.append(f"--- task {handle.task_id or body.task_id} ({handle.uri}) ---\n{text}")
     if not parts:
         return "(None of the feature_diff bodies could be resolved: no diff text to review.)", False
-    out, whole = _capped("\n\n".join(parts))
+    out, whole = _capped("\n\n".join(parts), keep)
     if missing:
         out += "\n\n[Unresolvable diffs, not shown: " + ", ".join(missing) + "]"
     return out, whole and not missing
@@ -260,7 +304,11 @@ def _prior_review(
     return None
 
 
-def _delta_text(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[str, bool]:
+def _delta_text(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    keep: Callable[[str], bool] | None = None,
+) -> tuple[str, bool]:
     """The change from ``before`` to ``after`` as unified diffs, path by path,
     capped like :func:`_diff_text`, and whether it fit whole."""
     parts: list[str] = []
@@ -280,7 +328,7 @@ def _delta_text(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[st
         )
     if not parts:
         return "(No file changed since the tree you reviewed.)", True
-    return _capped("\n".join(parts))
+    return _capped("\n".join(parts), keep)
 
 
 _SOP = (
@@ -463,15 +511,16 @@ def _failing_findings(state: FactoryState) -> str:
     )
 
 
-def trimmed_diff(diff: str, failing: str) -> str:
+def trimmed_diff(diff: str, failing: str, keep: Callable[[str], bool] | None = None) -> str:
     """``diff`` cut to the files the failing checks name, else to its non-test
     source files, within half the usual cap: the retry after a reply ran past the
-    output cap."""
-    splitter = _DIFF_FILE_SPLIT if _DIFF_FILE_SPLIT.search(diff) else _HUNK_FILE_SPLIT
-    sections = [s for s in splitter.split(diff) if s.strip()]
-    paths = [(s, m.group(1) if (m := _DIFF_PATH.search(s)) else "") for s in sections]
+    output cap. The files ``keep`` names (entrypoint, templates) come first."""
+    paths = _file_sections(diff)
+    sections = [s for s, _ in paths]
     named = [s for s, p in paths if p and p in failing]
     kept = named or [s for s, p in paths if p and not _TEST_PATH.search(p)] or sections
+    first = [s for s, p in paths if p and keep is not None and keep(p)]
+    kept = list(dict.fromkeys([*first, *kept]))
     text = "".join(kept)
     cap = _DIFF_CHAR_CAP // 2
     if len(text) > cap:
@@ -549,8 +598,9 @@ def review(
         else None
     )
     delta: str | None = None
+    keep = _always_shown(rt, state)
     if prior is not None and tree is not None:
-        delta, whole = _delta_text(prior[1], tree[1])
+        delta, whole = _delta_text(prior[1], tree[1], keep)
         if not whole:
             prior = delta = None
     content = (
@@ -578,7 +628,7 @@ def review(
         + _launch_text(state)
     )
     if prior is None or delta is None:
-        diff, complete = _diff_text(rt, state)
+        diff, complete = _diff_text(rt, state, keep)
 
         def body(change: str) -> str:
             return "\n\nThe change (unified diffs, applied in order):\n" + change
@@ -636,7 +686,7 @@ def review(
         result = judge(diff)
     except OutputLimitReached:
         # Once: the trimmed request differs, so the call cache cannot replay the miss.
-        result, complete = judge(trimmed_diff(diff, _failing_findings(state))), False
+        result, complete = judge(trimmed_diff(diff, _failing_findings(state), keep)), False
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict
     # onto the SEPARATE `agent_journal` channel, which no gate/router reads. The

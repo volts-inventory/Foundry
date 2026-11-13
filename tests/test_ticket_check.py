@@ -160,3 +160,80 @@ def test_the_ticket_check_launches_where_the_app_is_complete(tmp_path: Path) -> 
     # The last ticket to build completes the app, entrypoint or not: not its own.
     last = _ticket_spec(tmp_path, tests, t0)
     assert last.launch and not last.own_smoke
+
+
+def _contract_state(*tickets: Ticket) -> tuple[dict[str, Any], Any, Any]:
+    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
+    from foundry.schemas.architecture import InterfaceContract
+
+    state, resolve, resolve_blob = _state({"app.py": "X = 1\n"}, tickets=tickets)
+    contract = InterfaceContract(
+        name="notes",
+        spec_uri="cas://c",
+        kind="function",
+        properties=("PR1: titles stay unique",),
+        seq=_seq("planner", 9),
+    )
+    handle = emit_artifact(contract, CONTRACT_KIND, "planner", contract.seq)
+    state["artifacts"].append(handle)
+
+    def resolving(a: Artifact) -> Any:
+        return contract if a.uri == handle.uri else resolve(a)
+
+    return state, resolving, resolve_blob
+
+
+def test_the_wave_check_judges_the_built_tickets_tests_and_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    import foundry.graph.gate_wiring.runs as runs
+
+    t0 = _ticket("T0", files=("app.py", "tests/test_app.py"), implements=("notes",))
+    t1 = _ticket("T1", "T0", files=("tests/test_t1.py",), implements=("notes",))  # unbuilt
+    state, resolve, _ = _contract_state(t0, t1)
+    tests, props = runs.wave_owned_tests(state, resolve, frozenset())
+    assert tests == t0.files
+    assert props == {"PR1": "notes: titles stay unique"}
+    # T0's scenario outside the wave's scope (a paired ticket carrying it is unbuilt):
+    # its tests need code nobody wrote yet, so a later wave judges them.
+    ac = SimpleNamespace(id="AC-1", ticket_id="T0")
+    monkeypatch.setattr(runs, "_current_criteria", lambda state, resolve: {"AC-1": ac})
+    assert runs.wave_owned_tests(state, resolve, frozenset()) == ((), {})
+    ref = scenario_ref("T0", "AC-1")
+    assert runs.wave_owned_tests(state, resolve, frozenset({ref}))[0] == t0.files
+
+
+def test_the_wave_checks_test_gate_owns_the_built_tickets_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import foundry.graph.gate_wiring.runs as runs
+    from foundry.agents import AgentRuntime
+    from foundry.gates.test import TestGate
+    from foundry.proxy import ModelProviderProxy
+    from foundry.proxy.test_doubles import MockTransport
+    from foundry.state.global_records import GlobalRecords
+    from tests.test_supervisor import _config, _runner
+
+    seen: list[tuple[Any, ...]] = []
+    owning = TestGate.owning
+
+    def spy(self: TestGate, tests: Any, properties: Any) -> TestGate:
+        seen.append((tuple(tests), dict(properties)))
+        return owning(self, tests, properties)
+
+    monkeypatch.setattr(TestGate, "owning", spy)
+    t0 = _ticket("T0", files=("app.py", "tests/test_app.py"), implements=("notes",))
+    state, resolve, resolve_blob = _contract_state(t0)
+    runs.run_build_gate(
+        state,
+        _config("run-wave-own"),
+        rt=AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted({}))),
+        runner=_runner(GlobalRecords()),
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "w",
+        scenarios=frozenset({scenario_ref("T0", "AC-1")}),
+    )
+    assert seen == [(t0.files, {"PR1": "notes: titles stay unique"})]

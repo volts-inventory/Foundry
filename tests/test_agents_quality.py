@@ -269,3 +269,50 @@ def test_review_request_says_when_no_diff_is_resolvable() -> None:
         role="Reviewer",
     )
     assert "no diff text to review" in _review_request_text(transport)
+
+
+def test_review_request_lists_the_plans_pinned_constraints_and_must_haves() -> None:
+    """No check verifies a pinned constraint ("never prints a traceback"): the review
+    gets each as a criterion, with the hostile-input checklist to break it."""
+    from foundry.agents._common import emit_artifact
+    from foundry.agents.quality.reviewer_critic import _SOP
+    from foundry.durability.artifact_store import ArtifactStore
+    from foundry.schemas.architecture import ConstraintScope, PinnedConstraint
+    from foundry.schemas.product import IntentBrief
+    from foundry.state.seq import Seq
+
+    transport = MockTransport(verdicts=["approve"])
+    rt = make_runtime(transport)
+    rt.cas = ArtifactStore()
+    state = _diff_state(rt.cas, {"T-A": "+++ b/dice.py\n+x = 1\n"})
+    seq = Seq("run-R", 1, 0, "planner", 0)
+    brief = IntentBrief(
+        intent="a dice CLI",
+        must_haves=("rolls NdM expressions",),
+        must_have_ids=("MH-1",),
+        seq=seq,
+    )
+    state["artifacts"].append(emit_artifact(brief, "intent_brief", "planner", seq, store=rt.cas))
+
+    def pc(cid: str, text: str, supersedes: str | None = None) -> PinnedConstraint:
+        return PinnedConstraint(
+            id=cid,
+            text=text,
+            scope=ConstraintScope.GLOBAL,
+            source="plan",
+            supersedes=supersedes,
+            seq=seq,
+        )
+
+    state["pinned_constraints"] = [
+        pc("PC-6", "never prints a traceback"),
+        pc("PC-1", "old rule"),
+        pc("PC-7", "exit 2 on bad input", supersedes="PC-1"),
+    ]
+    review(rt, state, config_for("run-R", nonce="N"), node_id="reviewer", role="Reviewer")
+    text = _review_request_text(transport)
+    assert "PC-6 (pinned constraint): never prints a traceback" in text
+    assert "PC-7 (pinned constraint): exit 2 on bad input" in text
+    assert "old rule" not in text
+    assert "MH-1 (must-have): rolls NdM expressions" in text
+    assert "5,000-digit number" in _SOP and "2,000 nested brackets" in _SOP

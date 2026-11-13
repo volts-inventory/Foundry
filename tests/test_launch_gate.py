@@ -585,3 +585,111 @@ def test_nothing_declared_leaves_the_launch_unchanged(tmp_path: Path) -> None:
     assert gate.target.runs == (f"{_PY} dice.py --help",)
     obs = gate.execute(tmp_path)
     assert gate.decide(obs) is GateStatus.PASS and obs.findings == ()
+
+
+# ---- hostile input: a pinned "never prints a traceback" the scenarios never test ----
+
+# A dice CLI as the bench generated it: a recursive-descent parser over int(), so
+# deep nesting is a RecursionError and a 5000-digit literal a ValueError traceback.
+_EVAL_CLI = """\
+import sys
+
+def expr(s, i):
+    if s[i] == "(":
+        v, i = expr(s, i + 1)
+        return v, i + 1
+    j = i
+    while j < len(s) and s[j].isdigit():
+        j += 1
+    return int(s[i:j]), j
+
+args = sys.argv[1:]
+if "--help" in args:
+    print("usage: calc eval EXPR")
+    sys.exit(0)
+text = args[-1] if len(args) > 1 else sys.stdin.read().strip()
+GUARD
+print(expr(text, 0)[0] if text else 0)
+"""
+_GUARDED = """\
+if len(text) > 200 or not text.replace("(", "").replace(")", "").isdigit():
+    print("error: bad expression", file=sys.stderr)
+    sys.exit(2)
+"""
+
+
+def _calc(tmp_path: Path, guard: str, crit: str) -> LaunchGate:
+    (tmp_path / "calc.py").write_text(_EVAL_CLI.replace("GUARD", guard))
+    stack = StackDecision(language="python", kind="cli", launch=f"{_PY} calc.py")
+    return LaunchGate(launch_target(stack, None, criteria=[_criterion("AC-1", "T1", crit)]))
+
+
+def test_the_hostile_probes_use_the_scenarios_program_and_argument() -> None:
+    cli = StackDecision(language="python", kind="cli", interface=("roll", "--seed"))
+    tickets = [_ticket("T1", ("dice/__init__.py", "dice/__main__.py"), entrypoint=True)]
+    crit = [
+        _criterion("AC-1", "T1", "I run `dice roll --seed 7 2d6 --sum`"),
+        _criterion("AC-2", "T1", 'I run "echo 2d6 | dice roll"'),
+    ]
+    t = launch_target(cli, None, tickets=tickets, criteria=crit, python="py")
+    assert t.fuzz == (
+        ("argument", "py -m dice roll --seed 7", " --sum"),
+        ("stdin", "py -m dice roll", ""),
+    )
+    # Only a subcommand and an option's value: no argument to probe.
+    only = [_criterion("AC-1", "T1", "I run `dice roll --seed 7`")]
+    assert launch_target(cli, None, tickets=tickets, criteria=only, python="py").fuzz == ()
+
+
+def test_hostile_input_that_crashes_the_cli_fails_and_a_clean_error_passes(
+    tmp_path: Path,
+) -> None:
+    bad = _calc(tmp_path, "", "I run `calc eval (1)`")
+    assert bad.target.fuzz == (("argument", f"{_PY} calc.py eval", ""),)
+    obs = bad.execute(tmp_path)
+    assert bad.decide(obs) is GateStatus.FAIL, obs.findings
+    crashed = [f for f in obs.findings if "crashed" in f]
+    assert any("2000 nested brackets" in f and "RecursionError" in f for f in crashed), crashed
+    assert any("5000-digit number" in f for f in crashed), crashed
+    assert not any("empty string" in f for f in crashed)
+    # The echoed input is cut down, not pasted 10,000 characters long.
+    assert all(len(f) < 3000 for f in obs.findings)
+    good = _calc(tmp_path, _GUARDED, "I run `calc eval (1)`")
+    obs = good.execute(tmp_path)
+    assert good.decide(obs) is GateStatus.PASS, obs.findings
+
+
+def test_hostile_input_on_stdin_is_probed_too(tmp_path: Path) -> None:
+    gate = _calc(tmp_path, "", "I run `echo '(1)' | calc`")
+    assert gate.target.fuzz == (("stdin", f"{_PY} calc.py", ""),)
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL
+    assert any("on stdin" in f and "RecursionError" in f for f in obs.findings), obs.findings
+
+
+def test_a_crash_signal_on_hostile_input_fails(tmp_path: Path) -> None:
+    (tmp_path / "seg.py").write_text(
+        "import os, signal, sys\n"
+        "if len(sys.argv[-1]) > 1000: os.kill(os.getpid(), signal.SIGSEGV)\n"
+    )
+    gate = LaunchGate(
+        LaunchTarget(
+            kind="cli",
+            cmd=f"{_PY} seg.py",
+            runs=(f"{_PY} seg.py a",),
+            fuzz=(("argument", f"{_PY} seg.py", ""),),
+        )
+    )
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    assert any("crashed" in f and "10000-character" in f for f in obs.findings)
+
+
+def test_an_oversized_form_field_that_500s_fails(tmp_path: Path) -> None:
+    big = _FORM_APP.replace('500 if "{post}" in data', "500 if n > 100_000")
+    obs = (gate := _http(tmp_path, big)).execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    assert any("1 MB value" in f and "field(s) body answered 500" in f for f in obs.findings)
+    capped = _FORM_APP.replace('500 if "{post}" in data', "413 if n > 100_000")
+    gate = _http(tmp_path, capped)
+    assert gate.decide(gate.execute(tmp_path)) is GateStatus.PASS

@@ -321,6 +321,13 @@ _SOP = (
     "input the workaround breaks (correct vs observed result), or a grep for the "
     "special-cased literal (correct_result: no match; observed_result: the file and "
     "line). "
+    "(6) Pinned constraints and must-haves: each one listed in the request is a "
+    "criterion. Try to break it with hostile input the scenarios never use: a "
+    "10,000-character argument, 2,000 nested brackets, a 5,000-digit number, a long run "
+    "of a repeated operator or sign, an empty string, an oversized form field. A "
+    "violation (e.g. a traceback, panic or crash where a constraint forbids one) is "
+    "BLOCKING: give the command, the constraint's id as correct_result's basis, and the "
+    "observed output. "
     "Report at most 10 findings, most important first, each in a sentence or two; "
     "never repeat a finding."
 )
@@ -391,6 +398,33 @@ def _contract_text(rt: AgentRuntime, state: FactoryState) -> str:
             f"- {name}" + (f" [{c.kind}]" if c.kind else "") + (f": {text}" if text else "")
         )
     return _clip("\n".join(lines), _CONTRACT_CHAR_CAP)
+
+
+def _plan_rules_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The plan's live pinned constraints and the newest brief's must-haves, one
+    per line with its id: no check verifies them, so the review must."""
+    from foundry.schemas.product import IntentBrief
+    from foundry.state.reducers import live_constraints
+
+    lines = [
+        f"- {c.id} (pinned constraint): {c.text}"
+        for c in sorted(
+            live_constraints(list(state.get("pinned_constraints") or ())), key=lambda c: c.id
+        )
+    ]
+    briefs = [a for a in state.get("artifacts") or () if a.kind == "intent_brief"]
+    if briefs and rt.cas is not None:
+        try:
+            brief = rt.cas.resolve(max(briefs, key=lambda a: a.seq))
+        except Exception:
+            brief = None
+        if isinstance(brief, IntentBrief):
+            ids = brief.must_have_ids
+            lines += [
+                f"- {ids[i] if i < len(ids) else f'MH-{i + 1}'} (must-have): {text}"
+                for i, text in enumerate(brief.must_haves)
+            ]
+    return _clip("\n".join(lines), _SPEC_CHAR_CAP)
 
 
 def launch_result(state: FactoryState) -> GateResult | None:
@@ -532,6 +566,12 @@ def review(
     if criteria:
         content += "\n\nAcceptance criteria:\n" + "\n".join(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
+        )
+    rules = _plan_rules_text(rt, state)
+    if rules:
+        content += (
+            "\n\nThe plan's pinned constraints and must-haves (no check verifies these: "
+            "check each one, and a violation you reproduce is a blocking finding):\n" + rules
         )
     content += (
         "\n\nThe launch gate (the factory started the real app and probed it): "

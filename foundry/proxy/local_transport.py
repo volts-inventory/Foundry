@@ -26,6 +26,14 @@ the session's next call — how Ollama's /v1 carries Qwen's "preserve thinking":
 message's ``reasoning`` onto the turn's thinking, which the Qwen3.8 renderer
 always renders (and the Qwen3.5/3.6 one renders for turns after the last user
 query).
+
+Reasoning budget: a thinking request carries ``local_reasoning_budget`` (tokens per
+effort level). Such a call is streamed, and once its reasoning passes the level's
+budget before any answer (text or a tool call) has begun, the stream is closed —
+Ollama stops generating when the client goes — and :class:`ThinkingBudgetExceeded`
+carries the partial observation back for the proxy to retry a level lower.
+Reasoning tokens are counted as the larger of streamed reasoning chunks (one token
+each on Ollama / llama.cpp) and reasoning chars / 4 (a server that batches chunks).
 """
 
 from __future__ import annotations
@@ -38,6 +46,7 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from foundry import progress
@@ -53,7 +62,12 @@ from foundry.proxy.cli_transports import (
     _schema_of,
     _usage,
 )
-from foundry.proxy.model_provider_proxy import ProviderResponse, ToolsUnsupported, _ClientCache
+from foundry.proxy.model_provider_proxy import (
+    ProviderResponse,
+    ThinkingBudgetExceeded,
+    ToolsUnsupported,
+    _ClientCache,
+)
 
 __all__ = [
     "DEFAULT_LOCAL_MODEL",
@@ -113,6 +127,89 @@ def _split_thinking(text: str) -> tuple[str, str]:
         head, _, rest = rest.rpartition("</think>")
         parts.insert(0, head.replace("<think>", "").strip())
     return "\n\n".join(p for p in parts if p), rest.strip()
+
+
+def _drain(stream: Any, budget: int, params: dict[str, Any]) -> Any:
+    """A streamed completion gathered into the shape of a non-streamed one, or
+    :class:`ThinkingBudgetExceeded` once its reasoning passes ``budget`` tokens
+    before any answer (text, a tool call) began; the stream is closed either way,
+    so an aborted call stops generating on the server."""
+    content: list[str] = []
+    reasoning: list[str] = []
+    calls: dict[int, dict[str, Any]] = {}
+    model = served_id = finish = ""
+    usage: Any = None
+    answered = False
+    lead = ""  # the content before the answer: an inline <think> block, or blanks
+    pieces = chars = 0  # reasoning so far: streamed pieces and their chars
+    try:
+        for chunk in stream:
+            model = str(getattr(chunk, "model", "") or model)
+            served_id = str(getattr(chunk, "id", "") or served_id)
+            usage = getattr(chunk, "usage", None) or usage
+            for choice in getattr(chunk, "choices", None) or ():
+                delta = getattr(choice, "delta", None)
+                field = getattr(delta, "reasoning", None) or getattr(
+                    delta, "reasoning_content", None
+                )
+                if isinstance(field, str) and field:
+                    reasoning.append(field)
+                    pieces += 1
+                    chars += len(field)
+                text = getattr(delta, "content", None)
+                if isinstance(text, str) and text:
+                    content.append(text)
+                    if not answered:
+                        lead += text
+                        opened = lead.lstrip().startswith("<think>")
+                        if opened and "</think>" not in lead[-(len(text) + 8) :]:
+                            pieces += 1
+                            chars += len(text)
+                        elif lead.strip() and not "<think>".startswith(lead.strip()):
+                            answered = True
+                for tc in getattr(delta, "tool_calls", None) or ():
+                    answered = True
+                    call = calls.setdefault(_as_int(getattr(tc, "index", 0)), {"args": []})
+                    call["id"] = getattr(tc, "id", None) or call.get("id")
+                    fn = getattr(tc, "function", None)
+                    call["name"] = getattr(fn, "name", None) or call.get("name")
+                    call["args"].append(getattr(fn, "arguments", None) or "")
+                finish = str(getattr(choice, "finish_reason", "") or finish)
+            spent = max(pieces, chars // 4)
+            if not answered and spent > budget:
+                thought = "".join(reasoning) + lead.replace("<think>", "")
+                partial = ProviderResponse(
+                    served_model=model,
+                    request_id=served_id,
+                    text="",
+                    usage=_usage(
+                        input_tokens=len(json.dumps(params.get("messages"), default=str)) // 4,
+                        output_tokens=spent,
+                    ),
+                    stop_reason="thinking_budget",
+                    reasoning=thought.strip(),
+                )
+                raise ThinkingBudgetExceeded(partial, budget)
+    finally:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
+    tool_calls = [
+        SimpleNamespace(
+            id=c.get("id"),
+            function=SimpleNamespace(name=c.get("name") or "", arguments="".join(c["args"])),
+        )
+        for _, c in sorted(calls.items())
+    ]
+    message = SimpleNamespace(
+        content="".join(content), reasoning="".join(reasoning), tool_calls=tool_calls
+    )
+    return SimpleNamespace(
+        model=model,
+        id=served_id,
+        choices=[SimpleNamespace(message=message, finish_reason=finish or "stop")],
+        usage=usage,
+    )
 
 
 def _turn_key(content: Any, call_ids: tuple[str, ...]) -> tuple[str, ...] | None:
@@ -204,6 +301,10 @@ class LocalOpenAITransport:
             raise TransportError("local transport requires a pinned model id on the request")
         thinking = request.get("local_thinking") is True
         messages = self._messages(request, thinking)
+        budgets = request.get("local_reasoning_budget")
+        budget = None
+        if thinking and isinstance(budgets, dict):
+            budget = _as_int(budgets.get(request.get("local_effort") or "xhigh")) or None
 
         # Ollama's /v1 ignores `think` and honours this; "none" turns a Qwen3.x
         # model's default thinking off.
@@ -227,7 +328,7 @@ class LocalOpenAITransport:
             if self._tools_by_model.get(model) is False:
                 raise ToolsUnsupported(f"local server rejected tools for {model}")
             try:
-                response = self._call({**params, "tools": _chat_tools(request)})
+                response = self._call({**params, "tools": _chat_tools(request)}, budget)
             except Exception as exc:
                 if model in self._tools_by_model or not _is_tools_rejection(exc):
                     raise
@@ -238,7 +339,7 @@ class LocalOpenAITransport:
             return response
         schema = _schema_of(request)
         if schema is None:
-            return self._call(params)
+            return self._call(params, budget)
         if self.schema_supported is not False:
             native = {
                 **params,
@@ -248,7 +349,7 @@ class LocalOpenAITransport:
                 },
             }
             try:
-                response = self._call(native)
+                response = self._call(native, budget)
             except Exception as exc:
                 if not _is_schema_rejection(exc):
                     raise
@@ -262,21 +363,26 @@ class LocalOpenAITransport:
                 return response
         instruction = _JSON_ONLY + json.dumps(schema, sort_keys=True)
         fallback = [*messages, {"role": "user", "content": instruction}]
-        return self._call({**params, "messages": fallback})
+        return self._call({**params, "messages": fallback}, budget)
 
-    def _call(self, params: dict[str, Any]) -> ProviderResponse:
+    def _call(self, params: dict[str, Any], budget: int | None = None) -> ProviderResponse:
         if self.reasoning_supported is False:
             params = {k: v for k, v in params.items() if k != "reasoning_effort"}
+        sent = params
+        if budget is not None:
+            sent = {**params, "stream": True, "stream_options": {"include_usage": True}}
         try:
-            response = self._cache.run(lambda c: c.chat.completions.create(**params))
+            response = self._cache.run(lambda c: c.chat.completions.create(**sent))
         except Exception as exc:
             if "reasoning_effort" not in params or "reasoning" not in str(exc).lower():
                 raise
             self.reasoning_supported = False
             progress.log(f"local server rejected reasoning_effort ({exc}); sending without it")
-            return self._call(params)
+            return self._call(params, budget)
         if "reasoning_effort" in params:
             self.reasoning_supported = True
+        if budget is not None:
+            response = _drain(response, budget, params)
         choice = response.choices[0] if getattr(response, "choices", None) else None
         message = choice.message if choice is not None else None
         text = (getattr(message, "content", "") or "") if message is not None else ""

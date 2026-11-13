@@ -448,6 +448,19 @@ _AGENT_NODE_IDS = frozenset({"junior_engineer"})
 # can think for 20K+ tokens first, so xhigh gets what a 128K context leaves after
 # the prompt. Low keeps medium's floor: the answer (a whole file) still needs room.
 _LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, "xhigh": 98304}
+# Reasoning a local call may stream before its answer starts; past it the call is
+# aborted and retried a level lower (``ThinkingBudgetExceeded``). Agent turns: in
+# cached local bench runs a successful turn reasoned p99 ~3K tokens, max ~7K, while
+# one runaway medium turn thought 38K tokens (31 min) into a length stop. A verdict
+# of at most 10 findings needs little more. Every other call (a plan reasons ~30K+
+# tokens) is bounded only once its answer could no longer fit.
+_LOCAL_REASONING_BUDGETS: dict[str, dict[Effort, int]] = {
+    "agent": {"low": 8192, "medium": 12288, "xhigh": 24576},
+    "judgment": {"low": 16384, "medium": 24576, "xhigh": 49152},
+}
+# The least output an answer needs: reasoning that leaves less room than this under
+# ``max_tokens`` can only end in a length stop.
+_ANSWER_RESERVE_TOKENS = 4096
 # Run fire count of each local attempt sent (not replayed), by the thinking level it
 # was sent at (a retry may lower it) or "off".
 EFFORT_COUNT_PREFIX = "effort."
@@ -476,6 +489,14 @@ def local_thinking_for(model_id: str, setting: LocalThinking | None, *, agent: b
         name = model_id.lower()
         return fnmatchcase(name, "*qwen3*") and "coder" not in name
     return setting == "on" or (setting == "agent" and agent)
+
+
+def _reasoning_budgets(kind: str | None, max_tokens: int) -> dict[Effort, int]:
+    """Each thinking level's reasoning budget for a call of ``kind`` ("agent",
+    "judgment", or None for any other) whose output is capped at ``max_tokens``."""
+    doomed = max(max_tokens - _ANSWER_RESERVE_TOKENS, max_tokens // 2)
+    table = _LOCAL_REASONING_BUDGETS.get(kind or "", {})
+    return {level: min(table.get(level, doomed), doomed) for level in _LOCAL_THINKING_MAX_TOKENS}
 
 
 def _estimated_prompt_tokens(request: Mapping[str, Any]) -> int:
@@ -559,6 +580,20 @@ class OutputLimitReached(ProxyUnavailable):
 
 
 _LENGTH_STOPS = frozenset({"length", "max_tokens"})
+
+
+class ThinkingBudgetExceeded(RuntimeError):
+    """A local thinking call's reasoning passed its budget before any answer began,
+    and the transport aborted it. ``response`` is the partial observation (no text,
+    the reasoning so far, estimated usage); the proxy retries a level lower."""
+
+    def __init__(self, response: ProviderResponse, budget: int) -> None:
+        super().__init__(
+            f"reasoning passed its {budget}-token budget before the answer began: "
+            "think briefly, then answer"
+        )
+        self.response = response
+        self.budget = budget
 
 
 class PinnedIdDriftError(RuntimeError):
@@ -1259,11 +1294,11 @@ class ModelProviderProxy:
         )
         if local:
             request["local_thinking"] = thinking
+        agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
         if thinking:
             # Qwen3.8 guidance: xhigh for planning and hard one-shot calls, medium in
             # agent loops (one turn of many). A verdict is advisory: at xhigh a local
             # review took 9-10 minutes a case instead of 2.5 with no better findings.
-            agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
             level: Effort = effort or ("medium" if agent_turn or purpose == "judgment" else "xhigh")
             request["local_effort"] = level
             request["max_tokens"] = max(
@@ -1275,6 +1310,9 @@ class ModelProviderProxy:
             request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
         if max_tokens is not None:
             request["max_tokens"] = min(int(request["max_tokens"]), max_tokens)
+        if thinking:
+            kind = "agent" if agent_turn else "judgment" if purpose == "judgment" else None
+            request["local_reasoning_budget"] = _reasoning_budgets(kind, int(request["max_tokens"]))
         if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
             if profile is not None:
@@ -1662,6 +1700,21 @@ class ModelProviderProxy:
                 return response, parsed
             except (ToolsUnsupported, OutputLimitReached):
                 raise
+            except ThinkingBudgetExceeded as over:
+                # Not a failed attempt: each abort steps the effort down, and a call
+                # that does not think carries no budget, so this ends. Never cached:
+                # only the answer of the level that finishes is.
+                if meter is not None:
+                    meter.note_local(over.response.usage)
+                progress.log(f"{what} — {over}; retrying a thinking level lower")
+                if schema is not None:
+                    sent = _with_parse_correction(
+                        request, over.response, attempt + 1, str(over), previous=sent
+                    )
+                else:
+                    effort = {k: sent[k] for k in ("local_thinking", "local_effort") if k in sent}
+                    sent = _lower_effort({**request, **effort})
+                continue
             except Exception as exc:
                 if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):
                     if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:

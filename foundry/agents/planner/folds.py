@@ -1414,3 +1414,52 @@ def _lift_described_properties(
         for c in interfaces
     ]
     return out, lifted, concerns
+
+
+# "for any <string> ... does not contain <it> as a substring": false for a one-char
+# input in any hex / base64 / alphanumeric output, and it once drove a custom hash
+# that leaks which characters a password lacks. Narrow on purpose (a dropped
+# property costs coverage): a universal, a negated containment, and "substring" or
+# "plaintext" naming string containment, with no length floor in the domain.
+_UNIVERSAL = re.compile(r"(?i)\bfor (?:any|all|every|each)\b")
+_NOT_CONTAINS = re.compile(
+    r"(?i)\b(?:does not|doesn't|do not|don't|never|not|cannot|can't|must not)\s+"
+    r"(?:contains?|includes?|appears?|occurs?)\b"
+)
+_STRING_CONTAINMENT = re.compile(r"(?i)\bsub-?strings?\b|\bplain-?text\b")
+_LENGTH_FLOOR = re.compile(
+    r"(?i)\blength\b|\blen\s*\(|\bat least\s+\d|>=\s*\d|≥\s*\d|\blonger than\b"
+    r"|\bmore than\s+\d|\bminimum\b|\b\d+\s+(?:or more\s+)?(?:char|byte)"
+)
+
+
+def unsatisfiable_property(text: str) -> bool:
+    """``text`` is a universal string-containment negation over a domain with no
+    length floor: one a single-character input falsifies."""
+    return bool(
+        _UNIVERSAL.search(text)
+        and _NOT_CONTAINS.search(text)
+        and _STRING_CONTAINMENT.search(text)
+        and not _LENGTH_FLOOR.search(text)
+    )
+
+
+def _drop_unsatisfiable_properties(
+    interfaces: Sequence[InterfaceContract],
+) -> tuple[list[InterfaceContract], list[str]]:
+    """``interfaces`` without a property :func:`unsatisfiable_property` flags: its
+    test could only pass by coding around the invariant. No repair call."""
+    out: list[InterfaceContract] = []
+    concerns: list[str] = []
+    for c in interfaces:
+        bad = [p for p in c.properties if unsatisfiable_property(p.partition(": ")[2])]
+        if bad:
+            c = c.model_copy(update={"properties": tuple(p for p in c.properties if p not in bad)})
+        out.append(c)
+        concerns += [
+            f"Contract {c.name}: property {p.partition(':')[0]} dropped as unsatisfiable: "
+            "a one-character input breaks a 'does not contain ... as a substring' "
+            "universal with no length floor."
+            for p in bad
+        ]
+    return out, concerns

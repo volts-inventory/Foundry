@@ -109,6 +109,7 @@ from foundry.agents.implementation.tickets.packet import (
     _ticket_packet,
     _ticket_scenarios,
     bdd_scaffold_spans,
+    live_contracts,
     ticket_properties,
     ticket_signature_map,
     upstream_defect_context,
@@ -193,7 +194,6 @@ from foundry.execution.work_pool import (
 )
 from foundry.fs import apply_overlay
 from foundry.proxy.token_meter import RunCapExceeded
-from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
@@ -370,7 +370,7 @@ def make_engineering_node(
             ranked += [(s, rt.cas.put_blob(snapshot_blob(f))) for s, f in attempts]
             return best_attempt(ranked)
 
-        contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+        contracts = live_contracts(state, resolve)
         prior = _prior_failures(state)
         failures = _ticket_notes(state, FAIL_TRIAGE)
         rejections = signature_rejections(state)
@@ -584,7 +584,7 @@ def make_engineering_node(
             required = {
                 n: m
                 for n in t.implements
-                if (c := contracts.get(n)) is not None and (m := contract_members(c.signature))
+                if (ic := contracts.get(n)) is not None and (m := contract_members(ic.signature))
             }
             if required:
                 tid = task_id_for_ticket(t.id)

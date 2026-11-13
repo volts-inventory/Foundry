@@ -12,6 +12,7 @@ from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import pinned_texts
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.tickets.constants import (
+    CONTRACT_KIND,
     FAIL_TRIAGE,
     MAX_TICKET_ATTEMPTS,
     NODE_ID,
@@ -81,6 +82,43 @@ def _newest_by(
             if k not in newest or handle.seq > newest[k][0]:
                 newest[k] = (handle.seq, body)
     return {k: v[1] for k, v in newest.items()}
+
+
+_PROPERTY_ID = re.compile(r"\bPR\d+\b", re.IGNORECASE)
+
+
+def conflicted_properties(state: FactoryState) -> frozenset[str]:
+    """The contract property ids a build session's spec-conflict report names: the
+    spec contradicts them, so no gate requires them (the build manifest lists the
+    report)."""
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    return frozenset(
+        pid.upper()
+        for t in state.get("gate_triage") or ()
+        if t.name == SPEC_CONFLICT_TRIAGE
+        for pid in _PROPERTY_ID.findall(str(t.explanation))
+    )
+
+
+def live_contracts(state: FactoryState, resolve: ArtifactResolver) -> dict[str, InterfaceContract]:
+    """The newest contract per name, without the properties a spec conflict names."""
+    contracts: dict[str, InterfaceContract] = _newest_by(
+        state, resolve, CONTRACT_KIND, InterfaceContract, "name"
+    )
+    dropped = conflicted_properties(state)
+    if not dropped:
+        return contracts
+    return {
+        name: c.model_copy(
+            update={
+                "properties": tuple(
+                    p for p in c.properties if p.partition(":")[0].strip().upper() not in dropped
+                )
+            }
+        )
+        for name, c in contracts.items()
+    }
 
 
 def _contract_body(rt: AgentRuntime, contract: InterfaceContract) -> str:
@@ -289,13 +327,12 @@ def _ticket_check(
     tests in them and its contracts' properties. The session that completes the app
     (every other ticket built, or the entrypoint once its dependencies are) also
     runs the Launch gate; a red launch is the entrypoint's own."""
-    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
     from foundry.agents.implementation.tickets.tasks import built_task_ids, read_tickets
     from foundry.gates.self_check import CheckSpec
     from foundry.graph.gate_wiring import wave_scenarios
 
     tickets = read_tickets(state, resolve)
-    contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+    contracts = live_contracts(state, resolve)
     properties: dict[str, str] = {}
     for line in ticket_properties(ticket, tickets, contracts):
         name, _, rest = line.partition(": ")

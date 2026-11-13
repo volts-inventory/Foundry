@@ -34,6 +34,7 @@ from foundry.agents.planner.folds import (
     _drop_dangling_refs,
     _drop_orphan_scenarios,
     _drop_self_consumes,
+    _drop_unsatisfiable_properties,
     _ensure_security_scenario,
     _fix_covers,
     _fold_test_bindings,
@@ -180,6 +181,8 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_ensure_security_scenario.__name__, more)
     tickets, interfaces, more = _lift_described_properties(tickets, frame.interfaces)
     concerns += fold(_lift_described_properties.__name__, more)
+    interfaces, more = _drop_unsatisfiable_properties(interfaces)
+    concerns += fold(_drop_unsatisfiable_properties.__name__, more)
     types = design_types(frame.design)
     tickets, more, owned_types = _assign_shared_types(
         tickets, frame.interfaces, frame.declared, frame.language, types

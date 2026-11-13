@@ -9,20 +9,28 @@ from pathlib import Path
 
 from foundry.agents.implementation.tickets.packet import (
     _ticket_packet,
+    conflicted_properties,
+    live_contracts,
     property_rule,
     ticket_properties,
 )
 from foundry.agents.planner import SOP, make_planner_node
 from foundry.agents.planner.build import _build_interfaces
 from foundry.agents.planner.checks import _property_findings, finding_kind
-from foundry.agents.planner.folds import _lift_described_properties
+from foundry.agents.planner.folds import (
+    _drop_unsatisfiable_properties,
+    _lift_described_properties,
+    unsatisfiable_property,
+)
 from foundry.agents.planner.schema import PLAN_SCHEMA
 from foundry.durability.artifact_store import ArtifactStore
+from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
 from foundry.gates.properties import property_findings
 from foundry.gates.test import PROPERTIES_KEY, TestGate
 from foundry.graph.gate_wiring.materialize import _ship_test_manifest
 from foundry.schemas.architecture import InterfaceContract
-from foundry.schemas.gates import GateStatus
+from foundry.schemas.base import Artifact
+from foundry.schemas.gates import GateStatus, GateTriage
 from foundry.schemas.implementation import Specialty, StackDecision, Task, Ticket
 from foundry.state.seq import Seq
 
@@ -313,6 +321,79 @@ def test_a_plan_with_no_property_is_a_finding_only_for_a_real_input_domain() -> 
 def test_the_plan_sop_puts_properties_on_contracts_over_feature_combinations() -> None:
     assert "never in its description or a ticket's" in SOP
     assert "never only one feature or a single-term case" in SOP
+    assert "trivial and edge inputs of its domain" in SOP
+    assert "expressible through the contracts' types" in SOP
+    assert "stated upper bound" in SOP
+
+
+def test_a_substring_universal_with_no_length_floor_is_unsatisfiable() -> None:
+    """Round 4 (notes PR7): a one-character password is in its own hex hash."""
+    assert unsatisfiable_property(
+        "For any password, hash_password(password) returns a string that does not "
+        "contain the plaintext password as a substring."
+    )
+    assert unsatisfiable_property("for every token t, the log line never contains t as a substring")
+    # A stated length floor, no universal, or no string containment: left alone.
+    assert not unsatisfiable_property(
+        "for any password of at least 8 characters the hash does not contain it as a substring"
+    )
+    assert not unsatisfiable_property("for any password whose length >= 12, no substring leaks")
+    assert not unsatisfiable_property("hash('hunter2') does not contain 'hunter2' as a substring")
+    assert not unsatisfiable_property("for any list, dedupe(xs) does not contain duplicates")
+    assert not unsatisfiable_property("for any notation the total lies within [min, max]")
+
+
+def test_the_planner_drops_an_unsatisfiable_property_without_a_repair() -> None:
+    leak = "PR7: for any password, hash(password) does not contain password as a substring"
+    hashing = _contract("hash_password", "PR6: verify(p, hash(p)) is true", leak)
+    roll = _contract("roll", "PR1: in range")
+    out, [concern] = _drop_unsatisfiable_properties([hashing, roll])
+    assert out[0].properties == ("PR6: verify(p, hash(p)) is true",)
+    assert out[1] is roll
+    assert "hash_password" in concern and "PR7" in concern
+    assert _drop_unsatisfiable_properties([roll]) == ([roll], [])
+
+
+def test_the_planner_emits_no_unsatisfiable_property() -> None:
+    from tests.test_planner import PLAN, _bodies, config_for, runtime_for
+
+    plan = json.loads(json.dumps(PLAN))
+    plan["interfaces"][0].update(
+        kind="function",
+        signature="def add(title: str) -> int: ...",
+        properties=[
+            {"id": "PR1", "text": "for any title add returns a new id"},
+            {"id": "PR2", "text": "for any title the id does not contain the title as a substring"},
+        ],
+    )
+    cas = ArtifactStore()
+    rt, _ = runtime_for(plan, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    contracts = {c.name: c for c in _bodies(cas, writes, "interface_contract")}
+    assert contracts["TodoStore.add"].properties == ("PR1: for any title add returns a new id",)
+
+
+def test_a_spec_conflict_naming_a_property_drops_it_from_the_live_contracts() -> None:
+    contract = _contract("hash_password", "PR6: verify round-trips", "PR7: no substring leak")
+    handle = Artifact(kind="interface_contract", uri="cas://c", produced_by="planner", seq=_SEQ)
+    state: dict[str, object] = {"artifacts": [handle]}
+
+    def resolve(a: Artifact) -> InterfaceContract:
+        return contract
+
+    def note(name: str, text: str) -> GateTriage:
+        return GateTriage(
+            name=name, run_against="task/auth", explanation=text, produced_by="p", seq=_SEQ
+        )
+
+    assert live_contracts(state, resolve)["hash_password"] is contract  # type: ignore[arg-type]
+    state["gate_triage"] = [
+        note(SPEC_CONFLICT_TRIAGE, "pr7 says the hash never holds the password; 'a' is in hex"),
+        note("adapter-report", "PR6 is fine"),
+    ]
+    assert conflicted_properties(state) == {"PR7"}  # type: ignore[arg-type]
+    live = live_contracts(state, resolve)  # type: ignore[arg-type]
+    assert live["hash_password"].properties == ("PR6: verify round-trips",)
 
 
 # ---- guarded imports and the shipped manifest ------------------------------------

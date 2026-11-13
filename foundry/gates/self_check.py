@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -45,6 +45,7 @@ from foundry.schemas.gates import GateStatus
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.gates.profiles import VerificationProfile
+    from foundry.gates.pydeps import PythonBuildEnv
     from foundry.gates.runner import GateImpl
     from foundry.graph.gate_wiring import ArtifactResolver, BlobResolver
     from foundry.state.factory_state import FactoryState
@@ -75,6 +76,11 @@ CHECK_TIMEOUT_S = 180.0
 # A smoke run boots the app for one request: seconds. A server that never exits
 # (the app's `run` command as smoke) is the failure to report, not to wait out.
 SMOKE_TIMEOUT_S = 60.0
+# The Launch gate in a check: the final gate's boot limit (a slow first boot is real),
+# tighter per-request and per-CLI-run limits, since it re-runs on every check.
+LAUNCH_BOOT_S = 30.0
+LAUNCH_REQUEST_S = 5.0
+LAUNCH_CLI_S = 15.0
 # "0"/"off": no check anywhere; "local": local-tier sessions only (an A/B on the bench).
 DISABLE_ENV = "FOUNDRY_SELF_CHECK"
 _OFF = frozenset({"0", "off", "false", "no"})
@@ -149,8 +155,8 @@ class CheckBase:
         self._resolve_blob = resolve_blob
         self._lock = threading.Lock()
         self._built: tuple[Path, tuple[str, ...]] | None = None
-        self._openings: dict[tuple[frozenset[str], bool], tuple[GateOutcome, ...]] = {}
-        self._opening_locks: dict[tuple[frozenset[str], bool], threading.Lock] = {}
+        self._openings: dict[Hashable, tuple[GateOutcome, ...]] = {}
+        self._opening_locks: dict[Hashable, threading.Lock] = {}
 
     def tree(self) -> tuple[Path, tuple[str, ...]]:
         """(the materialized tree, every ticket's planned files). Raises
@@ -181,7 +187,13 @@ class CheckBase:
         """The gates on the unchanged tree for ``spec``'s scope, run once per scope.
         The unbuilt files are the planned files still absent, the session's own
         included: each session judges which of them are its own."""
-        key = (spec.scope, spec.smoke)
+        key = (
+            spec.scope,
+            spec.smoke,
+            spec.launch,
+            spec.own_tests,
+            tuple(sorted(spec.properties.items())),
+        )
         with self._lock:
             lock = self._opening_locks.setdefault(key, threading.Lock())
         with lock:
@@ -232,6 +244,13 @@ class CheckSpec:
     smoke: bool = False
     own_smoke: bool = False
     rules: Mapping[str, str] = field(default_factory=dict)
+    # The session's own test files and its contracts' properties (id -> "<contract>:
+    # <statement>"): the scoped Test gate also runs and judges them (TestGate.owning).
+    own_tests: tuple[str, ...] = ()
+    properties: Mapping[str, str] = field(default_factory=dict)
+    # Also the Launch gate (alone, without the smoke command): the session that
+    # completes the app. ``own_smoke`` says whether a red launch is its own.
+    launch: bool = False
     # A green opening check with the session's files already built ends it unrun:
     # set only where the starting tree's files are what the opening check judged
     # (no carried attempt) and no failure of its own is pending (not a retry).
@@ -358,10 +377,10 @@ def run_check(
                     owned=owned_paths(base.state, base._resolve),
                 )
             ]
-            if spec.scope:
+            if spec.scope or spec.own_tests or spec.properties:
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)
                 if test is not None:
-                    gates.append(test)
+                    gates.append(test.owning(spec.own_tests, spec.properties))
             if spec.smoke and profile is not None and profile.smoke_cmd and not profile.unavailable:
                 from foundry.gates.smoke import SmokeGate
 
@@ -370,9 +389,40 @@ def run_check(
                         profile.smoke_cmd, pyenv=pyenv, timeout_s=min(timeout, SMOKE_TIMEOUT_S)
                     )
                 )
-            if spec.smoke and (profile is None or not profile.unavailable):
-                gates.append(launch_gate(base.state, base._resolve, profile, pyenv=pyenv))
-            return tuple(_unattested(g, work, unbuilt, root) for g in gates)
+            outcomes = [_unattested(g, work, unbuilt, root) for g in gates]
+            if (
+                (spec.smoke or spec.launch)
+                and (profile is None or not profile.unavailable)
+                # An app that does not build cannot launch: no minutes spent proving it.
+                and outcomes[0].status is GateStatus.PASS
+            ):
+                outcomes.append(
+                    _unattested(
+                        _bounded(
+                            launch_gate(base.state, base._resolve, profile, pyenv=pyenv), pyenv
+                        ),
+                        work,
+                        unbuilt,
+                        root,
+                    )
+                )
+            return tuple(outcomes)
+
+
+def _bounded(gate: GateImpl, pyenv: PythonBuildEnv | None) -> GateImpl:
+    """``gate`` (the Launch gate) with an in-session check's tighter per-request and
+    per-run limits: it runs on every check, the final gate's bounds once."""
+    from foundry.gates.launch import LaunchGate
+
+    if not isinstance(gate, LaunchGate):
+        return gate
+    return LaunchGate(
+        gate.target,
+        pyenv=pyenv,
+        boot_s=LAUNCH_BOOT_S,
+        request_s=LAUNCH_REQUEST_S,
+        cli_s=LAUNCH_CLI_S,
+    )
 
 
 @dataclass(frozen=True)
@@ -563,6 +613,13 @@ def _foreign_collection(
     return tuple(out)
 
 
+# The scoped Test gate's lines about the session's own tests and properties
+# (TestGate.owning): the gate judged them for this session only.
+_OWN_TEST_LINE = re.compile(
+    r"property \S+ (?:missing|not covered|not run|failing)\b|this ticket's own tests failed"
+)
+
+
 def judge(
     spec: CheckSpec,
     gates: tuple[GateOutcome, ...],
@@ -585,7 +642,10 @@ def judge(
     checked: list[str] = []
     for g in gates:
         if g.name == "test":
-            checked.append(f"{len(spec.scope)} scenario(s)")
+            checked.append(
+                f"{len(spec.scope)} scenario(s)"
+                + (" + your tests and properties" if spec.own_tests or spec.properties else "")
+            )
         else:
             checked.append(g.name)
         if g.status is GateStatus.ERROR:
@@ -615,6 +675,7 @@ def judge(
             and before.status is GateStatus.FAIL
             and not everything
             and not _mentions(g.findings, spec.own_files)
+            and not any(_OWN_TEST_LINE.match(line) for line in g.findings)
         ):
             # Red with no scenario to blame (a module failing to collect) and red at
             # the baseline too: not the session's unless it names the session's files.
@@ -627,7 +688,7 @@ def judge(
         pre_lines: list[str] = []
         for line in findings:
             ids = set(failing_ids([line]))
-            if ids & mine or _mentions([line], spec.own_files):
+            if ids & mine or _mentions([line], spec.own_files) or _OWN_TEST_LINE.match(line):
                 own_lines.append(line)
             elif ids:  # a pre-existing scenario, or a test of a module not the session's
                 pre_lines.append(line)

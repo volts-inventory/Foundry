@@ -285,10 +285,27 @@ def _ticket_check(
     scenarios: Mapping[str, Sequence[str]],
 ) -> CheckSpec:
     """A ticket session's gate check: the scenarios whose carriers are built once
-    this ticket is, its own among them (those it carries or owns), its files."""
+    this ticket is, its own among them (those it carries or owns), its files, the
+    tests in them and its contracts' properties. The session that completes the app
+    (every other ticket built, or the entrypoint once its dependencies are) also
+    runs the Launch gate; a red launch is the entrypoint's own."""
+    from foundry.agents.implementation.tickets.constants import CONTRACT_KIND
+    from foundry.agents.implementation.tickets.tasks import built_task_ids, read_tickets
     from foundry.gates.self_check import CheckSpec
     from foundry.graph.gate_wiring import wave_scenarios
 
+    tickets = read_tickets(state, resolve)
+    contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+    properties: dict[str, str] = {}
+    for line in ticket_properties(ticket, tickets, contracts):
+        name, _, rest = line.partition(": ")
+        pid, _, text = rest.partition(": ")
+        properties[pid] = f"{name}: {text}"
+    # Ticket ids are their task ids (task_id_for_ticket).
+    built = built_task_ids(state) | {task.id}
+    launch = (bool(tickets) and all(t.id in built for t in tickets)) or (
+        ticket.entrypoint and all(d in built for d in ticket.depends_on)
+    )
     stack = state.get("stack")
     own = frozenset(
         scenario_ref(c.ticket_id or ticket.id, c.id)
@@ -308,6 +325,11 @@ def _ticket_check(
         own_refs=own,
         own_files=tuple(ticket.files),
         rules=check_rewrites(plain, checked),
+        # A paired ticket still unbuilt writes code its tests import: judged later.
+        own_tests=tuple(ticket.files) if own <= scope else (),
+        properties=properties if own <= scope else {},
+        launch=launch,
+        own_smoke=ticket.entrypoint,
     )
 
 

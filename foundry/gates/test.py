@@ -1448,10 +1448,23 @@ def _weak_test(test: ast.expr, then: str = "") -> bool:
             return not _states_only(then, _THEN_ERROR)
         return name in ("bool", "len", "callable", "hasattr")
     if isinstance(test, ast.BoolOp):
-        return all(_weak_test(v, then) for v in test.values)
+        # `a or b` holds whenever its weakest branch does.
+        weak = any if isinstance(test.op, ast.Or) else all
+        return weak(_weak_test(v, then) for v in test.values)
     if isinstance(test, ast.Compare) and len(test.ops) == 1:
         left, right, op = test.left, test.comparators[0], test.ops[0]
         sides = (left, right)
+
+        def empty(e: ast.expr) -> bool:
+            return isinstance(e, ast.Constant) and e.value == ""
+
+        # `x != ""`, `x > ""`: truthiness spelled as a comparison.
+        if (
+            (isinstance(op, ast.NotEq) and (empty(left) or empty(right)))
+            or (isinstance(op, ast.Gt) and empty(right))
+            or (isinstance(op, ast.Lt) and empty(left))
+        ):
+            return True
         if isinstance(op, (ast.Is, ast.IsNot)) and any(
             isinstance(s, ast.Constant) and s.value in (None, True, False) for s in sides
         ):
@@ -1530,6 +1543,65 @@ def _expected_from_sut(fn: ast.FunctionDef | ast.AsyncFunctionDef, sut: set[str]
             if (ls := sorted(left & sut)) and right & sut:
                 return ls[0]
     return None
+
+
+# What a When line names literally: a route path, a CLI flag, a quoted value.
+_WHEN_ROUTE = re.compile(r"(?<![\w.:/])/(?:[\w\-.]+/?)+|(?<![\w.:/])/(?![\w/])")
+_WHEN_FLAG = re.compile(r"(?<![\w-])--?[A-Za-z][\w-]*")
+_CODE_STRING = re.compile(r"(['\"`])((?:\\.|(?!\1).)*)\1")
+
+
+def _when_fidelity(line: str, pattern: str, strings: Sequence[str]) -> str | None:
+    """A When step whose code uses a variant of a route, flag or quoted value its
+    line states (``/notes/`` for ``GET /notes``) and never the value as written: the
+    step tests around a difference the line would catch. Only values the step's
+    pattern holds literally count (a captured parameter flows in as written)."""
+    plain = re.sub(r"\\(.)", r"\1", pattern)
+
+    def norm(t: str) -> str:
+        return re.sub(r"[\W_]+", "", t.casefold())
+
+    checks: list[tuple[str, str, re.Pattern[str]]] = [
+        *(("route", t, _WHEN_ROUTE) for t in _WHEN_ROUTE.findall(line)),
+        *(("flag", t, _WHEN_FLAG) for t in _WHEN_FLAG.findall(line)),
+    ]
+    for what, token, rx in checks:
+        if token not in plain or token == "/":
+            continue
+        words = [w for text in strings for w in rx.findall(text)]
+        if token in words:
+            continue
+        if variant := next((w for w in words if norm(w) == norm(token)), None):
+            return _infidel(what, token, variant)
+    for m in _THEN_QUOTED.finditer(line):
+        token = next(g for g in m.groups() if g)
+        if token not in plain or norm(token) == "" or any(token in t for t in strings):
+            continue
+        if variant := next((t for t in strings if norm(token) in norm(t)), None):
+            return _infidel("quoted value", token, variant)
+    return None
+
+
+def _infidel(what: str, token: str, variant: str) -> str:
+    return (
+        f"is a When step that never uses the line's {what} `{token}` as written (its code "
+        f"uses `{variant[:80]}`): act exactly as the When line states — a step that "
+        "adjusts the input tests around a bug the scenario would catch"
+    )
+
+
+def _python_strings(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """The string constants the step's body uses (not its decorator's pattern, not
+    its docstring)."""
+    body = [
+        s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+    ]
+    return [
+        n.value
+        for s in body
+        for n in ast.walk(s)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
 
 
 def _python_step_lint(
@@ -1621,7 +1693,10 @@ def weak_step_notes(
         notes = [
             f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}, {d.function}) {why}'
             for kind, text, d, fn in bound
-            if (why := _python_step_lint(fn, kind, sut, text))
+            if (
+                why := _python_step_lint(fn, kind, sut, text)
+                or (_when_fidelity(text, d.text, _python_strings(fn)) if kind == "when" else None)
+            )
         ]
         if notes:
             out[ref] = tuple(dict.fromkeys(notes))
@@ -1640,6 +1715,17 @@ _JS_WEAK = re.compile(
     r"\bassert(?:\.ok)?\s*\(\s*!?[\w.$\[\]'\"]+\s*\)"
     r"|\.(toBeTruthy|toBeDefined|toBeFalsy|toBeUndefined|toBeNull)\s*\(\s*\)"
     r"|\.not\.toBeNull\s*\(\s*\)"
+)
+# One branch of an assert's condition that holds for nearly any value: a bare
+# value (truthiness), `x !== ""`, `x > ""`, `x.length > 0`, `x != null`.
+_JS_WEAK_BRANCH = re.compile(
+    r"^!*[\w.$\[\]'\"]+$"
+    r"|^[^=<>!]+(?:!==?|>)\s*(?:''|\"\"|``)$|^(?:''|\"\"|``)\s*(?:!==?|<)[^=<>!]+$"
+    r"|\.length\s*(?:>|!==?)\s*0$|^[^=<>!]+!==?\s*(?:null|undefined)$"
+)
+# A Go failure condition (`if <cond> { fail }`) that only rejects an empty value.
+_GO_WEAK_BRANCH = re.compile(
+    r'^[\w.]+\s*==\s*(?:""|nil)$|^len\([^()]*\)\s*(?:==|<)\s*[01]$|^![\w.]+$'
 )
 _GO_ASSERT = re.compile(r"\b(assert|require)\.\w+\(|\bt\.(Error|Fatal)")
 _GO_CHECK = re.compile(r"\bif\b|\b(assert|require)\.\w+\(|Errorf\(|errors\.New\(|\bpanic\(")
@@ -1712,6 +1798,61 @@ def _cucumber_step_defs(root: Path, language: str) -> list[tuple[str, str, str, 
     return out
 
 
+def _paren(text: str) -> str:
+    """The text inside the first balanced ``(...)`` of ``text``."""
+    i = text.find("(")
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[j], 0)
+        if depth == 0:
+            return text[i + 1 : j]
+    return text[i + 1 :]
+
+
+def _branches(cond: str, op: str) -> list[str]:
+    """``cond`` split on top-level ``op`` (``||`` / ``&&``), outer parens dropped."""
+    parts: list[str] = []
+    depth, start, i = 0, 0, 0
+    while i < len(cond):
+        c = cond[i]
+        depth += {"(": 1, ")": -1, "[": 1, "]": -1}.get(c, 0)
+        if depth == 0 and cond.startswith(op, i):
+            parts.append(cond[start:i])
+            start = i = i + len(op)
+            continue
+        i += 1
+    parts.append(cond[start:])
+    out = []
+    for p in parts:
+        p = p.strip()
+        while p.startswith("(") and p.endswith(")") and _paren(p) == p[1:-1]:
+            p = p[1:-1].strip()
+        out.append(p)
+    return out
+
+
+def _js_weak_check(check: str) -> bool:
+    """An ``assert(...)``/``assert.ok(...)``/``expect(...).toBe(true)`` whose
+    condition is weak: any ``||`` branch weak, or the whole a weak comparison."""
+    head = check.lstrip()
+    if head.startswith("expect"):
+        if not re.search(r"\)\s*\.(?:toBe\(\s*true\s*\)|toBeTruthy\(|toEqual\(\s*true)", head):
+            return False
+    elif not re.match(r"assert(?:\.ok)?\s*\(", head):
+        return False
+    cond = " ".join(_paren(head).split())
+    return any(_JS_WEAK_BRANCH.search(b) for b in _branches(cond, "||"))
+
+
+def _go_weak_cond(cond: str) -> bool:
+    """A Go failure condition that passes nearly any value: it fails only on an
+    empty one, or (an ``&&`` of failure conditions is an ``or`` of checks) any
+    branch does."""
+    return any(_GO_WEAK_BRANCH.search(b) for b in _branches(" ".join(cond.split()), "&&"))
+
+
 def _cucumber_lint(kind: str, body: str, language: str, then: str = "") -> str | None:
     code = re.sub(r"//[^\n]*|/\*.*?\*/", "", body, flags=re.S)
     if kind == "when":
@@ -1739,6 +1880,12 @@ def _cucumber_lint(kind: str, body: str, language: str, then: str = "") -> str |
                 "is a Then step whose only check is the exit code: check the actual "
                 f"output, e.g. `{_then_example(then, language)}`"
             )
+        if conds and not _GO_ASSERT.search(code) and all(_go_weak_cond(c) for c in conds):
+            return (
+                "is a Then step whose only check is that a value is non-empty (any branch "
+                "of an `or` that passes on any value makes the whole check pass): check the "
+                f"actual output, e.g. `{_then_example(then, language)}`"
+            )
         return None
     checks = [
         m.group(0)
@@ -1750,7 +1897,8 @@ def _cucumber_lint(kind: str, body: str, language: str, then: str = "") -> str |
         return "is a Then step that checks nothing (no assert or expect)"
     error_ok = _states_only(then, _THEN_ERROR)
     if all(
-        (_JS_WEAK.search(c) or _EXIT_TEXT.search(c)) and not (error_ok and _JS_ERROR_TYPE.search(c))
+        (_JS_WEAK.search(c) or _EXIT_TEXT.search(c) or _js_weak_check(c))
+        and not (error_ok and _JS_ERROR_TYPE.search(c))
         for c in checks
     ):
         return (
@@ -1780,7 +1928,10 @@ def cucumber_weak_step_notes(
                         continue
                 except re.error:
                     continue
-                if why := _cucumber_lint(kind, body, language, text):
+                strings = [m.group(2) for m in _CODE_STRING.finditer(body)]
+                if why := _cucumber_lint(kind, body, language, text) or (
+                    _when_fidelity(text, pattern, strings) if kind == "when" else None
+                ):
                     notes.append(f"step `{text}` ({where}) {why}")
                 break
         if notes:

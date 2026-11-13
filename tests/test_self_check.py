@@ -792,6 +792,68 @@ def test_a_build_error_new_since_the_opening_is_the_sessions_even_in_another_fil
     assert not session.check({"app.py": "b"}, ()).red
 
 
+def test_another_tickets_module_that_stops_collecting_points_at_the_changed_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.gates.test import UNCOLLECTED_FIX
+
+    ref = "features/T1.feature::T1-AC-1"
+    green = GateOutcome("test", GateStatus.PASS, (), {ref: "passed"})
+    broke = GateOutcome(
+        "test",
+        GateStatus.FAIL,
+        (
+            f"BDD criterion T1-AC-1: scenario {ref} was not executed — "
+            "tests/step_defs/test_t1.py binds it, but pytest failed to import that module "
+            "(`ERROR collecting tests/step_defs/test_t1.py` in the output), so none of its "
+            f"scenarios ran: {UNCOLLECTED_FIX}",
+        ),
+        {ref: "missing"},
+    )
+    calls: list[Any] = []
+    monkeypatch.setattr(self_check, "run_check", _fake_run([(green,), (broke,)], calls))
+    spec = CheckSpec(
+        base=_fake_base(tmp_path),
+        scope=frozenset({ref}),
+        own_refs=frozenset(),
+        own_files=("pyproject.toml", "app/cli.py"),
+    )
+    session = SessionCheck(spec)
+    assert not session.opening().red
+    v = session.check({"pyproject.toml": "[tool.pytest.ini_options]\n", "app/cli.py": "x"}, ())
+    text = "\n".join(v.yours)
+    assert v.red and UNCOLLECTED_FIX not in text, text
+    assert "you changed (pyproject.toml)" in text and "not tests/step_defs/test_t1.py" in text
+    assert "the fix is not in tests/step_defs/test_t1.py" in text
+
+
+def test_a_foreign_module_failing_at_the_opening_gets_no_config_note() -> None:
+    from foundry.gates.test import UNCOLLECTED_FIX
+
+    line = (
+        "BDD criterion T1-AC-1: scenario f::T1-AC-1 was not executed — tests/test_t1.py "
+        f"binds it, but pytest failed to import that module: {UNCOLLECTED_FIX}"
+    )
+    red = GateOutcome("test", GateStatus.FAIL, (line,), {"f::T1-AC-1": "missing"})
+    spec = CheckSpec(
+        base=None,  # type: ignore[arg-type]
+        scope=frozenset({"f::T1-AC-1"}),
+        own_refs=frozenset(),
+        own_files=("conftest.py",),
+    )
+    assert self_check._foreign_collection(spec, red, red, ("conftest.py",)) == (line,)
+    # Nothing changed and nothing owned configures the harness: the advice still moves.
+    spec2 = CheckSpec(
+        base=None,  # type: ignore[arg-type]
+        scope=frozenset(),
+        own_refs=frozenset(),
+        own_files=("app.py",),
+    )
+    green = GateOutcome("test", GateStatus.PASS, ())
+    out = self_check._foreign_collection(spec2, red, green, ())
+    assert UNCOLLECTED_FIX not in "\n".join(out) and "your own changes" in out[0]
+
+
 def test_sessions_with_one_scope_share_one_opening_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

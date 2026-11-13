@@ -481,12 +481,17 @@ def uncollected_binding_reasons(output: str, workdir: Path, refs: list[str]) -> 
                 f"was not executed — {', '.join(mods)} {'binds' if one else 'bind'} it, "
                 f"but pytest failed to import {'that module' if one else 'those modules'} "
                 f"(`ERROR collecting {mods[0]}` in the output), so none of "
-                f"{'its' if one else 'their'} scenarios ran: fix the import error the "
-                "traceback shows "
-                "(a missing module, a name the code under test does not define); the "
-                "`scenarios(...)` binding is already in place, keep it"
+                f"{'its' if one else 'their'} scenarios ran: {UNCOLLECTED_FIX}"
             )
     return out
+
+
+# The self-check swaps this advice out when the module is another ticket's
+# (foundry/gates/self_check.py): its fix is then in the session's own files.
+UNCOLLECTED_FIX = (
+    "fix the import error the traceback shows (a missing module, a name the code under "
+    "test does not define); the `scenarios(...)` binding is already in place, keep it"
+)
 
 
 def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:

@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.runnables import RunnableConfig
 
 from foundry.agents.implementation.junior_engineer import _fix_summary, make_fixer_node
@@ -1697,8 +1698,10 @@ def test_a_fix_pass_summary_lists_only_its_cluster(monkeypatch) -> None:
         "[fix summary]",
         "this pass fixes ONE failure cluster: ticket:T-002 (2 failure(s), listed below); "
         "every one of them is yours",
-        "other failures, handled by another pass (tests/test_a.py::test_alpha): not yours "
-        "and not pre-existing; don't touch them",
+        "other failures, each the target of a later pass of this fix loop "
+        "(tests/test_a.py::test_alpha): the re-check after your pass still judges them "
+        "and the next passes go after them; not yours and not pre-existing; don't touch "
+        "them",
         "failed gates: test",
         "failing tests/scenarios: tests/test_b.py::test_1, tests/test_b.py::test_2",
     )
@@ -2676,3 +2679,54 @@ def test_a_fixer_pass_is_fenced_to_its_cluster_and_its_owning_tickets(
     fence = _fix_files(state, store.resolve, tree)
     assert {"tests/test_a.py", "tests/steps/test_t1.py", "a.py"} <= set(fence)
     assert "admin.py" not in fence and "tests/test_b.py" not in fence
+
+
+def test_a_wave_re_check_judges_every_failure_its_window_opened_on(
+    monkeypatch: Any,
+) -> None:
+    """Round 4 (notes): fix-1 and fix-2, aimed at T2's and T5's clusters, each closed
+    their window green while T1's property tests and T3's PR9-11 from the window's
+    initial failures still failed: the re-check never ran them again."""
+    import foundry.graph.gate_wiring.wave_check as wave_check
+
+    class _Ran(Exception):
+        pass
+
+    seen: list[tuple[str, ...]] = []
+
+    def spy(*args: Any, carry: Any = (), **kwargs: Any) -> Any:
+        seen.append(tuple(carry))
+        raise _Ran
+
+    monkeypatch.setattr(wave_check, "run_build_gate", spy)
+    store = ArtifactStore()
+    check = WaveBuildCheck(
+        _runtime(_Recorder(writes={}), store),
+        None,  # type: ignore[arg-type]
+        store.resolve,
+        store.resolve_blob,
+        check_scenarios=False,
+        check_launch=False,
+    )
+    state: FactoryState = {"artifacts": [], "gates": [], "fix_passes": []}
+    window = fix_window(state, BUILD_BOUNDARY, frozenset())
+    initial = ("test:tests/test_t1.py::TestDatabaseProperties", "test:property:PR9")
+
+    def entry(window: str, pass_no: int, failing: tuple[str, ...], epoch: int) -> FixPass:
+        return FixPass(
+            window=window,
+            boundary=BUILD_BOUNDARY,
+            pass_no=pass_no,
+            tree=f"t{epoch}",
+            failing=failing,
+            outcome="improved" if pass_no else "initial",
+            seq=Seq("run", epoch, 0, "fix_pass", 0),
+        )
+
+    earlier = entry("an earlier wave", 0, ("test:tests/test_t0.py::test_x",), 1)
+    state["fix_passes"] = [earlier, entry(window, 1, (), 3), entry(window, 0, initial, 2)]
+    cfg: Any = {"configurable": {"thread_id": "wave-run"}}
+    for s in (state, {**state, "fix_passes": [earlier]}):
+        with pytest.raises(_Ran):
+            check.run(s, cfg)
+    assert seen == [initial, ()]

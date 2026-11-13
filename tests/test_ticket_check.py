@@ -183,26 +183,30 @@ def _contract_state(*tickets: Ticket) -> tuple[dict[str, Any], Any, Any]:
     return state, resolving, resolve_blob
 
 
-def test_the_wave_check_judges_the_built_tickets_tests_and_properties(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from types import SimpleNamespace
-
+def test_the_wave_check_judges_the_built_tickets_tests_and_properties() -> None:
+    """Round 4 (notes): a built ticket whose scenarios were not all in the wave's
+    scope had its tests and properties skipped, so the wave check passed while T1's
+    property tests and T3's PR9-11 failed."""
     import foundry.graph.gate_wiring.runs as runs
 
     t0 = _ticket("T0", files=("app.py", "tests/test_app.py"), implements=("notes",))
     t1 = _ticket("T1", "T0", files=("tests/test_t1.py",), implements=("notes",))  # unbuilt
     state, resolve, _ = _contract_state(t0, t1)
-    tests, props = runs.wave_owned_tests(state, resolve, frozenset())
+    tests, props = runs.wave_owned_tests(state, resolve)
     assert tests == t0.files
     assert props == {"PR1": "notes: titles stay unique"}
-    # T0's scenario outside the wave's scope (a paired ticket carrying it is unbuilt):
-    # its tests need code nobody wrote yet, so a later wave judges them.
-    ac = SimpleNamespace(id="AC-1", ticket_id="T0")
-    monkeypatch.setattr(runs, "_current_criteria", lambda state, resolve: {"AC-1": ac})
-    assert runs.wave_owned_tests(state, resolve, frozenset()) == ((), {})
-    ref = scenario_ref("T0", "AC-1")
-    assert runs.wave_owned_tests(state, resolve, frozenset({ref}))[0] == t0.files
+    # A fix window's initial failures are judged again, whoever owns them.
+    carry = (
+        "test:tests/test_t3.py::test_pr9_get_note_non_owner_raises",
+        "test:tests/test_t1.py::TestDatabaseProperties",
+        "test:tests/test_broken.py",
+        "test:features/T1.feature::SCN-DB-2",
+        "test:property:PR9",
+        "build:app.py:1: error",
+    )
+    tests, props = runs.wave_owned_tests(state, resolve, carry)
+    assert tests == (*t0.files, "tests/test_t3.py", "tests/test_t1.py", "tests/test_broken.py")
+    assert props == {"PR1": "notes: titles stay unique", "PR9": "contract property PR9"}
 
 
 def test_the_wave_checks_test_gate_owns_the_built_tickets_tests(

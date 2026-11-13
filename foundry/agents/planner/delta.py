@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
@@ -11,11 +12,12 @@ from foundry.agents._common import as_text
 from foundry.agents.plan_contracts import CompileResult
 from foundry.agents.planner.assembly import _assemble, _Frame
 from foundry.agents.planner.build import _EPIC_KEY
-from foundry.agents.planner.checks import _goals_text
+from foundry.agents.planner.checks import _goals_text, finding_kind
 from foundry.agents.planner.readers import _objs, _steps, _str, _strs
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS, _SAFE_TICKET_ID
 from foundry.gates.spec import _REQUIRED_FIELDS as _GATE_FIELDS
 from foundry.gates.spec import _incomplete_steps
+from foundry.schemas.architecture import PROPERTY_KINDS, InterfaceContract
 from foundry.schemas.product import AcceptanceCriterion, IntentBrief
 from foundry.telemetry import count
 
@@ -28,6 +30,11 @@ def _ticket_frame(frame: _Frame) -> _Frame:
     )
 
 
+# Contract findings the delta closes itself, through its contract_properties: the
+# rest of a contract stays fixed.
+_CONTRACT_PATCHABLE = frozenset({"contract-no-properties"})
+
+
 def _patchable(
     findings: Iterable[str],
     items: Sequence[dict[str, Any]],
@@ -36,11 +43,43 @@ def _patchable(
 ) -> bool:
     """True when there are tickets to patch, none was dropped at a cap (the full
     re-plan consolidates so no work is lost) and the tickets alone reproduce every
-    finding: one the contracts or the run command cause needs a full re-plan."""
+    finding but a contract's missing properties (the delta adds those): one the rest
+    of the contracts or the run command cause needs a full re-plan."""
     if not items or overflow:
         return False
     fit = _assemble(items, _ticket_frame(frame))
-    return not fit.overflow and set(findings) <= set(fit.blocking)
+    rest = {f for f in findings if finding_kind(f) not in _CONTRACT_PATCHABLE}
+    return not fit.overflow and rest <= set(fit.blocking)
+
+
+_PROPERTY_ID = re.compile(r"PR\d+")
+
+
+def _delta_properties(
+    interfaces: Sequence[InterfaceContract], delta: dict[str, Any]
+) -> list[InterfaceContract]:
+    """``interfaces`` with the delta's contract_properties appended to the function
+    and class contracts they name, each id kept when it is a PR<n> no property in the
+    plan holds, else given the next free one (the Test gate finds a property's test by
+    its id). An entry naming no such contract is ignored: the check still faults it."""
+    taken = {p.partition(":")[0] for c in interfaces for p in c.properties}
+    added: dict[str, list[str]] = {}
+    for entry in _objs(delta.get("contract_properties")):
+        name = _str(entry.get("contract")).strip()
+        for p in _objs(entry.get("properties")):
+            if not (text := _str(p.get("text")).strip()):
+                continue
+            pid = _str(p.get("id")).strip().upper()
+            if not _PROPERTY_ID.fullmatch(pid) or pid in taken:
+                pid = next(f"PR{n}" for n in range(1, len(taken) + 2) if f"PR{n}" not in taken)
+            taken.add(pid)
+            added.setdefault(name, []).append(f"{pid}: {text}")
+    return [
+        c.model_copy(update={"properties": (*c.properties, *added[c.name])})
+        if c.name in added and c.kind in PROPERTY_KINDS
+        else c
+        for c in interfaces
+    ]
 
 
 def _structural_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
@@ -127,7 +166,7 @@ def _delta_text(
         f"REQUEST:\n{request}\n\nPLAN CHECK FINDINGS:\n- "
         + "\n- ".join(findings)
         + _goals_text(brief)
-        + "\n\nINTERFACE CONTRACTS (fixed):\n"
+        + "\n\nINTERFACE CONTRACTS (fixed but for their properties):\n"
         + (
             "\n".join(f"- {n}: {spec}" if n in used else f"- {n}" for n, spec in contracts)
             or "(none)"
@@ -167,7 +206,7 @@ def _merge_delta(
             upserts[tid] = {k: v for k, v in u.items() if not k.startswith("__")}
     removed = set(_strs(delta.get("remove_tickets")))
     dropped = set(_strs(delta.get("remove_scenarios")))
-    if not (upserts or removed or dropped):
+    if not (upserts or removed or dropped or _objs(delta.get("contract_properties"))):
         _rejected("it changes nothing")
         return None
     summarized = {i["id"] for i in items} - shown

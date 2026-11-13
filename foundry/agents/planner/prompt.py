@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -190,7 +191,7 @@ def _repair_block(
     findings: Iterable[str], plan: str, source: tuple[str, str] = _GATE, what: str = "plan"
 ) -> str:
     """A repair of the failed ``plan`` (shown whole) rather than a re-plan from
-    scratch: it runs at lower thinking effort, so it must not re-derive the rest."""
+    scratch: it is an edit of what the findings name, so it must not re-derive the rest."""
     return (
         f"\n\nREPAIR PASS — {source[0]} faulted your previous {what}, shown in full below. "
         "Correct it in place: keep every id (epics, tickets, scenarios, must-haves, "
@@ -234,12 +235,41 @@ def _revision_text(state: FactoryState, rt: AgentRuntime, plan: str = "") -> str
     )
 
 
+# A review "gap" the review itself rules outside the spec or defers ("the spec does
+# not mention CSRF ... flagged for a future iteration"): not a gap of this plan.
+_OUT_OF_SPEC = re.compile(
+    r"(?i)\bout[- ]of[- ]scope\b"
+    r"|\bnot (?:in|part of|required by|requested (?:by|in)|mentioned (?:in|by)"
+    r"|specified (?:in|by)|asked for (?:in|by)) the (?:design )?(?:spec\w*|request|requirements)"
+    r"|\b(?:spec\w*|request|requirements) (?:does not|doesn't|do not|don't|never) "
+    r"(?:mention|ask|require|request|specify|call for|name)"
+    r"|\b(?:future|later|next|subsequent) (?:iteration|release|version|phase)"
+    r"|\bdeferred\b"
+)
+
+
+def _review_missing(review: dict[str, Any]) -> tuple[str, ...]:
+    """``review``'s in-scope missing gaps: one it says the spec does not ask for, or
+    defers, is left out (see :func:`_review_deferred`)."""
+    return tuple(m for m in _strs(review.get("missing")) if not _OUT_OF_SPEC.search(m))
+
+
+def _review_deferred(review: dict[str, Any]) -> tuple[str, ...]:
+    """What ``review`` notes beyond the spec: its out_of_scope entries and the
+    missing ones it rules out of scope itself. Never blocking."""
+    return (
+        *_strs(review.get("out_of_scope")),
+        *(m for m in _strs(review.get("missing")) if _OUT_OF_SPEC.search(m)),
+    )
+
+
+def _deferred_concerns(review: dict[str, Any]) -> list[str]:
+    return [f"Out of scope (self-review): {d}" for d in _review_deferred(review)]
+
+
 def _self_review_gaps(payload: dict[str, Any]) -> tuple[str, ...]:
     review = _section(payload, "criteria_review")
-    return (
-        *_strs(review.get("security_abuse_omissions")),
-        *_strs(review.get("missing")),
-    )
+    return (*_strs(review.get("security_abuse_omissions")), *_review_missing(review))
 
 
 def _self_revision_text(gaps: tuple[str, ...], what: str = "plan") -> str:

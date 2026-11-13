@@ -39,7 +39,7 @@ def _iface(name: str, kind: str, *props: tuple[str, str]) -> dict[str, object]:
 
 def test_planner_parses_properties_with_unique_ids() -> None:
     schema = PLAN_SCHEMA["properties"]["interfaces"]["items"]
-    assert "properties" in schema["properties"] and "properties" not in schema["required"]
+    assert "properties" in schema["properties"] and "properties" in schema["required"]
     raw = [
         _iface("roll", "function", ("PR1", "total within [min, max]"), ("pr2", "same seed")),
         # A repeated id and a free-form one are renumbered past every planned id.

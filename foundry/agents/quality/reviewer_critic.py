@@ -275,12 +275,11 @@ def review_tree(
 
 def _prior_review(
     state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
-) -> tuple[GateResult, dict[str, str]] | None:
-    """The run's newest review verdict and the files of the tree it judged, or
-    ``None`` before the first review, when that review did not see its whole
-    change (truncated, or recorded before completeness was), or when that tree's
-    snapshot is not on state or no longer resolves (a resume without the store):
-    the review is then full."""
+) -> tuple[GateResult, dict[str, str], bool] | None:
+    """The run's newest review verdict, the files of the tree it judged and whether
+    it saw its whole change, or ``None`` before the first review, or when that
+    tree's snapshot is not on state or no longer resolves (a resume without the
+    store): the review is then full."""
     from foundry.graph.gate_wiring import MaterializationError, snapshot_files
 
     reviews = [g for g in state.get("gates") or () if g.name == _GATE_NAME]
@@ -295,10 +294,8 @@ def _prior_review(
         except UnknownArtifactError:
             continue
         if isinstance(body, ReviewedTree) and body.verdict_seq == prior.seq:
-            if not body.complete:
-                return None
             try:
-                return prior, snapshot_files(body.snapshot_uri, resolve_blob)
+                return prior, snapshot_files(body.snapshot_uri, resolve_blob), body.complete
             except (UnknownArtifactError, MaterializationError):
                 return None
     return None
@@ -549,12 +546,12 @@ def review(
     ``criteria`` (when given) are put in front of the judge so it reviews against
     them. ``resolve`` / ``resolve_blob`` rebuild the tree under review so only gate
     verdicts on that tree can back a finding. ``tree`` is that tree already built
-    (:func:`review_tree`): when the run's last review saw its whole change and left
-    a snapshot of the tree it judged, and the change since fits untruncated, this
-    review is sent only that change and that verdict's findings, at medium local
-    thinking, and still answers for the whole tree. Returns the
+    (:func:`review_tree`): when the run's last review left a snapshot of the tree
+    it judged, this review is sent only the change since and that verdict's
+    findings, and still answers for the whole tree. Returns the
     :class:`JudgmentResult`, the advisory journal entry, and whether this review
-    saw its whole change (what a :class:`ReviewedTree` records as ``complete``).
+    and every one it builds on saw its whole change (what a :class:`ReviewedTree`
+    records as ``complete``).
     """
     # Seq.node_id MUST equal the node_id passed to judge() — the binding
     # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
@@ -600,9 +597,11 @@ def review(
     delta: str | None = None
     keep = _always_shown(rt, state)
     if prior is not None and tree is not None:
+        # Always the delta after a fix, even when the last review or this delta was
+        # truncated: a full re-review re-reads the same capped head of the change
+        # (a local re-review cost the first one's 15 minutes again) and sees no
+        # more of the tree than the delta and the open findings do.
         delta, whole = _delta_text(prior[1], tree[1], keep)
-        if not whole:
-            prior = delta = None
     content = (
         f"Review the artifact under {subject_uri} against the spec, the contracts and "
         "the acceptance criteria. Emit your verdict."
@@ -634,7 +633,7 @@ def review(
             return "\n\nThe change (unified diffs, applied in order):\n" + change
 
     else:
-        verdict, complete, diff = prior[0], True, delta
+        verdict, complete, diff = prior[0], prior[2] and whole, delta
 
         def body(change: str) -> str:
             return (

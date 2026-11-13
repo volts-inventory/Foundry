@@ -443,24 +443,40 @@ LOCAL_THINKING_ENV = "FOUNDRY_LOCAL_THINKING"
 LocalThinking = Literal["off", "on", "agent"]
 _LOCAL_THINKING_MODES: tuple[LocalThinking, ...] = ("off", "on", "agent")
 _AGENT_NODE_IDS = frozenset({"junior_engineer"})
+_PLANNER_NODE_IDS = frozenset({"planner"})
 # The output-token floor per thinking level: a thinking turn spends its reasoning
 # out of the answer's budget, and at xhigh a hard ticket or the planner's plan JSON
 # can think for 20K+ tokens first, so xhigh gets what a 128K context leaves after
 # the prompt. Low keeps medium's floor: the answer (a whole file) still needs room.
 _LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, "xhigh": 98304}
 # Reasoning a local call may stream before its answer starts; past it the call is
-# aborted and retried a level lower (``ThinkingBudgetExceeded``). Agent turns: in
-# cached local bench runs a successful turn reasoned p99 ~3K tokens, max ~7K, while
-# one runaway medium turn thought 38K tokens (31 min) into a length stop. A verdict
-# of at most 10 findings needs little more. Every other call (a plan reasons ~30K+
-# tokens) is bounded only once its answer could no longer fit.
+# aborted and retried a level lower (``ThinkingBudgetExceeded``), and a retry never
+# gets more than the budget the aborted attempt ran past. Sized from the cached
+# calls of three local bench rounds (qwen3.8 27B, ~22 tok/s, ~4.5 reasoning chars
+# a token):
+# - Agent turns (501): reasoning p95 ~2.2K tokens, p98 ~3.8K, p99 ~4.9K; only 5
+#   turns reasoned more (7.6K-22K), and every answer after an abort was trivial (a
+#   16-token read_file). At the old 12K medium an abort cost ~9.3 minutes before
+#   its retry; 5K is ~4 minutes and cuts ~1% of turns.
+# - Verdicts (8): 3.5K-8K tokens; the two that reasoned ~12K (15K output, ~15
+#   minutes against 6.3K on the same input) re-found the same findings.
+# - Plans (10): the seven full plans reasoned ~20K-27K tokens (71K-104K chars), so
+#   medium's 32K cuts none; the three repairs/deltas under 3K, so 24K for a repair
+#   (xhigh) and a delta still leaves them 8x. A 93-minute planner repair ran
+#   unbounded before this table had a planner row.
+# Every other call is bounded only once its answer could no longer fit.
 _LOCAL_REASONING_BUDGETS: dict[str, dict[Effort, int]] = {
-    "agent": {"low": 8192, "medium": 12288, "xhigh": 24576},
-    "judgment": {"low": 16384, "medium": 24576, "xhigh": 49152},
+    "agent": {"low": 3072, "medium": 5120, "xhigh": 10240},
+    "judgment": {"low": 8192, "medium": 12288, "xhigh": 24576},
+    "planner": {"low": 16384, "medium": 32768, "xhigh": 24576},
 }
 # The least output an answer needs: reasoning that leaves less room than this under
-# ``max_tokens`` can only end in a length stop.
+# ``max_tokens`` can only end in a length stop. A plan's JSON runs 5K-11K tokens, so
+# its reserve also caps a delta (32K output) at ~24K of reasoning.
 _ANSWER_RESERVE_TOKENS = 4096
+_PLAN_ANSWER_RESERVE_TOKENS = 8192
+# The request fields that set a local call's thinking level and its budget.
+_EFFORT_FIELDS = ("local_thinking", "local_effort", "local_reasoning_budget")
 # Run fire count of each local attempt sent (not replayed), by the thinking level it
 # was sent at (a retry may lower it) or "off".
 EFFORT_COUNT_PREFIX = "effort."
@@ -493,8 +509,10 @@ def local_thinking_for(model_id: str, setting: LocalThinking | None, *, agent: b
 
 def _reasoning_budgets(kind: str | None, max_tokens: int) -> dict[Effort, int]:
     """Each thinking level's reasoning budget for a call of ``kind`` ("agent",
-    "judgment", or None for any other) whose output is capped at ``max_tokens``."""
-    doomed = max(max_tokens - _ANSWER_RESERVE_TOKENS, max_tokens // 2)
+    "judgment", "planner", or None for any other) whose output is capped at
+    ``max_tokens``."""
+    reserve = _PLAN_ANSWER_RESERVE_TOKENS if kind == "planner" else _ANSWER_RESERVE_TOKENS
+    doomed = max(max_tokens - reserve, max_tokens // 2)
     table = _LOCAL_REASONING_BUDGETS.get(kind or "", {})
     return {level: min(table.get(level, doomed), doomed) for level in _LOCAL_THINKING_MAX_TOKENS}
 
@@ -692,10 +710,34 @@ def _lower_effort(request: dict[str, Any]) -> dict[str, Any]:
             lowered["local_effort"] = "medium"
         else:
             lowered["local_thinking"] = False
-    if "local_sampling" in lowered:
-        profile = {k: v for k, v in lowered["local_sampling"].items() if k != "seed"}
-        lowered["local_sampling"] = _seeded(lowered, profile)
-    return lowered
+    return _reseeded(lowered)
+
+
+def _reseeded(request: dict[str, Any]) -> dict[str, Any]:
+    """``request`` with its local sampling seed re-derived from it."""
+    if "local_sampling" in request:
+        profile = {k: v for k, v in request["local_sampling"].items() if k != "seed"}
+        request = {**request, "local_sampling": _seeded(request, profile)}
+    return request
+
+
+def _capped_budgets(request: dict[str, Any], cap: int) -> dict[str, Any]:
+    """``request`` with no thinking level's reasoning budget above ``cap``."""
+    budgets = request.get("local_reasoning_budget")
+    if not isinstance(budgets, dict):
+        return request
+    return {**request, "local_reasoning_budget": {k: min(v, cap) for k, v in budgets.items()}}
+
+
+def _session_key(
+    node_id: str, tier: str, system_sop: str, messages: Sequence[dict[str, Any]]
+) -> str | None:
+    """An agent session's identity: its node, tier, SOP and opening message (the
+    packet prompt, which every turn of the session resends first, unchanged)."""
+    if not messages:
+        return None
+    opening = json.dumps([node_id, tier, system_sop, messages[0]], sort_keys=True, default=str)
+    return hashlib.sha256(opening.encode()).hexdigest()
 
 
 def _with_parse_correction(
@@ -730,7 +772,7 @@ def _with_parse_correction(
     else:
         messages.append({"role": "user", "content": note.strip()})
     base = previous if previous is not None else request
-    effort = {k: base[k] for k in ("local_thinking", "local_effort") if k in base}
+    effort = {k: base[k] for k in _EFFORT_FIELDS if k in base}
     return _lower_effort({**request, **effort, "messages": messages})
 
 
@@ -1143,6 +1185,9 @@ class ModelProviderProxy:
         self._local_thinking = parse_local_thinking(
             os.environ.get(LOCAL_THINKING_ENV, "") if local_thinking is None else local_thinking
         )
+        # Agent session (see _session_key) -> the effort fields its last aborted turn
+        # stepped down to: its later turns start there.
+        self._lowered_sessions: dict[str, dict[str, Any]] = {}
         self._lineage = lineage_map or LineageMap()
         self._signer = signer
         # Backend/model-aware determinism control (arch §8): which knob a
@@ -1311,7 +1356,15 @@ class ModelProviderProxy:
         if max_tokens is not None:
             request["max_tokens"] = min(int(request["max_tokens"]), max_tokens)
         if thinking:
-            kind = "agent" if agent_turn else "judgment" if purpose == "judgment" else None
+            kind = (
+                "agent"
+                if agent_turn
+                else "judgment"
+                if purpose == "judgment"
+                else "planner"
+                if node_id in _PLANNER_NODE_IDS
+                else None
+            )
             request["local_reasoning_budget"] = _reasoning_budgets(kind, int(request["max_tokens"]))
         if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
@@ -1339,7 +1392,16 @@ class ModelProviderProxy:
             progress.log(f"start {label}")
             started = time.monotonic()
             response, parsed = self._send_with_retry(
-                request, schema=schema, tier=tier, label=label, capped=max_tokens is not None
+                request,
+                schema=schema,
+                tier=tier,
+                label=label,
+                capped=max_tokens is not None,
+                session=(
+                    _session_key(node_id, tier, system_sop, messages)
+                    if thinking and agent_turn
+                    else None
+                ),
             )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
@@ -1634,8 +1696,14 @@ class ModelProviderProxy:
         tier: str | None = None,
         label: str | None = None,
         capped: bool = False,
+        session: str | None = None,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
+
+        ``session`` names the agent session the call is a turn of: once one of its
+        turns ran past its reasoning budget, its later turns start at the level that
+        turn stepped down to. ``request`` (the cache key) keeps its own level, so a
+        restarted run still replays those turns.
 
         When a ``schema`` is set the structured-output PARSE is part of the
         retried unit: a CLI backend that returns prose / a fence / empty for a
@@ -1666,6 +1734,9 @@ class ModelProviderProxy:
             progress.log(f"{what} — {reason} [{n}/{budget + 1}], waiting {wait:.0f}s")
 
         sent = request
+        lowered = self._lowered_sessions.get(session) if session is not None else None
+        if lowered is not None:
+            sent = _reseeded({**request, **lowered})
         while True:
             # Every attempt, not only the first: a local call can run many minutes,
             # and its retries must not carry a run far past its caps.
@@ -1712,8 +1783,15 @@ class ModelProviderProxy:
                         request, over.response, attempt + 1, str(over), previous=sent
                     )
                 else:
-                    effort = {k: sent[k] for k in ("local_thinking", "local_effort") if k in sent}
+                    effort = {k: sent[k] for k in _EFFORT_FIELDS if k in sent}
                     sent = _lower_effort({**request, **effort})
+                # A lower level's own budget can be the larger (a planner repair
+                # thinks at xhigh under medium's budget): never retry into more.
+                sent = _capped_budgets(sent, over.budget)
+                if session is not None:
+                    self._lowered_sessions[session] = {
+                        k: sent[k] for k in _EFFORT_FIELDS if k in sent
+                    }
                 continue
             except Exception as exc:
                 if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):

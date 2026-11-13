@@ -1549,21 +1549,31 @@ def _stream_client(stream: FakeStream) -> Any:
     )
 
 
-def test_reasoning_budgets_are_per_call_kind_and_never_squeeze_the_planner() -> None:
+def test_reasoning_budgets_are_per_call_kind() -> None:
     local = RecordingTransport()
     proxy = _local_proxy(local)
     msgs = [{"role": "user", "content": "x"}]
     proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation")
     proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", effort="medium")
-    proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation")
+    proxy.complete("planner", "T2", "SOP", msgs, purpose="ideation", effort="xhigh")
+    proxy.complete(
+        "planner", "T2", "SOP", msgs, purpose="ideation", effort="medium", max_tokens=32000
+    )
     proxy.complete(
         "reviewer", "T2", "SOP", msgs, purpose="judgment", effort="low", max_tokens=24576
     )
-    agent, plan, repair, review = (r["local_reasoning_budget"] for r in local.requests)
-    assert agent == {"low": 8192, "medium": 12288, "xhigh": 24576}
-    # A plan is cut only once its answer could no longer fit under the output cap.
-    assert plan["medium"] == 40960 - 4096 and repair["xhigh"] == 98304 - 4096
-    assert review["low"] == 16384
+    proxy.complete("architect", "T2", "SOP", msgs, purpose="ideation")
+    agent, plan, repair, delta, review, other = (
+        r["local_reasoning_budget"] for r in local.requests
+    )
+    assert agent == {"low": 3072, "medium": 5120, "xhigh": 10240}
+    # A first plan (~20K-27K tokens of reasoning) is not cut; a repair is bounded.
+    assert plan["medium"] == 32768 and repair["xhigh"] == 24576
+    # A delta's 32K output cap leaves its plan JSON 8K: ~24K of reasoning.
+    assert delta["medium"] == 32000 - 8192
+    assert review["low"] == 8192
+    # Any other call is cut only once its answer could no longer fit.
+    assert other["xhigh"] == 98304 - 4096
     # A call that does not think carries no budget (and is never streamed).
     off_local = RecordingTransport()
     off = _local_proxy(off_local)
@@ -1659,18 +1669,54 @@ def test_a_runaway_agent_turn_is_retried_a_level_lower_metered_and_cached_once(
     assert result.parsed == {"answer": "42"}
     first, retry = completions.calls
     assert first["reasoning_effort"] == "medium" and retry["reasoning_effort"] == "none"
-    # Aborted just past its 12288-token budget, not run on to the length stop.
-    assert completions.streams[0].closed and completions.streams[0].read < 12400
+    # Aborted just past its 5120-token budget, not run on to the length stop.
+    assert completions.streams[0].closed and completions.streams[0].read < 5200
     assert "stream" not in retry  # thinking off: nothing to bound
     note = retry["messages"][-1]["content"]
     assert note.startswith("task\n\n[Retry 1:") and "'thinking_budget'" in note
-    assert "12288-token budget" in note
+    assert "5120-token budget" in note
     # The aborted attempt's tokens are metered; only the answer is cached.
     meter = proxy.token_meter
-    assert meter is not None and meter.local_used >= 12289 + 20005
+    assert meter is not None and meter.local_used >= 5121 + 20005
     assert len(list(tmp_path.glob("*.json"))) == 1
     again = proxy.complete("junior_engineer", "T2", "SOP", msgs, purpose="ideation", schema=SCHEMA)
     assert again.parsed == {"answer": "42"} and len(completions.calls) == 2
+
+
+def test_an_aborted_turn_lowers_the_rest_of_its_session_only(tmp_path: Path) -> None:
+    completions = _RunawayCompletions(think=20000)
+    proxy = _runaway_proxy(completions, tmp_path)
+    opening = {"role": "user", "content": "task"}
+    later = [opening, {"role": "assistant", "content": "{}"}, {"role": "user", "content": "ok"}]
+    proxy.complete("junior_engineer", "T2", "SOP", [opening], purpose="ideation", schema=SCHEMA)
+    proxy.complete("junior_engineer", "T2", "SOP", later, purpose="ideation", schema=SCHEMA)
+    other = [{"role": "user", "content": "another task"}]
+    proxy.complete("junior_engineer", "T2", "SOP", other, purpose="ideation", schema=SCHEMA)
+    efforts = [c["reasoning_effort"] for c in completions.calls]
+    # Aborted at medium, retried without thinking; the session's next turn starts
+    # there, while another session still thinks at medium (and aborts on its own).
+    assert efforts == ["medium", "none", "none", "medium", "none"]
+    assert completions.calls[2]["messages"][-1]["content"] == "ok"
+    # Cached under the turn's own request: a restarted run (no sticky state) replays it.
+    fresh = _runaway_proxy(completions, tmp_path)
+    again = fresh.complete("junior_engineer", "T2", "SOP", later, purpose="ideation", schema=SCHEMA)
+    assert again.parsed == {"answer": "42"} and len(completions.calls) == 5
+
+
+def test_an_aborted_planner_repair_retries_lower_under_no_larger_budget() -> None:
+    completions = _RunawayCompletions(think=60000)
+    proxy = _runaway_proxy(completions)
+    msgs = [{"role": "user", "content": "plan"}]
+    result = proxy.complete(
+        "planner", "T2", "SOP", msgs, purpose="ideation", schema=SCHEMA, effort="xhigh"
+    )
+    assert result.parsed == {"answer": "42"}
+    assert [c["reasoning_effort"] for c in completions.calls] == ["xhigh", "medium", "none"]
+    # Each abort just past 24576 tokens: medium's own 32K never applies to the repair.
+    assert [s.read < 24700 for s in completions.streams] == [True, True]
+    # Not sticky: the next planner call starts at its own level again.
+    proxy.complete("planner", "T2", "SOP", msgs + msgs, purpose="ideation", effort="xhigh")
+    assert completions.calls[3]["reasoning_effort"] == "xhigh"
 
 
 def test_a_runaway_tool_turn_steps_down_a_level_at_a_time() -> None:

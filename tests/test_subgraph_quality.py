@@ -380,7 +380,9 @@ def _two_reviews(
     keep_snapshot: bool = True,
     built_body: str = _ADD_APP,
     fix_body: str = _FIX_APP,
-) -> tuple[list[str], list[str | None], GateResult]:
+) -> tuple[list[str], list[str | None], GateResult, bool]:
+    """Both review prompts, their efforts, the re-review's verdict and whether its
+    ReviewedTree records it complete."""
     cas = ArtifactStore()
     transport = MockTransport(
         verdicts=[
@@ -414,16 +416,18 @@ def _two_reviews(
         "artifacts": [*criteria, built, *produced, fix],
         "gates": first["gates"],
     }
-    [verdict] = node(state, _config(step=2))["gates"]
+    second = node(state, _config(step=2))
+    [verdict] = second["gates"]
+    [tree] = [a for a in second["artifacts"] if a.kind == reviewer_critic.REVIEWED_TREE_KIND]
     prompts = [r["messages"][0]["content"] for r in transport.requests]
-    return prompts, efforts, verdict
+    return prompts, efforts, verdict, cas.resolve(tree).complete
 
 
 def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findings(
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (full, delta), efforts, verdict = _two_reviews(monkeypatch)
-    assert efforts == ["low", "low"]
+    (full, delta), efforts, verdict, complete = _two_reviews(monkeypatch)
+    assert efforts == ["low", "low"] and complete
     assert "--- task T1" in full and "UNTOUCHED" in full and "re-review" not in full
 
     assert "re-review" in delta and "--- task T1" not in delta
@@ -439,7 +443,7 @@ def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findi
 def test_a_re_review_without_the_last_reviewed_tree_is_full(
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (_, second), efforts, _ = _two_reviews(monkeypatch, keep_snapshot=False)
+    (_, second), efforts, _, _ = _two_reviews(monkeypatch, keep_snapshot=False)
     assert efforts == ["low", "low"]
     assert "re-review" not in second and "--- task fix-1" in second
 
@@ -447,18 +451,25 @@ def test_a_re_review_without_the_last_reviewed_tree_is_full(
 @pytest.mark.parametrize(
     ("built_body", "fix_body"),
     [
-        # The first review saw only the head of its change: the rest was never judged.
+        # The first review saw only the head of its change.
         (_ADD_APP + _big_file("big.py"), _FIX_APP),
-        # The change since the last review would itself be cut.
+        # The change since the last review is itself cut.
         (_ADD_APP, _FIX_APP + _big_file("big.py")),
     ],
 )
-def test_a_re_review_is_full_unless_both_reviews_see_their_whole_change(
+def test_a_re_review_after_a_truncated_change_is_still_the_delta_and_recorded_incomplete(
     records: Any, monkeypatch: pytest.MonkeyPatch, built_body: str, fix_body: str
 ) -> None:
-    (_, second), efforts, _ = _two_reviews(monkeypatch, built_body=built_body, fix_body=fix_body)
+    # A full re-review would re-read the same capped head (the fix is appended last,
+    # so past the cut): the delta and the open findings show the judge more.
+    (_, second), efforts, _, complete = _two_reviews(
+        monkeypatch, built_body=built_body, fix_body=fix_body
+    )
     assert efforts == ["low", "low"]
-    assert "re-review" not in second and "--- task T1" in second
+    assert "re-review" in second and "--- task T1" not in second
+    assert "+    return round(t * 0.15, 2)" in second
+    assert "- tip is not rounded to cents [evidence:" in second
+    assert not complete
 
 
 def test_a_reviewed_tree_recorded_before_completeness_reads_as_incomplete() -> None:

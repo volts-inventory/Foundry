@@ -21,6 +21,7 @@ from foundry import telemetry
 from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
+    _REPAIR_MAX_TOKENS,
     SOP,
     _add_read_deps,
     _affected,
@@ -110,7 +111,7 @@ def test_the_in_node_revision_repairs_the_failed_plan_without_a_fresh_replan() -
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 3  # plan, delta, repair: no fresh re-plan
-    assert efforts == ["medium", "medium", "xhigh"]
+    assert efforts == ["medium", "medium", "medium/repair"]
     repair = _content(tx.requests[2])
     assert "REPAIR PASS — the planner's own plan check" in repair
     assert "Plan check findings:\n- Must-have MH-1 ('add todo') has no covering" in repair
@@ -138,7 +139,7 @@ def test_a_repair_leaving_a_finding_falls_back_to_one_fresh_replan() -> None:
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 4
-    assert efforts == ["medium", "medium", "xhigh", "medium"]
+    assert efforts == ["medium", "medium", "medium/repair", "medium"]
     fresh = _content(tx.requests[3])
     assert "REVISION PASS — the planner's own plan check" in fresh
     assert "id=AC-001 (ticket=T-002)" in fresh  # the criteria to keep
@@ -230,7 +231,7 @@ def test_an_epic_repair_leaving_a_finding_falls_back_to_one_fresh_epic_call() ->
         make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
-    assert efforts[4:] == ["xhigh", "medium"]
+    assert efforts[4:] == ["medium/repair", "medium"]
     repair, fresh = (_content(r) for r in tx.requests[4:])
     assert "REPAIR PASS" in repair and "E2-T03" in repair and "REPAIR PASS" not in fresh
     got = counts.snapshot()
@@ -361,15 +362,15 @@ def test_an_epic_with_no_previous_one_to_repair_is_planned_at_the_default_effort
     real = rt.proxy.complete
 
     def spy(*args: Any, **kwargs: Any) -> Any:
-        seen.append((_epic_of({"args": args}), kwargs.get("effort")))
+        seen.append((_epic_of({"args": args}), kwargs.get("max_tokens")))
         return real(*args, **kwargs)
 
     rt.proxy.complete = spy  # type: ignore[method-assign]
     node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
 
-    epic_efforts = [effort for epic, effort in seen if epic is not None]
-    assert len(epic_efforts) >= 3 and set(epic_efforts) == {"medium"}
-    assert "xhigh" in {effort for epic, effort in seen if epic is None}
+    epic_caps = [cap for epic, cap in seen if epic is not None]
+    assert len(epic_caps) >= 3 and set(epic_caps) == {None}  # planned afresh, not repaired
+    assert _REPAIR_MAX_TOKENS in {cap for epic, cap in seen if epic is None}
 
 
 def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None:
@@ -1597,3 +1598,150 @@ def test_an_unused_contract_is_a_concern_not_a_finding() -> None:
         c.startswith("Contract Unused (implemented by T-002) has no consumer")
         for c in writes["agent_journal"][0].concerns
     )
+
+
+# ---- repairs: medium effort, never re-rolled at a length stop ---------------------
+
+
+def test_a_repair_cut_at_its_cap_goes_straight_to_the_fresh_revision() -> None:
+    from foundry.proxy.model_provider_proxy import OutputLimitReached
+
+    flagged = {**PLAN, "criteria_review": _review("no scenario for an empty title")}
+    rt, tx = runtime_for(flagged, PLAN)
+    seen: list[tuple[Any, Any]] = []
+    real = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append((kwargs.get("effort"), kwargs.get("max_tokens")))
+        if kwargs.get("max_tokens") == _REPAIR_MAX_TOKENS:
+            raise OutputLimitReached("cut at the cap")
+        return real(*args, **kwargs)
+
+    rt.proxy.complete = spy  # type: ignore[method-assign]
+    with telemetry.counting() as counts:
+        make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    # first plan, the cut repair (never re-rolled), the fresh self-review revision
+    assert seen == [("medium", None), ("medium", _REPAIR_MAX_TOKENS), ("medium", None)]
+    assert "SELF-REVIEW REVISION" in _content(tx.requests[-1])
+    got = counts.snapshot()
+    assert got["planner.repair.cut"] == 1 and got["planner.repair.fallback"] == 1
+
+
+def test_the_repair_prompt_carries_the_findings_it_must_close() -> None:
+    flagged = {**PLAN, "criteria_review": _review("no scenario for an empty title")}
+    rt, tx = runtime_for(flagged, PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    repair = _content(tx.requests[1])
+    assert "REPAIR PASS" in repair
+    assert "Flagged gaps:\n- no scenario for an empty title" in repair
+
+
+# ---- self-review: what the review rules out of scope never blocks ----------------
+
+
+def test_a_missing_gap_the_review_rules_out_of_the_spec_triggers_no_repair() -> None:
+    from foundry.agents.planner.prompt import _review_deferred, _self_review_gaps
+
+    csrf = (
+        "No CSRF protection scenario for the POST forms; the spec does not mention "
+        "CSRF. Flagged for a future iteration."
+    )
+    review = {
+        "missing": [csrf, "no scenario for an empty title"],
+        "security_abuse_omissions": [],
+        "out_of_scope": ["multi-user sharing"],
+    }
+    assert _self_review_gaps({"criteria_review": review}) == ("no scenario for an empty title",)
+    assert _review_deferred(review) == ("multi-user sharing", csrf)
+
+    deferred = {**review, "missing": [csrf]}
+    cas = ArtifactStore()
+    rt, tx = runtime_for({**PLAN, "criteria_review": deferred}, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 1  # no self-review repair
+    critique = _critique(cas, writes)
+    assert critique.missing == ()
+    assert "Out of scope (self-review): multi-user sharing" in writes["agent_journal"][0].concerns
+
+
+def test_the_review_schema_has_a_non_blocking_out_of_scope_field() -> None:
+    from foundry.agents.planner.schema import _REVIEW_SCHEMA
+
+    assert "out_of_scope" in _REVIEW_SCHEMA["required"]
+    assert "out_of_scope" in SOP and "never under missing" in SOP
+
+
+# ---- contract properties: required, and patched by the delta -------------------
+
+
+def _propless() -> dict[str, Any]:
+    plan = _copy(PLAN)
+    plan["interfaces"].append(
+        {
+            "name": "parse_title",
+            "kind": "function",
+            "signature": "def parse_title(text: str) -> str: ...",
+            "inputs": ["text"],
+            "outputs": ["title"],
+            "errors": [],
+            "description": "Normalise a todo title.",
+            "properties": [],
+        }
+    )
+    plan["tickets"][0]["implements"].append("parse_title")
+    return plan
+
+
+def test_a_contract_without_properties_is_patched_by_the_delta_not_re_planned() -> None:
+    from foundry.agents.planner.delta import _delta_properties
+
+    idem = "parse_title(parse_title(s)) == parse_title(s)"
+    delta = {
+        "tickets": [],
+        "remove_tickets": [],
+        "remove_scenarios": [],
+        "contract_properties": [
+            {"contract": "parse_title", "properties": [{"id": "PR1", "text": idem}]}
+        ],
+        "criteria_review": {"missing": [], "security_abuse_omissions": [], "out_of_scope": []},
+    }
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_propless(), delta, cas=cas)
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2 and efforts == ["medium", "medium"]
+    assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
+    assert "parse_title" in _content(tx.requests[1])
+    assert counts.snapshot()["planner.delta.accepted"] == 1
+    contracts = {c.name: c for c in _bodies(cas, writes, "interface_contract")}
+    assert contracts["parse_title"].properties == (f"PR1: {idem}",)
+
+    # A taken or malformed id is renumbered; a data type never takes one.
+    taken = InterfaceContract(
+        name="roll", spec_uri="cas://x", kind="function", properties=("PR1: a",), seq=_SEQ
+    )
+    record = InterfaceContract(name="Roll", spec_uri="cas://y", kind="type", seq=_SEQ)
+    more = [{"id": "PR1", "text": "b"}, {"id": "x", "text": "c"}]
+    out = _delta_properties(
+        [taken, record],
+        {
+            "contract_properties": [
+                {"contract": "roll", "properties": more},
+                {"contract": "Roll", "properties": [{"id": "PR9", "text": "d"}]},
+            ]
+        },
+    )
+    assert [c.properties for c in out] == [("PR1: a", "PR2: b", "PR3: c"), ()]
+
+
+def test_interface_properties_are_required_and_the_sop_says_to_fill_them() -> None:
+    from foundry.agents.planner.schema import _INTERFACE_SCHEMA, DELTA_SCHEMA
+
+    assert "properties" in _INTERFACE_SCHEMA["required"]
+    assert "contract_properties" in DELTA_SCHEMA["required"]
+    assert "properties[] IS the one field a property lives in" in SOP
+    # Each operator or mode the spec names gets an end-to-end property.
+    assert "checks the RESULT the spec defines for it" in SOP

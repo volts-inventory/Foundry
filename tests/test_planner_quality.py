@@ -23,7 +23,7 @@ from foundry.agents.implementation.tickets.packet import (
     blocked_reads,
     upstream_defect_context,
 )
-from foundry.agents.planner import make_planner_node
+from foundry.agents.planner import _REPAIR_MAX_TOKENS, make_planner_node
 from foundry.agents.planner.checks import (
     _branch_findings,
     _entrypoint_findings,
@@ -508,7 +508,11 @@ def test_the_first_plan_runs_at_medium_and_a_cut_delta_goes_straight_to_the_repa
     with telemetry.counting() as counts:
         make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert seen == [(False, "medium", None), (True, "medium", 32_000), (False, "xhigh", None)]
+    assert seen == [
+        (False, "medium", None),
+        (True, "medium", 32_000),
+        (False, "medium", _REPAIR_MAX_TOKENS),
+    ]
     assert len(tx.requests) == 2  # the delta never reached the transport, nor was re-rolled
     assert counts.snapshot()["planner.delta.rejected"] == 1
 

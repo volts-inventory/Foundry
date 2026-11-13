@@ -41,12 +41,13 @@ leaves the merged plan failing a check, falls back to the full re-plan.
 
 Repair before re-planning: every revision (the self-review's, the in-node plan
 check's, a Spec-gate re-entry's, an epic's) is first a REPAIR — the failed plan
-itself plus its findings in, the full corrected plan out — at xhigh thinking
-effort (locally; the first plan call and every fresh one run at medium). A
-repair still leaving a finding gets ONE fresh revision, so a revision is at most
-two calls; the plan check keeps whichever draft has the fewest findings, a tie
-going to the later. The delta runs at medium under a 32k output cap: a reply cut
-off at the cap goes straight to the full re-plan, never re-rolled.
+itself plus its findings in, the full corrected plan out — at medium thinking
+effort, like the first plan call and every fresh one: the findings it is handed
+make it an edit, not an invention. A repair cut off at its output cap is not
+re-rolled, and a repair still leaving a finding gets ONE fresh revision, so a
+revision is at most two calls; the plan check keeps whichever draft has the fewest
+findings, a tie going to the later. The delta runs at medium under a 32k output
+cap: a reply cut off at the cap goes straight to the full re-plan, never re-rolled.
 
 Interface re-plan: a ticket the stub-signature guard left to a re-plan (mid-build,
 the Spec gate already passed) gets one small call revising only the contracts it
@@ -112,6 +113,7 @@ from foundry.agents.planner.constraints import (
 )
 from foundry.agents.planner.delta import (
     _affected,
+    _delta_properties,
     _delta_text,
     _merge_delta,
     _patch_note,
@@ -159,10 +161,12 @@ from foundry.agents.planner.prompt import (
     _base,
     _criteria_text,
     _declared_criteria_text,
+    _deferred_concerns,
     _intake_text,
     _payload_text,
     _repair_block,
     _retrieve_spans,
+    _review_missing,
     _revision_block,
     _self_review_gaps,
     _self_revision_text,
@@ -204,6 +208,7 @@ from foundry.agents.planner.split import ask_split, split_items, split_problem
 from foundry.agents.planner.stack import _generated_tickets, _python_deps_rule, _stack_decision
 from foundry.gates.app_checks import app_check_constraints
 from foundry.proxy.model_provider_proxy import (
+    _LOCAL_THINKING_MAX_TOKENS,
     OutputLimitReached,
     ProxyUnavailable,
     StructuredOutputError,
@@ -266,10 +271,14 @@ __all__ = [
 Effort = Literal["medium", "xhigh"] | None
 
 # Locally a first plan at medium kept the plan quality of xhigh at a fraction of the
-# time; a repair is reached only where that plan got stuck, so it thinks harder. The
-# delta patches a few tickets: medium, capped so a rambling reply fails fast.
+# time. A repair at xhigh ran up to 93 minutes (into a length stop, then re-rolled)
+# for an edit its findings already spell out, so it runs at medium too. The delta
+# patches a few tickets: medium, capped so a rambling reply fails fast.
 _FIRST_EFFORT: Effort = "medium"
-_REPAIR_EFFORT: Effort = "xhigh"
+_REPAIR_EFFORT: Effort = "medium"
+# The proxy's own budget at that effort: the cap shrinks nothing, it only makes a
+# reply cut at length raise instead of re-rolling into the same cut.
+_REPAIR_MAX_TOKENS = _LOCAL_THINKING_MAX_TOKENS["medium"]
 _DELTA_EFFORT: Effort = "medium"
 _DELTA_MAX_TOKENS = 32_000
 _LENGTH_STOPS = frozenset({"length", "max_tokens"})
@@ -284,7 +293,7 @@ def _count_gaps(payload: dict[str, Any]) -> None:
     review = _section(payload, "criteria_review")
     for _ in _strs(review.get("security_abuse_omissions")):
         count("planner.finding.security-gap")
-    for _ in _strs(review.get("missing")):
+    for _ in _review_missing(review):
         count("planner.finding.review-missing")
 
 
@@ -375,6 +384,30 @@ def make_planner_node(
         )
         return completion.parsed or {}
 
+    def _repair(sop: str, schema: dict[str, Any], content: str) -> dict[str, Any] | None:
+        """One repair call; None when its reply was cut at the output cap, so the
+        caller goes to its fresh revision instead of re-rolling the same repair."""
+        try:
+            completion = rt.proxy.complete(
+                NODE_ID,
+                TIER,
+                sop,
+                [{"role": "user", "content": content}],
+                purpose="ideation",
+                schema=schema,
+                effort=_REPAIR_EFFORT,
+                max_tokens=_REPAIR_MAX_TOKENS,
+            )
+        except OutputLimitReached:
+            completion = None
+        if completion is None or completion.stop_reason in _LENGTH_STOPS:
+            count("planner.repair.cut")
+            progress.log(
+                f"planner repair cut at the {_REPAIR_MAX_TOKENS}-token cap; revising afresh"
+            )
+            return None
+        return completion.parsed or {}
+
     def _self_revise(
         sop: str,
         schema: dict[str, Any],
@@ -386,23 +419,24 @@ def make_planner_node(
         """The one self-review revision: a repair of ``payload`` first; a repair
         whose own review still flags a gap gives way to today's fresh revision."""
         _count_gaps(payload)
-        repaired = _call(
-            sop,
-            schema,
-            content + _repair_block(gaps, _payload_text(payload), _SELF, what),
-            _REPAIR_EFFORT,
+        repaired = _repair(
+            sop, schema, content + _repair_block(gaps, _payload_text(payload), _SELF, what)
         )
-        left = _self_review_gaps(repaired)
-        if not left:
+        left = gaps if repaired is None else _self_review_gaps(repaired)
+        if repaired is not None and not left:
             _outcome("repair.closed", f"self-review of the {what}", gaps)
             return repaired
         _outcome("repair.fallback", f"self-review of the {what}", left)
         return _call(sop, schema, content + _self_revision_text(gaps, what))
 
-    def _plan_epic(
-        content: str, self_review: bool, effort: Effort = None
-    ) -> tuple[dict[str, Any], bool]:
-        payload = _call(EPIC_SOP, EPIC_SCHEMA, content, effort)
+    def _plan_epic(content: str, self_review: bool, repair: bool) -> tuple[dict[str, Any], bool]:
+        # A cut repair leaves the epic without tickets: the checks then fault it,
+        # which sends it to the fresh revision.
+        payload = (
+            (_repair(EPIC_SOP, EPIC_SCHEMA, content) or {})
+            if repair
+            else _call(EPIC_SOP, EPIC_SCHEMA, content)
+        )
         gaps = _self_review_gaps(payload) if self_review else ()
         if gaps:
             payload = _self_revise(
@@ -416,13 +450,13 @@ def make_planner_node(
         overflow: list[str],
         *,
         self_review: bool = True,
-        efforts: Sequence[Effort] = (),
+        repairs: Sequence[bool] = (),
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str], list[str]]:
-        """Run the epic calls, each at its ``efforts`` entry (default: the default
-        effort); returns their raw items, tagged review gaps (missing, omissions),
+        """Run the epic calls, each a repair where its ``repairs`` entry is set
+        (default: none); returns their raw items, tagged review gaps (missing, omissions),
         the self-revised epic ids and concerns. Tickets an epic loses at its cap
         are named in ``overflow``."""
-        calls = list(zip(contents, efforts or [None] * len(contents), strict=True))
+        calls = list(zip(contents, repairs or [False] * len(contents), strict=True))
         results = _run_parallel(lambda ce: _plan_epic(ce[0], self_review, ce[1]), calls)
         raw: list[dict[str, Any]] = []
         missing: list[str] = []
@@ -434,7 +468,8 @@ def make_planner_node(
             raw += items
             concerns += item_concerns
             review = _section(payload, "criteria_review")
-            missing += _tagged(epic.id, _strs(review.get("missing")))
+            missing += _tagged(epic.id, _review_missing(review))
+            concerns += _deferred_concerns(review)
             omissions += _tagged(epic.id, _strs(review.get("security_abuse_omissions")))
             if self_revised:
                 revised.append(epic.id)
@@ -453,7 +488,7 @@ def make_planner_node(
     ) -> tuple[list[dict[str, Any]], tuple[str, ...], tuple[str, ...], list[str]]:
         """The in-node revision of only the epics ``targets`` names, each handed the
         findings naming it; every other epic's items stand. A ``repair`` corrects
-        each epic's tickets in place at lower effort. Returns the merged items, the
+        each epic's tickets in place. Returns the merged items, the
         re-run epics' review gaps and concerns."""
         intake, brief, iface_text = inputs
         chosen = [e for e in epics if e.id in targets]
@@ -480,7 +515,7 @@ def make_planner_node(
             contents,
             overflow,
             self_review=False,
-            efforts=[_REPAIR_EFFORT if repair else None] * len(chosen),
+            repairs=[repair] * len(chosen),
         )
         merged = [
             item
@@ -553,7 +588,9 @@ def make_planner_node(
         if _strs(_section(delta, "criteria_review").get("security_abuse_omissions")):
             _rejected("it reports a security/abuse omission")
             return None
-        fit = _assemble(merged, frame)
+        fit = _assemble(
+            merged, replace(frame, interfaces=_delta_properties(frame.interfaces, delta))
+        )
         if fit.blocking:
             _rejected(
                 f"{len(fit.blocking)} finding(s) still open: " + " | ".join(fit.blocking)[:400]
@@ -582,7 +619,7 @@ def make_planner_node(
     ) -> _Draft:
         """Call 1's reply -> the epic calls (when it has epics) -> repaired, checked
         tickets. ``findings``/``prior`` make the epic calls revisions, ``repair``
-        lower-effort repairs of the tickets ``prior`` carries."""
+        repairs of the tickets ``prior`` carries."""
         pinned = state.get("stack")
         intent = _section(payload, "intent")
         must_have_ids, must_haves = _goals(intent.get("must_haves"), "MH")
@@ -608,8 +645,9 @@ def make_planner_node(
         epics, concerns = _build_epics(payload.get("epics"), names, overflow)
         inline = _objs(payload.get("tickets"))
         review = _section(payload, "criteria_review")
-        missing = _strs(review.get("missing"))
+        missing = _review_missing(review)
         omissions = _strs(review.get("security_abuse_omissions"))
+        concerns += _deferred_concerns(review)
         revised: list[str] = []
         inputs = ("", "", "")
         raw: list[dict[str, Any]] = inline
@@ -656,7 +694,7 @@ def make_planner_node(
                 overflow,
                 self_review=self_review,
                 # An epic with no previous one to repair is planned afresh.
-                efforts=[_REPAIR_EFFORT if repair and continues.get(e.id) else None for e in epics],
+                repairs=[repair and bool(continues.get(e.id)) for e in epics],
             )
             missing += epic_missing
             omissions += epic_omissions
@@ -757,7 +795,7 @@ def make_planner_node(
         """The one in-node revision of a plan the checks still fault: an epic plan
         re-runs only the epics the findings name; a finding naming none (or an
         inline plan) re-plans call 1 with every finding. Each revision is first a
-        repair of the failed plan at lower effort; a repair leaving any finding gets
+        repair of the failed plan; a repair leaving any finding gets
         one fresh revision at the default effort. Of the original, the repair and
         the fresh revision the one with the fewest findings is kept, a tie going to
         the later. Returns the draft and a journal note."""
@@ -793,9 +831,10 @@ def make_planner_node(
                     fit=_assemble(raw, draft.frame, over),
                 )
 
-            repaired = rerun(repair=True)
+            first = rerun(repair=True)
+            repaired: _Draft | None = first
             replanned: _Draft | None = None
-            if left := (*repaired.fit.blocking, *repaired.fit.overflow):
+            if left := (*first.fit.blocking, *first.fit.overflow):
                 _outcome("repair.fallback", what, left)
                 replanned = rerun(repair=False)
             else:
@@ -828,20 +867,25 @@ def make_planner_node(
             what = "the plan"
             # An epic plan's tickets reach their own epic calls, not call 1.
             plan = _payload_text(draft.payload, None if draft.per_epic else items)
-            repaired = _draft(
-                state,
-                _call(SOP, schema, content + _repair_block(notes, plan, _CHECK), _REPAIR_EFFORT),
-                seqs,
-                languages,
-                notes,
-                mem,
-                _CHECK,
-                self_review=False,
-                repair=True,
+            fixed = _repair(SOP, schema, content + _repair_block(notes, plan, _CHECK))
+            cut: _Draft | None = (
+                None
+                if fixed is None
+                else _draft(
+                    state,
+                    fixed,
+                    seqs,
+                    languages,
+                    notes,
+                    mem,
+                    _CHECK,
+                    self_review=False,
+                    repair=True,
+                )
             )
             replanned = None
-            if left := (*repaired.fit.blocking, *repaired.fit.overflow):
-                _outcome("repair.fallback", what, left)
+            if cut is None or (left := (*cut.fit.blocking, *cut.fit.overflow)):
+                _outcome("repair.fallback", what, notes if cut is None else left)
                 text = _revision_block(
                     notes, _criteria_text(draft.fit.criteria), _goals_text(draft.brief), _CHECK
                 )
@@ -857,11 +901,18 @@ def make_planner_node(
                 )
             else:
                 _outcome("repair.closed", what, blocking)
-        revisions = (repaired,) if replanned is None else (repaired, replanned)
+            repaired = cut
+        revisions = tuple(r for r in (repaired, replanned) if r is not None)
         pick = _best(draft.fit, *(r.fit for r in revisions))
         chosen = (draft, *revisions)[pick]
         if replanned is not None:
-            event = ("replan.kept_original", "replan.kept_repair", "replan.used")[pick]
+            event = (
+                "replan.kept_original"
+                if pick == 0
+                else "replan.used"
+                if chosen is replanned
+                else "replan.kept_repair"
+            )
             _outcome(event, what, chosen.fit.blocking)
         before = len(blocking)
         if pick == 0:
@@ -914,22 +965,21 @@ def make_planner_node(
         if earlier is not None:
             # A Spec-gate re-plan repairs the previous pass first; only a repair the
             # gate would still fail falls back to the fresh re-plan below.
-            repaired = _draft(
-                state,
-                _call(
-                    SOP,
-                    schema,
-                    _user_content(state, rt, spans, tools, _prior_plan_text(earlier)) + sizing,
-                    _REPAIR_EFFORT,
-                ),
-                seqs,
-                languages,
-                findings,
-                prior,
-                self_review=False,
-                repair=True,
+            fixed = _repair(
+                SOP,
+                schema,
+                _user_content(state, rt, spans, tools, _prior_plan_text(earlier)) + sizing,
             )
-            if left := _open(
+            repaired = (
+                None
+                if fixed is None
+                else _draft(
+                    state, fixed, seqs, languages, findings, prior, self_review=False, repair=True
+                )
+            )
+            if repaired is None:
+                _outcome("repair.fallback", "Spec-gate re-plan", findings or ())
+            elif left := _open(
                 repaired.fit, repaired.missing, repaired.omissions, findings or (), earlier
             ):
                 _outcome("repair.fallback", "Spec-gate re-plan", left)
@@ -1143,7 +1193,7 @@ def make_planner_node(
         Re-emits what the re-planned tickets change (tickets + tombstones,
         criteria, PRD criterion ids, critique, ownership); the plan-level
         records of the earlier pass stay current. The epic calls repair the epics'
-        previous tickets at lower effort; what the merged plan still leaves open
+        previous tickets; what the merged plan still leaves open
         (the test :func:`_open` applies to a call-1 repair) gets one fresh in-node
         re-run, at the default effort, of the epics it names."""
 
@@ -1175,7 +1225,7 @@ def make_planner_node(
         ]
         overflow: list[str] = []
         fresh, missing, omissions, revised, concerns = _plan_epics(
-            chosen, contents, overflow, efforts=[_REPAIR_EFFORT] * len(chosen)
+            chosen, contents, overflow, repairs=[True] * len(chosen)
         )
         raw = [
             item

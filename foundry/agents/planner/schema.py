@@ -184,7 +184,10 @@ _TICKET_RULES = (
     "criteria_review list only REAL, in-scope gaps you could not close: missing / "
     "under-specified scenarios, and applicable security/abuse cases no scenario "
     "covers. Prefer closing a gap by adding a scenario; a listed security/abuse "
-    "omission FAILS the Spec gate. Return empty arrays when coverage is complete.\n"
+    "omission FAILS the Spec gate, and a listed missing gap costs a revision. What "
+    "the spec does not ask for, or you would defer to a later iteration, is no gap: "
+    "note it under out_of_scope (never blocking), never under missing. Return empty "
+    "arrays when coverage is complete.\n"
 )
 
 
@@ -232,8 +235,8 @@ SOP = (
     "interface/API contracts FIRST (tickets reference them): "
     "every seam between tickets is a contract with a name, a kind (function | class "
     "| type for code seams; http | cli | event for the rest), its signature written "
-    "in the chosen language, its inputs, outputs and errors, and a description of "
-    "what it does that does not repeat them. "
+    "in the chosen language, its inputs, outputs and errors, its properties[] (below) "
+    "and a description of what it does that does not repeat any of them. "
     "Declare only what crosses a ticket boundary: the data types and errors tickets "
     "pass between them, and the functions or classes one ticket calls in another. "
     "Prefer plain functions; never a Protocol, ABC, interface or factory unless two "
@@ -256,14 +259,23 @@ SOP = (
     "function or class contract with a non-trivial input domain (parsing, "
     "arithmetic, formatting, state transitions) 1-4 properties[]: invariants that "
     "hold for EVERY valid generated input, never a worked example, each with an id "
-    "PR1, PR2, ... unique across the plan. E.g. 'PR1: for any valid notation the "
+    "PR1, PR2, ... unique across the plan. properties[] IS the one field a property "
+    "lives in: 'never restated' keeps it out of the description, it never leaves "
+    "properties[] of such a contract empty. E.g. 'PR1: for any valid notation the "
     "total lies within [minimum possible, maximum possible]', 'the same seed gives "
     "the same result', a round-trip (parse(format(x)) == x), idempotence (f(f(x)) "
     "== f(x)), 'any input outside the grammar raises the documented error'. State "
     "each over the input domain the spec allows, including combinations of its "
     "features: at least one property per contract ranges over inputs mixing several "
     "features at once (an expression mixing every operator, multiple terms, "
-    "modifiers together), never only one feature or a single-term case. Write them "
+    "modifiers together), never only one feature or a single-term case. END TO END: "
+    "for each operator, sign or mode the spec names (subtraction, a negative value, "
+    "a modifier, an option), at least one property checks the RESULT the spec "
+    "defines for it (e.g. 'for any a - b the result equals the value of a minus the "
+    "value of b'), not only bounds on its parts: a property that only "
+    "bounds each term passes an implementation that adds a subtracted term. A "
+    "contract the result is computed through carries what that needs (a term's "
+    "sign or operator), or that mode cannot be implemented. Write them "
     "in the contract's properties[], never in its description or a ticket's. Leave "
     "properties[] empty for "
     "data types, trivial accessors and http/cli/event seams. The implementing "
@@ -458,7 +470,17 @@ _INTERFACE_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["name", "kind", "signature", "inputs", "outputs", "errors", "description"],
+    # properties is required (it may be empty) so a contract never drops it unseen.
+    "required": [
+        "name",
+        "kind",
+        "signature",
+        "inputs",
+        "outputs",
+        "errors",
+        "description",
+        "properties",
+    ],
     "additionalProperties": False,
 }
 
@@ -509,8 +531,9 @@ _REVIEW_SCHEMA: dict[str, Any] = {
     "properties": {
         "missing": _STR_ARRAY,
         "security_abuse_omissions": _STR_ARRAY,
+        "out_of_scope": _STR_ARRAY,
     },
-    "required": ["missing", "security_abuse_omissions"],
+    "required": ["missing", "security_abuse_omissions", "out_of_scope"],
     "additionalProperties": False,
 }
 
@@ -685,8 +708,11 @@ DELTA_SOP = (
     "- remove_tickets: ids of tickets to delete (move any work they carry first).\n"
     "- remove_scenarios: ids of scenarios to delete.\n"
     "- criteria_review: gaps that remain after your delta (empty arrays when none).\n"
-    "The interface contracts are fixed: close a contract-fit finding through the "
-    "tickets' implements[], consumes[] and depends_on. The planner's own tickets "
+    "- contract_properties: for a finding that a contract has no properties, that "
+    "contract's name and the 1-4 properties[] it lacks (empty otherwise).\n"
+    "The interface contracts are otherwise fixed: close every other contract-fit "
+    "finding through the tickets' implements[], consumes[] and depends_on. The "
+    "planner's own tickets "
     f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are added for you: never name "
     "them.\nThe plan's rules: " + _TICKET_RULES
 )
@@ -698,8 +724,26 @@ DELTA_SCHEMA: dict[str, Any] = {
         "tickets": {"type": "array", "items": _TICKET_SCHEMA},
         "remove_tickets": _STR_ARRAY,
         "remove_scenarios": _STR_ARRAY,
+        "contract_properties": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "contract": {"type": "string"},
+                    "properties": _INTERFACE_SCHEMA["properties"]["properties"],
+                },
+                "required": ["contract", "properties"],
+                "additionalProperties": False,
+            },
+        },
         "criteria_review": _REVIEW_SCHEMA,
     },
-    "required": ["tickets", "remove_tickets", "remove_scenarios", "criteria_review"],
+    "required": [
+        "tickets",
+        "remove_tickets",
+        "remove_scenarios",
+        "contract_properties",
+        "criteria_review",
+    ],
     "additionalProperties": False,
 }

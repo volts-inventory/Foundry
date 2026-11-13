@@ -296,6 +296,7 @@ class ReproGate:
         pyenv: PythonBuildEnv | None = None,
         boot_s: float = 30.0,
         cmd_s: float = 20.0,
+        install_timeout_s: float = 600.0,
     ) -> None:
         self.reproductions = tuple(reproductions)
         self.tag = tag
@@ -305,6 +306,7 @@ class ReproGate:
         self._seal_key = seal_key
         self._boot_s = boot_s
         self._cmd_s = cmd_s
+        self._install_timeout_s = install_timeout_s
         self._timeout_s = boot_s + (cmd_s + 12) * len(self.reproductions) + 30
         self.mutant_rotation_id = 0
         self.scanner_rule_version = "repro-v1"
@@ -316,6 +318,24 @@ class ReproGate:
     def execute(self, workdir: Path) -> ZoneAObservation:
         from .launch import _reap_escapees
 
+        if self._pyenv is not None and not self._pyenv.ready:
+            # This check runs on its own build env, after the final gates: their install
+            # left the run's venv for this manifest in place (reused here, no pip run),
+            # but ``ready`` is per build. Without it every Python app with dependencies
+            # ERRORed here, and its backed review findings were never re-run.
+            rc, out, err = self._pyenv.install(workdir, timeout_s=self._install_timeout_s)
+            if not self._pyenv.ready:
+                return observe(
+                    self.name,
+                    exit_codes=(rc,),
+                    stdout=out,
+                    stderr=err,
+                    findings=(
+                        f"review reproduction of {self.tag} could not install the "
+                        f"app's Python dependencies (pip exited {rc})",
+                    ),
+                    seal_key=self._seal_key,
+                )
         cfg = {
             "mark": _RESULT_MARK,
             "tail": _OUTPUT_TAIL,

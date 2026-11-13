@@ -311,3 +311,115 @@ def test_a_check_that_errored_keeps_the_last_reproduced_finding() -> None:
     _, carried = review_candidates(state, None)
     assert [r.finding for r in carried] == ["shadowed"]
     assert not terminal_gates_pass(state)
+
+
+# ---- a Python app with dependencies: the check installs them --------------------
+
+
+def _tinydep_app(tmp_path: Path) -> Path:
+    from tests.test_python_deps import _wheel
+
+    whl = _wheel(tmp_path / "wheels", "tinydep", {"tinydep/__init__.py": "NAME = 'stub'\n"})
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "requirements.txt").write_text(f"tinydep @ {whl.as_uri()}\n")
+    (app / "app.py").write_text("import tinydep\n\nNAME = tinydep.NAME\n")
+    return app
+
+
+def _review_check(
+    tmp_path: Path, monkeypatch: Any, app: Path, *, rt: AgentRuntime | None = None
+) -> list[GateResult]:
+    import shutil
+
+    import foundry.graph.gate_wiring.materialize as materialize
+    import foundry.graph.gate_wiring.review_repro as review_repro
+
+    def _materialize(state: Any, workdir: Path, **_: Any) -> str:
+        shutil.copytree(app, workdir, dirs_exist_ok=True)
+        return "tree-1"
+
+    monkeypatch.setattr(materialize, "materialize_workdir", _materialize)
+    repro = Reproduction("NAME is a stub", _COMMAND, "notes", "stub")
+    monkeypatch.setattr(review_repro, "review_candidates", lambda *_: ("review #1", (repro,)))
+    rt = rt or AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted({})))
+    out = review_repro.run_review_check(
+        {},
+        _config("run-deps"),
+        rt=rt,
+        runner=_runner(GlobalRecords()),
+        resolve=lambda a: a,  # type: ignore[arg-type,return-value]
+        resolve_blob=lambda u: b"",
+        workdir=tmp_path / "work",
+    )
+    return list(out["gates"])
+
+
+@pytest.fixture()
+def _allow_install(monkeypatch: Any) -> None:
+    # The suite runs the gates in-process, where the networked install is refused
+    # unless accepted (the dependency is a local wheel: nothing leaves the host).
+    monkeypatch.setenv("FOUNDRY_ALLOW_UNSANDBOXED_INSTALL", "1")
+
+
+def test_the_check_installs_a_python_apps_dependencies(
+    tmp_path: Path, monkeypatch: Any, _allow_install: None
+) -> None:
+    # f4c550b's check opened the build env but never installed into it, so every
+    # Python app with a requirements.txt ERRORed ("the build's Python dependency
+    # install did not complete") and shipped with its backed findings never re-run.
+    (gate,) = _review_check(tmp_path, monkeypatch, _tinydep_app(tmp_path))
+    assert gate.status is GateStatus.FAIL, gate.findings
+    assert any(f.startswith("REPRODUCED") for f in gate.findings)
+
+
+def test_the_check_reuses_the_final_gates_install(
+    tmp_path: Path, monkeypatch: Any, _allow_install: None
+) -> None:
+    import foundry.gates.pydeps as pydeps
+
+    # A file: URL is never cached (local content can change): pin a digest instead.
+    monkeypatch.setattr(pydeps, "manifest_digest", lambda *_: "d" * 64)
+    app = _tinydep_app(tmp_path)
+    rt = AgentRuntime(proxy=ModelProviderProxy(MockTransport.scripted({})))
+    with pydeps.python_build_env(app, python=True, cache=rt.python_envs) as pyenv:
+        assert pyenv is not None
+        assert pyenv.install(app, timeout_s=120)[0] == 0
+
+    def _no_pip(*_: Any, **__: Any) -> tuple[int, str, str]:
+        raise AssertionError("the check re-ran pip instead of reusing the install")
+
+    monkeypatch.setattr(pydeps, "ground_untrusted", _no_pip)
+    (gate,) = _review_check(tmp_path, monkeypatch, app, rt=rt)
+    assert gate.status is GateStatus.FAIL, gate.findings
+
+
+def test_a_check_that_cannot_run_is_retried_once_then_holds_the_release(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import foundry.gates.repro as repro_mod
+    from foundry.graph.gate_wiring.review_repro import route_review_check
+
+    calls: list[int] = []
+
+    def _no_driver(*_: Any, **__: Any) -> tuple[int, str, str]:
+        calls.append(1)
+        return 1, "", "boom"
+
+    monkeypatch.setattr(repro_mod, "ground_untrusted", _no_driver)
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "app.py").write_text("NAME = 'stub'\n")
+    (gate,) = _review_check(tmp_path, monkeypatch, app)
+    assert gate.status is GateStatus.ERROR
+    assert len(calls) == 2
+
+    build = gate.model_copy(update={"name": "build", "status": GateStatus.PASS})
+    state: FactoryState = {"gates": [build, gate]}
+    assert route_review_check(state, max_review_fixes=1) == "halt"
+    # Every other gate green: still held, the backed finding was never re-run.
+    monkeypatch.setattr("foundry.graph.factory_graph._gates_all_pass", lambda *_: True)
+    assert not terminal_gates_pass(state)
+    # A later tree the check has not judged is not held by the old ERROR.
+    newer = build.model_copy(update={"run_against": "tree-2"})
+    assert terminal_gates_pass({"gates": [newer, gate]})

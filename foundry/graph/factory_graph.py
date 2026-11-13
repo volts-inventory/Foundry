@@ -138,6 +138,22 @@ def terminal_gates_pass(state: FactoryState) -> bool:
     )
     if repro is not None and repro.status is GateStatus.FAIL:
         return False
+    # A check that could not re-run the backed findings on the tree being released
+    # (it ERRORed, after its retry) left them unverified: hold rather than ship a
+    # blocking finding nobody checked. A check only runs with backed findings.
+    last = max(
+        (g for g in state.get("gates") or () if g.name == "repro"),
+        key=lambda g: g.seq,
+        default=None,
+    )
+    build = _latest_by_name(state).get("build")
+    if (
+        last is not None
+        and last.status is GateStatus.ERROR
+        and build is not None
+        and last.run_against == build.run_against
+    ):
+        return False
     return _gates_all_pass(_latest_by_name(state), TERMINAL_PASS_GATES)
 
 

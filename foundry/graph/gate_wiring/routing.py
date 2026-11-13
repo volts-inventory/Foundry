@@ -223,11 +223,14 @@ _FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)")
 # a SyntaxError): it names the module only, and hides every test in it.
 _COLLECTION_ERROR = re.compile(r"^ERROR ([^\s:]+\.py)(?: - |$)")
 _BDD_SCENARIO = re.compile(r"^BDD criterion \S+: scenario (\S+)")
+# foundry.gates.properties' findings for a contract property the tests do not prove.
+_PROPERTY = re.compile(r"^property (\S+) (?:missing|not covered|not run|failing)\b")
 
 
 def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
-    """The failing pytest node ids, the test modules that failed to collect, and the
-    BDD scenario refs a gate's findings name."""
+    """The failing pytest node ids, the test modules that failed to collect, the
+    BDD scenario refs and the contract properties (``property:<id>``) a gate's
+    findings name."""
     out: list[str] = []
     for line in findings:
         m = (
@@ -235,8 +238,11 @@ def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
             or _FAILED_TEST.match(line.strip())
             or _COLLECTION_ERROR.match(line.strip())
         )
-        if m is not None and m.group(1) not in out:
-            out.append(m.group(1))
+        ident = m.group(1) if m is not None else None
+        if ident is None and (p := _PROPERTY.match(line)) is not None:
+            ident = f"property:{p.group(1)}"
+        if ident is not None and ident not in out:
+            out.append(ident)
     return tuple(out)
 
 

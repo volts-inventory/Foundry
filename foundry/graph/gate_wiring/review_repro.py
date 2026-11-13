@@ -6,6 +6,8 @@ boundary ignores it. A finding the proxy kept as blocking on a reproduction
 tree; a reproduced one is an attested ``repro`` FAIL, which the supervisor sends
 to the fixer at most ``max_review_fixes`` times (:func:`route_review_check`) and
 which fails the release (``factory_graph.terminal_gates_pass``) while it stands.
+A check that cannot run them (an ERROR, after one retry) holds the release too: a
+blocking finding with a reproduction never ships unverified.
 """
 
 from __future__ import annotations
@@ -16,7 +18,13 @@ from typing import TYPE_CHECKING, Any
 
 from foundry.gates.repro import REPRO_GATE, REPRODUCED_PREFIX, Reproduction, ReproGate, tag_line
 from foundry.graph.gate_wiring.routing import ADVANCE, FIX, HALT
-from foundry.graph.gate_wiring.runs import _build_env, _run_gates, gate_profile, launch_gate
+from foundry.graph.gate_wiring.runs import (
+    _GATE_TIMEOUT_S,
+    _build_env,
+    _run_gates,
+    gate_profile,
+    launch_gate,
+)
 from foundry.schemas.base import BudgetLedger
 from foundry.schemas.gates import GateResult, GateStatus
 from foundry.schemas.quality import ReviewFindings
@@ -38,6 +46,7 @@ if TYPE_CHECKING:
 REVIEW_CHECK_NODE = "review_check"
 # Each re-run can boot the app and wait on a command: keep one check bounded.
 _MAX_REPRODUCTIONS = 5
+_ERROR_RETRIES = 1
 
 _STR = r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\""
 # The proxy's evidence suffix (model_provider_proxy._verdict_findings), which the
@@ -160,19 +169,35 @@ def run_review_check(
     tag, repros = review_candidates(state, rt.cas)
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     profile = gate_profile(state, profile)
-    with _build_env(profile, workdir, rt) as pyenv:
-        launch = launch_gate(state, resolve, profile, runner.seal_key, pyenv)
-        target = launch.target if isinstance(launch, LaunchGate) else None
-        app = target.cmd if target is not None and target.kind == "http" else ""
-        gate = ReproGate(repros, tag=tag, app_cmd=app, seal_key=runner.seal_key, pyenv=pyenv)
-        results = _run_gates(
-            [(gate, REVIEW_CHECK_NODE)],
-            rt=rt,
-            runner=runner,
-            config=config,
-            run_against=run_against,
-            workdir=workdir,
-        )
+    results: list[GateResult] = []
+    # An ERROR is no verdict, and while backed blocking findings stand it holds the
+    # release (``terminal_gates_pass``): a transient boot or install failure gets one
+    # more run first.
+    for _ in range(1 + _ERROR_RETRIES):
+        with _build_env(profile, workdir, rt) as pyenv:
+            launch = launch_gate(state, resolve, profile, runner.seal_key, pyenv)
+            target = launch.target if isinstance(launch, LaunchGate) else None
+            app = target.cmd if target is not None and target.kind == "http" else ""
+            # The gate installs the deps into ``pyenv`` itself: the run's venv for this
+            # manifest, which the final gates' build already filled (reused, no pip).
+            gate = ReproGate(
+                repros,
+                tag=tag,
+                app_cmd=app,
+                seal_key=runner.seal_key,
+                pyenv=pyenv,
+                install_timeout_s=_GATE_TIMEOUT_S,
+            )
+            results = _run_gates(
+                [(gate, REVIEW_CHECK_NODE)],
+                rt=rt,
+                runner=runner,
+                config=config,
+                run_against=run_against,
+                workdir=workdir,
+            )
+        if not any(g.status is GateStatus.ERROR for g in results):
+            break
     return {"gates": results}
 
 
@@ -180,8 +205,11 @@ def route_review_check(state: FactoryState, *, max_review_fixes: int) -> str:
     """After a review check: a reproduced finding goes to the fixer while
     ``budget.review_fixes`` (bumped by :func:`bump_review_fixes` for every
     reproduced check, the current one included) is within ``max_review_fixes``,
-    then halts; a check that reproduced nothing (or could not tell) advances."""
+    then halts; a check that reproduced nothing advances. One that ERRORed (after
+    its retry) halts: its backed findings are unverified, which holds the release."""
     last = _newest(state, REPRO_GATE)
+    if last is not None and last.status is GateStatus.ERROR:
+        return HALT
     if last is None or last.status is not GateStatus.FAIL:
         return ADVANCE
     budget = state.get("budget") or BudgetLedger()

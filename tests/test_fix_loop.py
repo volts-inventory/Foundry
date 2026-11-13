@@ -1685,16 +1685,20 @@ def _scoped_state(store: ArtifactStore, target: str | None) -> FactoryState:
     }
 
 
-def test_a_fix_pass_summary_lists_only_its_cluster() -> None:
+def test_a_fix_pass_summary_lists_only_its_cluster(monkeypatch) -> None:
+    import foundry.agents.implementation.junior_engineer as je
     from foundry.agents.implementation.junior_engineer import fix_failures
 
+    monkeypatch.setattr(je, "_MERGE_TOTAL", 0)  # three failures would share one pass
     store = ArtifactStore()
     state = _scoped_state(store, "ticket:T-002")
     summary = _fix_summary(state, store.resolve, store.resolve_blob, attempt=1)
     assert summary[:5] == (
         "[fix summary]",
-        "this pass fixes ONE failure cluster: ticket:T-002 (2 failure(s), listed below)",
-        "1 other failure(s) are handled separately — don't touch them",
+        "this pass fixes ONE failure cluster: ticket:T-002 (2 failure(s), listed below); "
+        "every one of them is yours",
+        "other failures, handled by another pass (tests/test_a.py::test_alpha): not yours "
+        "and not pre-existing; don't touch them",
         "failed gates: test",
         "failing tests/scenarios: tests/test_b.py::test_1, tests/test_b.py::test_2",
     )
@@ -2269,7 +2273,7 @@ def test_a_fixer_check_runs_the_scenarios_the_failed_gate_names(monkeypatch) -> 
     built = "features/T01.feature::S01"
     red = "features/T08.feature::S17"
     monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset({built}))
-    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    monkeypatch.setattr(je, "target_clusters", lambda state, resolve, failed: ())
     state = _state(
         _gate("build", "t", 1, _OK),
         _gate(
@@ -2283,6 +2287,8 @@ def test_a_fixer_check_runs_the_scenarios_the_failed_gate_names(monkeypatch) -> 
     )
     spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
     assert spec.scope == frozenset({built, red})
+    # The failing unit test's module too: the check runs every failure the pass owns.
+    assert spec.own_tests == ("tests/test_app.py",)
 
 
 # ---- a skipped ticket: rebuilt by the fix loop, or left to a re-plan ------------
@@ -2461,13 +2467,157 @@ def test_a_fixer_check_runs_smoke_when_smoke_failed(monkeypatch) -> None:
     import foundry.graph.gate_wiring as gw
 
     monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset())
-    monkeypatch.setattr(je, "fix_target", lambda state, resolve, failed: (None, 0))
+    monkeypatch.setattr(je, "target_clusters", lambda state, resolve, failed: ())
     smoke = "smoke command exited 2: python: can't open file './smoke.py'"
     red = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _RED, smoke))
     spec = je._fix_check(object(), red, lambda uri: None)  # type: ignore[arg-type]
     assert spec.smoke and spec.own_smoke
     green = _state(_gate("build", "t", 1, _OK), _gate("smoke", "t", 3, _OK))
     assert not je._fix_check(object(), green, lambda uri: None).smoke  # type: ignore[arg-type]
+
+
+# ---- a fixer's check owns every failure of its cluster ---------------------------
+#
+# The local dice bench: the cluster's items were `test:tests/...::test_pr1` (a
+# property test) and the check ran only scenarios, so both fix-1 passes opened
+# "green (0 own, 4 pre-existing)" and worked blind.
+
+_PR1_FAIL = "FAILED tests/test_dice.py::test_pr1_total_is_even - assert 1 == 0"
+_PR1_PROP = "property PR1 failing (tests/test_dice.py): Dice: the total is even — fix it"
+
+
+def test_launch_and_property_failures_join_the_owning_tickets_cluster() -> None:
+    from foundry.graph.gate_wiring import failure_clusters
+
+    tickets = [
+        _ticket(
+            "T-001",
+            0,
+            files=("dice.py", "tests/test_dice.py"),
+            entrypoint=True,
+            implements=("Dice",),
+        ),
+        _ticket("T-002", 1, files=("tests/test_b.py",)),
+    ]
+    gates = [
+        _gate("test", "t", 2, _RED, _PR1_FAIL, _PR1_PROP, _B1, _B2, _C9),
+        _gate("launch", "t", 4, _RED, "launch: dice.py exited 1 before serving"),
+    ]
+    clusters = {c.key: c for c in failure_clusters(gates, tickets, {"T-001", "T-002"})}
+    assert set(clusters) == {"ticket:T-001", "ticket:T-002", "file:tests/test_c.py"}
+    items = clusters["ticket:T-001"].items
+    assert items[:2] == ("test:tests/test_dice.py::test_pr1_total_is_even", "test:property:PR1")
+    assert len(items) == 3 and items[2].startswith("launch:")
+    # No entrypoint ticket built: the launch failure stays a cluster of its own.
+    alone = failure_clusters(gates, tickets, {"T-002"})
+    assert "launch" in {c.key for c in alone}
+
+
+def test_a_fixer_check_owns_its_cluster_and_leaves_the_others_out(monkeypatch) -> None:
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+    from foundry.graph.gate_wiring import FailureCluster
+
+    mine = FailureCluster(
+        key="ticket:T-001",
+        stage=1,
+        items=(
+            "test:tests/test_dice.py::test_pr1_total_is_even",
+            "test:property:PR1",
+            "launch:boot",
+        ),
+        tickets=("T-001",),
+    )
+    theirs = FailureCluster(
+        key="ticket:T-002", stage=1, items=("test:features/T-002.feature::AC-2",)
+    )
+    guard = "features/T-001.feature::AC-1"
+    other = "features/T-002.feature::AC-2"
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset({guard, other}))
+    monkeypatch.setattr(je, "target_clusters", lambda state, resolve, failed: (mine, theirs))
+    state = _state(_gate("build", "t", 1, _OK), _gate("test", "t", 2, _RED, _PR1_FAIL))
+    spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
+    own = {"tests/test_dice.py::test_pr1_total_is_even", "property:PR1"}
+    assert spec.own_refs == own
+    assert spec.scope == {guard}  # the other cluster's scenario is not run at all
+    assert spec.own_tests == ("tests/test_dice.py",)
+    assert spec.properties == {"PR1": "contract property PR1"}
+    assert spec.smoke and spec.own_smoke and not spec.own_build
+
+
+def test_small_clusters_share_one_pass(monkeypatch) -> None:
+    import foundry.agents.implementation.junior_engineer as je
+
+    store = ArtifactStore()
+    state = _scoped_state(store, "ticket:T-002")  # three failures in two clusters
+    assert je.target_clusters(state, store.resolve, je._failed_gates(state)) == ()
+    assert je.fix_target(state, store.resolve, je._failed_gates(state)) == (None, 0)
+    spec = je._fix_check(object(), state, store.resolve)  # type: ignore[arg-type]
+    assert spec.own_refs is None  # every failure is this pass's own
+    monkeypatch.setattr(je, "_MERGE_TOTAL", 2)
+    aimed, others = je.fix_target(state, store.resolve, je._failed_gates(state))
+    assert aimed is not None and aimed.key == "ticket:T-002" and others == 1
+
+
+_DICE = "def total(n: int) -> int:\n    return n * 2\n"
+_PR1_TEST = """\
+from hypothesis import given, strategies as st
+
+from dice import total
+
+
+@given(st.integers(min_value=0, max_value=100))
+def test_pr1_total_is_even(n):
+    assert total(n) % 2 == {rest}
+
+
+def test_plain():
+    assert total(1) == 2
+"""
+
+
+def test_a_fixer_check_opens_red_while_its_failing_tests_reproduce(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import foundry.agents.implementation.junior_engineer as je
+    import foundry.graph.gate_wiring as gw
+    from foundry.gates.self_check import _unattested, judge
+    from foundry.graph.gate_wiring import FailureCluster, _wave_test_gate
+
+    (tmp_path / "dice.py").write_text(_DICE)
+    (tmp_path / "tests").mkdir()
+    test = tmp_path / "tests" / "test_dice.py"
+    test.write_text(_PR1_TEST.format(rest=1))
+    mine = FailureCluster(
+        key="ticket:T-001",
+        stage=1,
+        items=("test:tests/test_dice.py::test_pr1_total_is_even", "test:property:PR1"),
+    )
+    theirs = FailureCluster(key="ticket:T-002", stage=1, items=("test:tests/test_b.py::test_1",))
+    monkeypatch.setattr(gw, "wave_scenarios", lambda state, resolve: frozenset())
+    monkeypatch.setattr(je, "target_clusters", lambda state, resolve, failed: (mine, theirs))
+    state = _state(_gate("build", "t", 1, _OK), _gate("test", "t", 2, _RED, _PR1_FAIL, _B1))
+    spec = je._fix_check(object(), state, lambda uri: None)  # type: ignore[arg-type]
+    # As self_check.run_check builds the check's Test gate.
+    gate = _wave_test_gate(None, None, spec.scope)
+    assert gate is not None
+    gate = gate.owning(spec.own_tests, spec.properties)
+
+    opening = _unattested(gate, tmp_path)
+    assert opening.status is GateStatus.FAIL, opening.findings
+    verdict = judge(spec, (opening,))
+    assert verdict.red and not verdict.pre_existing, verdict
+    assert any(_PR1_FAIL.split(" - ")[0] in line for line in verdict.yours)
+    assert any(line.startswith("property PR1 failing") for line in verdict.yours)
+
+    # A different size: a same-size rewrite in the same second can reuse the stale .pyc.
+    test.write_text(_PR1_TEST.format(rest="0 * 1"))
+    fixed = _unattested(gate, tmp_path)
+    assert fixed.status is GateStatus.PASS, fixed.findings
+    assert judge(spec, (fixed,), {"test": opening}).green
+    # Deleting the failing test is no fix: its property is then missing.
+    test.write_text("def test_plain():\n    pass\n")
+    assert _unattested(gate, tmp_path).status is GateStatus.FAIL
 
 
 _IMPORT_FAIL = (
@@ -2505,9 +2655,13 @@ def test_the_fixer_binding_rule_names_the_failed_import_not_a_rebind() -> None:
     assert _binding_rule(unbound, unbound, ()) == _FIXER_RULES[2]
 
 
-def test_a_fixer_pass_is_fenced_to_its_cluster_and_its_owning_tickets() -> None:
+def test_a_fixer_pass_is_fenced_to_its_cluster_and_its_owning_tickets(
+    monkeypatch,
+) -> None:
+    import foundry.agents.implementation.junior_engineer as je
     from foundry.agents.implementation.junior_engineer import _fix_files
 
+    monkeypatch.setattr(je, "_MERGE_TOTAL", 0)
     store = ArtifactStore()
     tree = {"a.py": "x\n", "tests/test_b.py": "y\n", "admin.py": "z\n"}
     state = _scoped_state(store, "ticket:T-002")

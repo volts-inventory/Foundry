@@ -29,9 +29,9 @@ def _python_test_files(files: Sequence[str]) -> tuple[str, ...]:
 # pytest-bdd then looks for a fixture of that name and fails every scenario.
 _PYTEST_BDD_ARGS = (
     "A step function's parameters come only from its step text, a pytest fixture, or "
-    'an earlier step\'s target_fixture, e.g. `@given("a registered user", '
-    'target_fixture="user_email")` returning the email, then `@when(parsers.parse('
-    '"they log in as {name}"))` with `def step(user_email, name)`; a step\'s plain '
+    'an earlier step\'s target_fixture, e.g. `@given("a saved draft", '
+    'target_fixture="draft_id")` returning the id, then `@when(parsers.parse('
+    '"they publish it to {channel}"))` with `def step(draft_id, channel)`; a step\'s plain '
     "return value is passed to nothing. Scenarios that share a step line share ONE "
     "step definition: pytest-bdd runs only the last definition of a step text, so "
     "never define the same step text twice in a module."

@@ -410,7 +410,7 @@ _BRANCHING_OR = re.compile(
 def _branch_findings(
     criteria: Sequence[AcceptanceCriterion], brief: IntentBrief | None
 ) -> tuple[str, ...]:
-    """A must-have or success criterion naming alternatives ("by title or tag") that
+    """A must-have or success criterion naming alternatives ("by date or author") that
     a single scenario covers: the other branch is never executed."""
     goals = _goal_rows(brief)
     known = {g.lower(): g for _, g, _ in goals}
@@ -1072,8 +1072,8 @@ def _property_findings(
             out.append(
                 f"Contract {c.name} takes {', '.join(args)} but no contract in the plan "
                 "has properties[]: give it 1-4 properties (PR1, ...) that hold for every "
-                "valid generated input, over combinations of its input's features (mixed "
-                "operators, multiple terms), not one case; its implementing ticket "
+                "valid generated input, over combinations of its input's features (several "
+                "options, fields or operators together), not one case; its implementing ticket "
                 "proves each with a property-based test."
             )
     return tuple(out)

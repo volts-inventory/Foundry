@@ -311,7 +311,7 @@ def test_a_plan_with_no_property_is_a_finding_only_for_a_real_input_domain() -> 
     ]
     findings = _property_findings(tickets, [roll, clock, store, go, recent, main])
     assert [f.split()[1] for f in findings] == ["roll", "Sum"]
-    assert "notation: str" in findings[0] and "mixed operators" in findings[0]
+    assert "notation: str" in findings[0] and "several options, fields or operators" in findings[0]
     assert finding_kind(findings[0]) == "contract-no-properties"
     # Any property in the plan silences it; an unimplemented contract is not judged.
     assert _property_findings(tickets, [roll, _contract("x", "PR1: y")]) == ()
@@ -320,7 +320,7 @@ def test_a_plan_with_no_property_is_a_finding_only_for_a_real_input_domain() -> 
 
 def test_the_plan_sop_puts_properties_on_contracts_over_feature_combinations() -> None:
     assert "never in its description or a ticket's" in SOP
-    assert "never only one feature or a single-term case" in SOP
+    assert "never only one feature or a single-part case" in SOP
     assert "trivial and edge inputs of its domain" in SOP
     assert "expressible through the contracts' types" in SOP
     assert "stated upper bound" in SOP

@@ -343,7 +343,7 @@ PROPERTY_TESTING: dict[str, PropertyTesting] = {
             "a pytest test function decorated with hypothesis `@given(...)` (strategies "
             "from `hypothesis.strategies`: st.integers(), st.text(), st.from_regex(...), "
             "st.builds(...), composed with @st.composite for structured input), named "
-            "test_<id>_<what> (e.g. test_pr1_total_within_bounds) in a tests/test_*.py "
+            "test_<id>_<what> (e.g. test_pr1_round_trip) in a tests/test_*.py "
             "module"
         ),
         marker=r"^\s*(from|import)\s+hypothesis\b",

@@ -343,7 +343,7 @@ _SOP = (
     "passing test or scenario does not count. A finding about runtime behaviour (a "
     "crash, a traceback, a 5xx, a race or other concurrency fault, a hang, a wrong "
     "output) must carry a command that EXERCISES that behaviour: start the app and "
-    "curl it (for a race, fire the requests concurrently, e.g. 20 signups at once "
+    "curl it (for a race, fire the requests concurrently, e.g. 20 creates of one resource at once "
     "from a short python script with threads), run the CLI, or run a small script "
     "that drives the code. Never grep or cat as evidence of runtime behaviour: "
     "reading the source shows what the code says, not what it does, and the repro "

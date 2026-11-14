@@ -168,7 +168,12 @@ _TICKET_RULES = (
     'duplicate") gets one scenario per branch, each citing it in covers[]. HARD '
     "INPUTS: cover the inputs that break real apps, not only the happy path: invalid, "
     "blank and malformed values, wrong types, non-ASCII text, size limits and the "
-    "boundaries either side of them. CONVENTIONS: when the input is a well-known "
+    "boundaries either side of them. EXACT OUTCOMES: a scenario over random, time- or "
+    "order-dependent output pins it (a fixed seed, an injected source or clock) and its "
+    "Then states the exact value the spec defines, computed from the parts the app "
+    "reports; a range or 'is an integer' check passes broken arithmetic. A Given that "
+    "says an input is parsed, read or loaded goes through that code, never a "
+    "hand-built object. CONVENTIONS: when the input is a well-known "
     "notation or format, accept the variants its users routinely type, not only the "
     "spec's example (an omitted optional part, either letter case, optional "
     "whitespace), with a scenario for each; a numeric option rejects values outside "

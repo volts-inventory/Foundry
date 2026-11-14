@@ -728,3 +728,11 @@ def test_the_sop_asks_for_the_conventional_input_variants() -> None:
 
     assert "accept the variants its users routinely type" in SOP
     assert "zero or negative counts, limits, sizes" in SOP
+
+
+def test_the_sop_asks_for_exact_outcomes_over_random_output() -> None:
+    from foundry.agents.planner.schema import SOP
+
+    assert "EXACT OUTCOMES" in SOP
+    assert "a range or 'is an integer' check passes broken arithmetic" in SOP
+    assert "never a hand-built object" in SOP

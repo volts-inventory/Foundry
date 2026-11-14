@@ -115,6 +115,13 @@ def is_asset(path: str) -> bool:
     return posixpath.splitext(path)[1].lower() in _ASSET_EXT
 
 
+def is_scaffold(path: str) -> bool:
+    """A package marker (``__init__.py``) or a manifest/config file: project
+    scaffolding, not a feature's work."""
+    name = posixpath.basename(path)
+    return name == "__init__.py" or name in _CONFIG_FILES
+
+
 def ticket_files(files: Iterable[str], protected: Collection[str] = ()) -> tuple[str, ...]:
     """The files of ``files`` the ticket writes as its own: never a test or step
     module, a package marker, a ``protected`` stack-command file or a manifest.
@@ -169,7 +176,11 @@ def size_text(ceilings: Ceilings) -> str:
     return (
         "\n\nTICKET SIZE (this run; checked: a ticket over it FAILS the Spec gate): "
         + rows
-        + ". The entrypoint ticket is exempt. Work files are source code: templates "
+        + ". Count each ticket's scenarios and work files before you emit it: one "
+        "over the ceiling is split by feature area into two tickets that each own "
+        "their own files and scenarios (never two tickets writing one file; a module "
+        "carrying too many scenarios becomes two modules). The entrypoint ticket is "
+        "exempt. Work files are source code: templates "
         "and static assets (HTML/Jinja templates, CSS, images, fonts, audio; a script "
         "or module is work wherever it lives) count only toward files in all, and "
         "neither counts tests, package markers (__init__.py), stack-command files "

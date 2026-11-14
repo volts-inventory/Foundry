@@ -18,9 +18,11 @@ from foundry.agents.planner import EPIC_SOP, SOP, make_planner_node
 from foundry.agents.planner.build import _build_tickets, _Epic, _epic_items
 from foundry.agents.planner.checks import _size_findings
 from foundry.agents.planner.folds import (
+    _fold_scaffold_tickets,
     _merge_sole_dependents,
     _one_step_module_per_ticket,
     _own_scenario_bindings,
+    _raise_oversized,
 )
 from foundry.agents.planner.prior import _kept_ids
 from foundry.agents.planner.sizing import (
@@ -434,6 +436,97 @@ def test_the_ceiling_follows_where_each_difficultys_tier_runs() -> None:
     assert "a web layer whose routes and templates fit stays ONE ticket" in text
     assert "is a ceiling, not a target" in text
     assert "Every feature ticket owns at least one scenario" in text
+    assert "split by feature area into two tickets that each own their own files" in text
+
+
+def test_an_oversized_ticket_moves_up_to_a_difficulty_whose_ceiling_takes_it() -> None:
+    eleven = tuple(f"A{i}" for i in range(11))
+    parser = _t("parser", ("dice/parser.py",), eleven)
+    hybrid = ticket_ceilings({"T2", "T3"})
+    tickets, concerns = _raise_oversized([parser], hybrid)
+    assert tickets[0].difficulty is Difficulty.COMPLEX
+    assert _size_findings(tickets, hybrid) == ()
+    assert concerns == [
+        "Ticket parser: raised from standard to complex, whose cloud model's size ceiling takes it."
+    ]
+    # Every tier local, over every ceiling, the entrypoint, built work: unchanged.
+    assert _raise_oversized([parser], _LOCAL) == ([parser], [])
+    huge = _t("huge", ("a.py",), tuple(f"A{i}" for i in range(13)))
+    assert _raise_oversized([huge], hybrid) == ([huge], [])
+    entry = parser.model_copy(update={"entrypoint": True})
+    assert _raise_oversized([entry], hybrid) == ([entry], [])
+    assert _raise_oversized([parser], hybrid, keep=frozenset({"parser"})) == ([parser], [])
+    # Within its own ceiling: never moved up.
+    small = _t("small", ("a.py",), ("A1",))
+    assert _raise_oversized([small], hybrid) == ([small], [])
+
+
+def _scaffold_plan(
+    roller: Difficulty = Difficulty.STANDARD,
+) -> list[Ticket]:
+    return [
+        _t(
+            "setup",
+            ("dice/__init__.py", "pyproject.toml"),
+            (),
+            ("contracts",),
+            difficulty=Difficulty.TRIVIAL,
+            specialty=Specialty.TEST,
+        ),
+        _t("parser", ("dice/parser.py",), ("A1",), ("setup",), implements=("parse",)),
+        _t("roller", ("dice/roller.py",), ("A2",), ("setup",), difficulty=roller),
+        _t("cli", ("dice/__main__.py",), ("A3",), ("setup", "parser", "roller"), entry=True),
+    ]
+
+
+def test_a_scaffold_only_ticket_folds_into_its_first_dependent() -> None:
+    tickets, concerns = _fold_scaffold_tickets(_scaffold_plan(), _LOCAL)
+    by_id = {t.id: t for t in tickets}
+    assert list(by_id) == ["parser", "roller", "cli"]
+    parser = by_id["parser"]
+    assert parser.files == ("dice/parser.py", "dice/__init__.py", "pyproject.toml")
+    assert parser.depends_on == ("contracts",)
+    assert parser.scenario_ids == ("A1",) and parser.difficulty is Difficulty.STANDARD
+    # Everything that followed the scaffold still follows its files.
+    assert by_id["roller"].depends_on == ("parser",)
+    assert by_id["cli"].depends_on == ("parser", "roller")
+    assert [t.seq.local for t in tickets] == [0, 1, 2]
+    assert concerns == [
+        "Ticket setup: folded into parser: it only scaffolds (dice/__init__.py, "
+        "pyproject.toml), no session of its own."
+    ]
+
+
+def test_a_scaffold_fold_never_costs_parallelism_or_touches_real_work() -> None:
+    # Hybrid: a cloud roller would wait on the local parser it ran beside.
+    plan = _scaffold_plan(roller=Difficulty.COMPLEX)
+    hybrid = ticket_ceilings({"T2", "T3"})
+    assert _fold_scaffold_tickets(plan, hybrid) == (plan, [])
+    # Cloud: parallel sessions, so the fold waits for a target the others follow.
+    assert _fold_scaffold_tickets(_scaffold_plan(), ALL_CLOUD)[1] == []
+    chain = _scaffold_plan()
+    chain[2] = chain[2].model_copy(update={"depends_on": ("setup", "parser")})
+    tickets, concerns = _fold_scaffold_tickets(chain, ALL_CLOUD)
+    assert [t.id for t in tickets] == ["parser", "roller", "cli"] and len(concerns) == 1
+    # A scenario, a contract, a work file, built work: not scaffolding.
+    for update in (
+        {"scenario_ids": ("A9",)},
+        {"implements": ("parse",)},
+        {"files": ("dice/__init__.py", "dice/util.py")},
+    ):
+        plan = _scaffold_plan()
+        plan[0] = plan[0].model_copy(update=update)
+        assert _fold_scaffold_tickets(plan, _LOCAL) == (plan, [])
+    plan = _scaffold_plan()
+    assert _fold_scaffold_tickets(plan, _LOCAL, keep=frozenset({"setup"})) == (plan, [])
+    # Never into a test ticket: the next dependent takes it.
+    plan[1] = plan[1].model_copy(update={"specialty": Specialty.TEST})
+    assert [t.id for t in _fold_scaffold_tickets(plan, _LOCAL)[0]] == ["parser", "roller", "cli"]
+    assert "dice/__init__.py" in _fold_scaffold_tickets(plan, _LOCAL)[0][1].files
+    plan = _scaffold_plan()
+    # Only the entrypoint depends on it: never folded into the entrypoint.
+    only_entry = [plan[0], plan[3].model_copy(update={"depends_on": ("setup",)})]
+    assert _fold_scaffold_tickets(only_entry, _LOCAL) == (only_entry, [])
 
 
 def _oversized() -> dict[str, Any]:
@@ -455,6 +548,13 @@ def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
     rt, tx, cas = _runtime(_oversized(), local=frozenset({"T2", "T3"}))  # hybrid
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert "at most 4 work files, 20 files in all and 8 scenarios" in json.dumps(tx.requests[0])
+    assert "split by feature area into two tickets" in json.dumps(tx.requests[0])
+    # Hybrid: the complex (cloud) ceiling takes it, so it moves up instead of a split.
+    assert _size_of(writes, cas) == ()
+    tickets = {t.id: t for t in _bodies(cas, writes, "ticket")}
+    assert tickets["T-001"].difficulty is Difficulty.COMPLEX
+    rt, tx, cas = _runtime(_oversized(), local=frozenset({"T1", "T2", "T3"}))  # local
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert _size_of(writes, cas) == (
         "Ticket T-001 is over its size ceiling: 5 work files, 5 files in all and 1 "
         "scenarios, where a standard ticket (built on a local model) takes at most 4 "

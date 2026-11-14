@@ -91,7 +91,9 @@ _DEFAULT_CONTRACTS_FILE: dict[str, str] = {
 _TICKET_RULES = (
     "Cover every case the request needs. Keep each ticket within the TICKET SIZE "
     "ceiling for the model its difficulty runs on (the numbers for this run follow "
-    "the request; checked: a ticket over it FAILS the Spec gate and must be split). "
+    "the request; checked: a ticket over it FAILS the Spec gate and must be split, "
+    "so split by feature area into two tickets that each own their files before you "
+    "emit it, scenarios counted). "
     "Templates and static assets count only toward its "
     "looser files-in-all limit, so never split a web layer per page when it fits. "
     "A feature ticket owns at least one scenario: work no scenario of its own "

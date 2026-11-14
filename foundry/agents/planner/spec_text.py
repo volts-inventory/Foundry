@@ -263,10 +263,13 @@ def bound_conflicts(
 ) -> tuple[str, ...]:
     """Scenarios whose literal example breaks a pinned numeric bound on the same noun
     (``sides >= 2`` beside ``a die with 1 side``): no correct implementation passes
-    both. Conservative: a conditional constraint, a generic noun, or a scenario
-    proving the value is rejected is never reported."""
+    both. Conservative: a conditional constraint, one stating what is refused, a
+    generic noun, or a scenario proving the value is rejected is never reported."""
     out: list[str] = []
     for cid, text in constraints:
+        # `count > 10000 raises ParseError` bounds what is refused, not what is required.
+        if _REJECTS.search(_normalise(text)):
+            continue
         for noun, op, n in _bounds(text):
             for c in criteria:
                 scenario = _normalise(c.text)

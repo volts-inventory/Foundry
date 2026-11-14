@@ -1340,7 +1340,14 @@ def test_a_scenario_example_breaking_a_pinned_numeric_bound_is_a_finding() -> No
     ]
     assert bound_conflicts([("PC-001", "sides ≥ 2")], ok) == ()
     # Ambiguous bounds are never reported: conditional, generic noun, a unit after it.
-    for text in ("sides >= 2 unless the die is fudge", "value >= 2", "names at most 1 word"):
+    for text in (
+        "sides >= 2 unless the die is fudge",
+        "value >= 2",
+        "names at most 1 word",
+        # It bounds what is refused: sides > 0 is the allowed range.
+        "sides < 2 raises ParseError",
+        "reject sides < 2 with an error",
+    ):
         assert bound_conflicts([("PC-1", text)], [one_side]) == (), text
 
 

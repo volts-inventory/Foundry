@@ -419,6 +419,63 @@ def _build_test_smoke(
     properties: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
+    gates = _run_gates(
+        _final_unit(
+            runner,
+            min_passed=min_passed,
+            discriminator_factory=discriminator_factory,
+            profile=profile,
+            pyenv=pyenv,
+            launch=launch,
+            owned=owned,
+            properties=properties,
+        ),
+        rt=rt,
+        runner=runner,
+        config=config,
+        run_against=run_against,
+        workdir=workdir,
+    )
+    test = gates[1]
+    out: dict[str, Any] = {"gates": gates}
+    if (
+        profile is not None
+        and test_cmd is not None
+        and profile.bdd_cmd is None
+        and any((workdir / FEATURE_DIR).glob("*.feature"))
+    ):
+        # Only the pytest harness executes scenarios; say so rather than pass silently.
+        out["gate_triage"] = [
+            GateTriage(
+                name=test.name,
+                run_against=run_against,
+                explanation=(
+                    "ADVISORY: features/*.feature hold the tickets' acceptance scenarios, "
+                    f"but the {profile.name} test harness does not execute them — they "
+                    "are not enforced as executable for this stack."
+                ),
+                produced_by=_TEST_NODE,
+                seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
+            )
+        ]
+    return out
+
+
+def _final_unit(
+    runner: TwoZoneGateRunner,
+    *,
+    min_passed: int,
+    discriminator_factory: DiscriminatorFactory | None,
+    profile: VerificationProfile | None,
+    pyenv: PythonBuildEnv | None,
+    launch: GateImpl,
+    owned: frozenset[str] | None,
+    properties: dict[str, str] | None,
+) -> list[tuple[GateImpl, str]]:
+    """The final gates' ordered unit: build, test, smoke, launch. The last wave check
+    runs this same unit (:func:`run_build_gate` ``as_final``) so the final gates on
+    the unchanged tree reuse its verdicts (``reuse.unit_key``) instead of re-running."""
+    test_cmd = profile.test_cmd if profile is not None else None
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
     # COMPILED Test gate when a factory is injected (A-M4-01): a gamed-green suite
     # that clears the floor but survives a held-out mutant FAILs here, not just in
@@ -459,42 +516,12 @@ def _build_test_smoke(
         smoke = SmokeGate(profile.smoke_cmd, seal_key=runner.seal_key, pyenv=pyenv)
     else:
         smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
-    gates = _run_gates(
-        [
-            (_build_gate(profile, runner, pyenv, owned=owned), _BUILD_NODE),
-            (test_gate, _TEST_NODE),
-            (smoke, _SMOKE_NODE),
-            (launch, _LAUNCH_NODE),
-        ],
-        rt=rt,
-        runner=runner,
-        config=config,
-        run_against=run_against,
-        workdir=workdir,
-    )
-    test = gates[1]
-    out: dict[str, Any] = {"gates": gates}
-    if (
-        profile is not None
-        and test_cmd is not None
-        and profile.bdd_cmd is None
-        and any((workdir / FEATURE_DIR).glob("*.feature"))
-    ):
-        # Only the pytest harness executes scenarios; say so rather than pass silently.
-        out["gate_triage"] = [
-            GateTriage(
-                name=test.name,
-                run_against=run_against,
-                explanation=(
-                    "ADVISORY: features/*.feature hold the tickets' acceptance scenarios, "
-                    f"but the {profile.name} test harness does not execute them — they "
-                    "are not enforced as executable for this stack."
-                ),
-                produced_by=_TEST_NODE,
-                seq=rt.seq(config, _TEST_NODE, "triage:bdd"),
-            )
-        ]
-    return out
+    return [
+        (_build_gate(profile, runner, pyenv, owned=owned), _BUILD_NODE),
+        (test_gate, _TEST_NODE),
+        (smoke, _SMOKE_NODE),
+        (launch, _LAUNCH_NODE),
+    ]
 
 
 def wave_scenarios(
@@ -656,6 +683,7 @@ def run_build_gate(
     scenarios: frozenset[str] = frozenset(),
     launch: bool = False,
     carry: Iterable[str] = (),
+    as_final: bool = False,
 ) -> dict[str, Any]:
     """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
     when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
@@ -665,7 +693,15 @@ def run_build_gate(
     The full Test gate is left out on purpose: scenarios of tickets not yet built
     would fail it. ``carry``: the fix window's initial failures, judged again
     (:func:`wave_owned_tests`). Keyed under the same nodes as the final gates, so
-    the final verdicts (a later epoch) supersede every intermediate one."""
+    the final verdicts (a later epoch) supersede every intermediate one.
+
+    ``as_final`` (the last wave, every ticket built, so the scoped Test gate would
+    judge every scenario): when the tree needs no wave scoping, run the final gates'
+    own unit (:func:`_final_unit`) instead, so the final gates on this unchanged tree
+    reuse these verdicts rather than re-running build, test and launch. Its smoke
+    verdict is left out of the result (the wave boundary does not judge it, and a
+    smoke record on state marks the final gates as run); the final gates
+    re-reference it from the runner's verdict cache."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     files = planned_files(state, resolve)
@@ -687,6 +723,22 @@ def run_build_gate(
     profile = gate_profile(state, profile)
     unbuilt = unbuilt_source(profile, files, workdir)
     with _build_env(profile, workdir, rt) as pyenv:
+        if as_final and launch and scenarios and not notes and not unbuilt:
+            unit = _final_unit(
+                runner,
+                min_passed=1,
+                discriminator_factory=None,
+                profile=profile,
+                pyenv=pyenv,
+                launch=launch_gate(state, resolve, profile, runner.seal_key, pyenv),
+                owned=owned_paths(state, resolve),
+                properties=planned_properties(state, resolve),
+            )
+            results = _run_gates(
+                unit, rt=rt, runner=runner, config=config, run_against=run_against, workdir=workdir
+            )
+            out["gates"] = [g for g in results if g.name != "smoke"]
+            return out
         gates: list[tuple[GateImpl, str]] = [
             (
                 NotApplicableGate("build", unbuilt, seal_key=runner.seal_key)

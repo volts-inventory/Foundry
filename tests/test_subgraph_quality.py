@@ -611,7 +611,8 @@ def test_a_review_cut_at_the_output_cap_retries_once_on_the_trimmed_diff(records
     )
     out = node(_reviewer_state(cas, _ADD_APP + test_file), _config())
     first, second = (r["messages"][0]["content"] for r in transport.requests)
-    assert "TESTS_ONLY" in first
+    # No test check failed: the first request summarizes the test file.
+    assert "TESTS_ONLY" not in first and "tests/test_app.py (+1 -0)" in first
     assert "after your last reply ran past the output limit" in second
     assert "TESTS_ONLY" not in second and "def tip" in second
     assert out["gates"][0].status is GateStatus.PASS
@@ -620,3 +621,44 @@ def test_a_review_cut_at_the_output_cap_retries_once_on_the_trimmed_diff(records
 def test_the_trimmed_diff_keeps_the_files_a_failing_check_names() -> None:
     trimmed = reviewer_critic.trimmed_diff(_ADD_APP, "build: lib.py:1: name error")
     assert "UNTOUCHED" in trimmed and "def tip" not in trimmed
+
+
+_TEST_EDIT = (
+    "--- a/tests/test_app.py\n+++ b/tests/test_app.py\n"
+    "@@ -1,3 +1,3 @@\n def test_tip():\n-    assert tip(10) == 1.0\n+    assert tip(10)\n"
+    "@@ -9,2 +9,3 @@\n def test_more():\n+    BULK_SETUP = 1\n     pass\n"
+)
+_NEW_TEST = (
+    "--- /dev/null\n+++ b/tests/test_new.py\n@@ -0,0 +2 @@\n"
+    "+def test_new():\n+    assert NEW_ONLY\n"
+)
+_SKIPPED = (
+    "--- /dev/null\n+++ b/tests/test_skip.py\n@@ -0,0 +2 @@\n"
+    "+@pytest.mark.skip\n+def test_gone(): ...\n"
+)
+
+
+def test_lean_tests_summarizes_test_files_but_keeps_weakening_hunks() -> None:
+    lean = reviewer_critic.lean_tests(_ADD_APP + _TEST_EDIT + _NEW_TEST + _SKIPPED)
+    assert "def tip" in lean  # source untouched
+    for line in ("tests/test_app.py (+2 -1)", "tests/test_new.py (+2 -0)"):
+        assert line in lean
+    assert "-    assert tip(10) == 1.0" in lean  # a loosened assert, in full
+    assert "@pytest.mark.skip" in lean  # an added skip, in full
+    assert "BULK_SETUP" not in lean and "NEW_ONLY" not in lean
+    assert reviewer_critic.lean_tests(_ADD_APP) == _ADD_APP
+
+
+def test_a_failing_test_gate_sends_the_review_the_whole_test_diff(records: Any) -> None:
+    cas = ArtifactStore()
+    state = _reviewer_state(cas, _ADD_APP + _NEW_TEST)
+    transport = MockTransport(verdicts=["approve", "approve"])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    node(state, _config())
+    state["gates"] = [*state["gates"], _gate("test", GateStatus.FAIL, "boom", local=4)]
+    node(state, _config(step=2))
+    lean, full = (r["messages"][0]["content"] for r in transport.requests)
+    assert "NEW_ONLY" not in lean and "tests/test_new.py (+2 -0)" in lean
+    assert "NEW_ONLY" in full

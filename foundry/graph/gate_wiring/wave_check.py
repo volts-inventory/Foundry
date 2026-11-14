@@ -94,6 +94,13 @@ class WaveBuildCheck:
 
     The last wave's check (no wave left to build) also runs the Launch gate
     (``check_launch``): the whole app is built, so it is started as a user would.
+    When every ticket is built and its scoped Test gate would judge every scenario
+    (:meth:`_as_final`), it runs the final gates' own unit instead, so the final
+    gates on the unchanged tree reuse its verdicts rather than running build, test
+    and launch a second time. The check keeps its wave semantics (its fix window,
+    budget, escalation and restarts); only what it executes widens to the final
+    unit. ``final_unit=False`` (a supervisor whose final Test gate consults a
+    discriminator: its unit is never reusable) keeps the wave-scoped gates.
 
     ``run`` is the node (verdict + budget bump); ``route`` returns
     :data:`ADVANCE` / :data:`FIX` / :data:`HALT` for the :data:`BUILD_BOUNDARY`, or
@@ -111,6 +118,7 @@ class WaveBuildCheck:
     # The engineering node's difficulty -> tier table (escalation picks local tickets).
     ticket_tiers: Mapping[Any, str] | None = None
     fix_policy: FixPolicy = FixPolicy()  # noqa: RUF009 - frozen, so a shared default is safe
+    final_unit: bool = True
 
     @property
     def _policy(self) -> FixPolicy:
@@ -143,6 +151,29 @@ class WaveBuildCheck:
             return frozenset()
         return scope
 
+    def _as_final(self, state: FactoryState, scenarios: frozenset[str], launch: bool) -> bool:
+        """May this check run the final gates' unit? Only on the last wave (it
+        launches), with every live ticket built and every current criterion's
+        scenario in its scope: then its scoped Test gate judges what the final one
+        does, and running the final unit changes nothing but who runs it first."""
+        if not (self.final_unit and launch and scenarios):
+            return False
+        from foundry.agents.implementation.tickets import (
+            built_task_ids,
+            read_tickets,
+            task_id_for_ticket,
+        )
+        from foundry.graph.gate_wiring.materialize import _current_criteria
+        from foundry.schemas.implementation import scenario_ref
+
+        built = built_task_ids(state)
+        if any(task_id_for_ticket(t.id) not in built for t in read_tickets(state, self.resolve)):
+            return False
+        criteria = _current_criteria(state, self.resolve).values()
+        return all(c.ticket_id for c in criteria) and scenarios == {
+            scenario_ref(c.ticket_id, c.id) for c in criteria if c.ticket_id
+        }
+
     def _boundary(self, state: FactoryState, scenarios: frozenset[str]) -> tuple[str, bool]:
         """(the boundary this check judges, whether it launches the app): the last
         wave's check (no wave left to build) also runs the Launch gate."""
@@ -172,6 +203,7 @@ class WaveBuildCheck:
                 scenarios=scenarios,
                 launch=launch,
                 carry=carry,
+                as_final=self._as_final(state, scenarios, launch),
             )
 
     def run(self, state: FactoryState, config: RunnableConfig) -> dict[str, Any]:

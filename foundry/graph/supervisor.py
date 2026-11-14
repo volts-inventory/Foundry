@@ -377,6 +377,7 @@ def build_supervisor_graph(
             profile=profile,
             ticket_tiers=ticket_tiers,
             fix_policy=policy,
+            final_unit=discriminator_factory is None,
         ),
     ).compile()
     quality = build_quality_subgraph(rt, resolve=resolve, resolve_blob=resolve_blob).compile()

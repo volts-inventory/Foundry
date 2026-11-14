@@ -892,3 +892,108 @@ def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records
     changed, c_resolve, c_blob = _seed(criteria, (_feature_diff(files),))
     rerun, fired = gates(rt, changed, c_resolve, c_blob, "bt4")
     assert fired == {} and rerun[0].run_against != first[0].run_against
+
+
+def test_final_gates_reuse_the_last_wave_checks_final_unit(tmp_path, rt, records, verifier):
+    """The last wave check, run ``as_final``, runs the final gates' unit; the final
+    gates on the unchanged tree then reuse all four verdicts (smoke included, though
+    the wave check leaves it off state) under the original attestations."""
+    from foundry import telemetry
+    from foundry.gates.reuse import VerdictCache
+    from foundry.graph.gate_wiring import run_build_gate
+
+    criteria = (_criterion("c1"), _criterion("c2", security=True))
+    files = {"app.py": _GOOD_MODULE, "test_app.py": _PASSING_TEST}
+    state, resolve, resolve_blob = _seed(criteria, (_feature_diff(files),))
+    runner = TwoZoneGateRunner(
+        ZoneBSigner(KEY, KEY_ID), records, SCANNER_REV, LINEAGE_REV, verdicts=VerdictCache()
+    )
+
+    def wave(as_final: bool, w: str) -> list[GateResult]:
+        out = run_build_gate(
+            state,
+            _config(),
+            rt=rt,
+            runner=runner,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
+            workdir=tmp_path / w,
+            scenarios=frozenset({"T-001/c1"}),
+            launch=True,
+            as_final=as_final,
+        )
+        return list(out["gates"])
+
+    def final(w: str) -> tuple[list[GateResult], dict[str, int]]:
+        with telemetry.counting() as counts:
+            out = run_build_test_gates(
+                state,
+                _config(2),
+                rt=rt,
+                runner=runner,
+                resolve=resolve,
+                resolve_blob=resolve_blob,
+                workdir=tmp_path / w,
+            )
+        return list(out["gates"]), counts.snapshot()
+
+    # A wave-scoped check shares no unit with the final gates: they run again.
+    scoped = wave(False, "w0")
+    assert [g.name for g in scoped] == ["build", "test", "launch"]
+    _, fired = final("f0")
+    assert fired == {}
+
+    files = {"app.py": "VALUE = 7\n", "test_app.py": _PASSING_TEST}
+    state, resolve, resolve_blob = _seed(criteria, (_feature_diff(files),))
+    checked = wave(True, "w1")
+    assert [g.name for g in checked] == ["build", "test", "launch"]
+    assert all(g.status is GateStatus.PASS for g in checked)
+    gates, fired = final("f1")
+    assert fired == {
+        "gate.reuse.build": 1,
+        "gate.reuse.test": 1,
+        "gate.reuse.smoke": 1,
+        "gate.reuse.launch": 1,
+    }
+    by_name = {g.name: g for g in gates}
+    for g in checked:
+        assert by_name[g.name].runner_attestation == g.runner_attestation
+        assert by_name[g.name].run_against == g.run_against
+        assert by_name[g.name].seq > g.seq
+    assert merge_gates(gates, None)
+
+
+def test_only_a_last_wave_with_everything_built_runs_the_final_unit(rt, runner, monkeypatch):
+    from types import SimpleNamespace
+
+    import foundry.agents.implementation.tickets as tickets
+    import foundry.graph.gate_wiring.materialize as materialize
+    from foundry.graph.gate_wiring import WaveBuildCheck
+    from foundry.schemas.implementation import scenario_ref
+
+    built = {"task-a", "task-b"}
+    crits = {
+        "c1": SimpleNamespace(id="c1", ticket_id="T-A"),
+        "c2": SimpleNamespace(id="c2", ticket_id="T-B"),
+    }
+    monkeypatch.setattr(
+        tickets, "read_tickets", lambda s, r: (SimpleNamespace(id="T-A"), SimpleNamespace(id="T-B"))
+    )
+    monkeypatch.setattr(tickets, "task_id_for_ticket", lambda tid: f"task-{tid[2:].lower()}")
+    monkeypatch.setattr(tickets, "built_task_ids", lambda s: set(built))
+    monkeypatch.setattr(materialize, "_current_criteria", lambda s, r: dict(crits))
+    check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
+    every = frozenset({scenario_ref("T-A", "c1"), scenario_ref("T-B", "c2")})
+
+    assert check._as_final({}, every, launch=True)
+    assert not check._as_final({}, every, launch=False)  # a wave is still to build
+    assert not check._as_final({}, frozenset({scenario_ref("T-A", "c1")}), launch=True)
+    assert not check._as_final({}, frozenset(), launch=True)
+    assert not WaveBuildCheck(
+        rt, runner, lambda h: None, lambda u: b"", final_unit=False
+    )._as_final({}, every, launch=True)
+    built.discard("task-b")  # a ticket left unbuilt: its tests are not on the tree
+    assert not check._as_final({}, every, launch=True)
+    built.add("task-b")
+    crits["c3"] = SimpleNamespace(id="c3", ticket_id=None)  # unscoped criterion
+    assert not check._as_final({}, every, launch=True)

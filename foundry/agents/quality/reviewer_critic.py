@@ -204,6 +204,61 @@ def _capped(text: str, keep: Callable[[str], bool] | None = None) -> tuple[str, 
     return head + text[:room] + note, False
 
 
+# A removed line that asserted something, or an added line that skips or xfails a
+# test: the hunks that can weaken a suite, kept in full when test diffs are summarized.
+_REMOVED_ASSERT = re.compile(
+    r"^-(?!--).*(\bassert|\bexpect\s*\(|\.should\b|\braises\b|\bt\.(Error|Fatal)|"
+    r"\brequire\.|\bverify\b)",
+    re.MULTILINE,
+)
+_ADDED_SKIP = re.compile(
+    r"^\+(?!\+\+).*(\bskip|\bxfail|\.only\s*\(|\bt\.Skip|@Disabled|\bxit\s*\(|"
+    r"\bxdescribe\b|\|\|\s*true\b)",
+    re.MULTILINE,
+)
+_HUNK_SPLIT = re.compile(r"^(?=@@)", re.MULTILINE)
+
+
+def lean_tests(diff: str) -> str:
+    """``diff`` with each test file's section replaced by a summary (path and
+    added/removed line counts), except the hunks that remove an assertion or add a
+    skip, which stay in full: what the review's test-weakening check reads. Source
+    files are untouched. Used while no test check failed on the tree."""
+    out: list[str] = []
+    summary: list[str] = []
+    loosening: list[str] = []
+    for section, path in _file_sections(diff):
+        if not path or not _TEST_PATH.search(path):
+            out.append(section)
+            continue
+        added = sum(
+            1 for ln in section.splitlines() if ln.startswith("+") and not ln.startswith("+++")
+        )
+        removed = sum(
+            1 for ln in section.splitlines() if ln.startswith("-") and not ln.startswith("---")
+        )
+        summary.append(f"  {path} (+{added} -{removed})")
+        # A task header ("--- task ...") rides at a section's tail: keep it in place.
+        lines = section.splitlines(keepends=True)
+        tasks = "".join(ln for ln in lines if ln.startswith("--- task "))
+        body = "".join(ln for ln in lines if not ln.startswith("--- task "))
+        head, *hunks = _HUNK_SPLIT.split(body)
+        weak = [h for h in hunks if _REMOVED_ASSERT.search(h) or _ADDED_SKIP.search(h)]
+        if weak:
+            loosening.append(head + "".join(weak))
+        if tasks:
+            out.append(tasks)
+    if not summary:
+        return diff
+    note = (
+        "\n\n[Test files changed, summarized: no test check failed on this tree. "
+        "Hunks that remove an assertion or add a skip are shown in full below.]\n"
+        + "\n".join(summary)
+        + "\n"
+    )
+    return "".join(out).rstrip("\n") + note + "".join(loosening)
+
+
 def _always_shown(rt: AgentRuntime, state: FactoryState) -> Callable[[str], bool]:
     """Whether a changed path is one the review must always see: a file of an
     entrypoint ticket (the composition root) or a template."""
@@ -220,7 +275,11 @@ def _always_shown(rt: AgentRuntime, state: FactoryState) -> Callable[[str], bool
 
 
 def _diff_text(
-    rt: AgentRuntime, state: FactoryState, keep: Callable[[str], bool] | None = None
+    rt: AgentRuntime,
+    state: FactoryState,
+    keep: Callable[[str], bool] | None = None,
+    *,
+    lean: bool = False,
 ) -> tuple[str, bool]:
     """The change under review as unified-diff text: every ``feature_diff`` body in
     ``Seq`` order (the order ``materialize_workdir`` applies them), capped at
@@ -250,7 +309,8 @@ def _diff_text(
         parts.append(f"--- task {handle.task_id or body.task_id} ({handle.uri}) ---\n{text}")
     if not parts:
         return "(None of the feature_diff bodies could be resolved: no diff text to review.)", False
-    out, whole = _capped("\n\n".join(parts), keep)
+    joined = "\n\n".join(parts)
+    out, whole = _capped(lean_tests(joined) if lean else joined, keep)
     if missing:
         out += "\n\n[Unresolvable diffs, not shown: " + ", ".join(missing) + "]"
     return out, whole and not missing
@@ -305,6 +365,8 @@ def _delta_text(
     before: Mapping[str, str],
     after: Mapping[str, str],
     keep: Callable[[str], bool] | None = None,
+    *,
+    lean: bool = False,
 ) -> tuple[str, bool]:
     """The change from ``before`` to ``after`` as unified diffs, path by path,
     capped like :func:`_diff_text`, and whether it fit whole."""
@@ -325,7 +387,8 @@ def _delta_text(
         )
     if not parts:
         return "(No file changed since the tree you reviewed.)", True
-    return _capped("\n".join(parts), keep)
+    joined = "\n".join(parts)
+    return _capped(lean_tests(joined) if lean else joined, keep)
 
 
 _SOP = (
@@ -506,6 +569,18 @@ _DIFF_PATH = re.compile(r"^(?:\+\+\+ b/|--- a/)(\S+)", re.MULTILINE)
 _TEST_PATH = re.compile(r"(^|/)(tests?|features|steps|__tests__)/|(^|/)(test_[^/]*|conftest\.py)$")
 
 
+_TEST_GATE = "test"
+
+
+def _test_failed(state: FactoryState) -> bool:
+    """Did the run's newest Test verdict fail (on any tree)?"""
+    tests = [g for g in state.get("gates") or () if g.name == _TEST_GATE]
+    return bool(tests) and max(tests, key=lambda g: g.seq).status in (
+        GateStatus.FAIL,
+        GateStatus.ERROR,
+    )
+
+
 def _failing_findings(state: FactoryState) -> str:
     """Every finding of the newest non-judgment verdict per gate that failed."""
     from foundry.state.reducers import JUDGMENT_VERDICTS
@@ -610,12 +685,17 @@ def review(
     )
     delta: str | None = None
     keep = _always_shown(rt, state)
+    built = tree[0] if tree is not None else _reviewed_tree(state, resolve, resolve_blob)
+    gates, tests = failing_checks(state, built)
+    # Test diffs in full only when a test check failed (on this tree, or the newest
+    # Test verdict of the run): otherwise a summary plus every weakening hunk.
+    lean = not (_TEST_GATE in gates or tests or _test_failed(state))
     if prior is not None and tree is not None:
         # Always the delta after a fix, even when the last review or this delta was
         # truncated: a full re-review re-reads the same capped head of the change
         # (a local re-review cost the first one's 15 minutes again) and sees no
         # more of the tree than the delta and the open findings do.
-        delta, whole = _delta_text(prior[1], tree[1], keep)
+        delta, whole = _delta_text(prior[1], tree[1], keep, lean=lean)
     content = (
         f"Review the artifact under {subject_uri} against the spec, the contracts and "
         "the acceptance criteria. Emit your verdict."
@@ -641,7 +721,7 @@ def review(
         + _launch_text(state)
     )
     if prior is None or delta is None:
-        diff, complete = _diff_text(rt, state, keep)
+        diff, complete = _diff_text(rt, state, keep, lean=lean)
 
         def body(change: str) -> str:
             return "\n\nThe change (unified diffs, applied in order):\n" + change
@@ -670,8 +750,6 @@ def review(
         "per ticket, rendered from the acceptance criteria above) and criteria.json "
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
-    built = tree[0] if tree is not None else _reviewed_tree(state, resolve, resolve_blob)
-    gates, tests = failing_checks(state, built)
     tail += (
         "\n\nChecks failing on this tree in its gate results: "
         + (", ".join((*gates, *tests)) or "none (no gate has failed on it)")

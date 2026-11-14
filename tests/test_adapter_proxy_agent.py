@@ -18,7 +18,13 @@ import pytest
 
 from foundry.execution.adapter_contract import TaskPacket
 from foundry.execution.adapters.proxy_agent import ACTION_SCHEMA, TOOLS, ProxyAgentAdapter
-from foundry.execution.adapters.tiered import DIGEST_TRIAGE, STOPPED_DIGEST
+from foundry.execution.adapters.tiered import (
+    DIGEST_TRIAGE,
+    SPEC_CONFLICT_TRIAGE,
+    STOPPED_DIGEST,
+    UPSTREAM_DEFECT_TRIAGE,
+    session_stop_reason,
+)
 from foundry.execution.sandbox import Sandbox
 from foundry.proxy import ToolsUnsupported
 from foundry.state.reducers import union_triage
@@ -64,6 +70,185 @@ def test_write_run_done_cycle(tmp_path: Path) -> None:
     assert body == {"kind": "full-file-snapshot", "files": {"mod.py": "X = 1\n"}}
     assert result.turns_used == 3
     assert [t.explanation for t in result.triage] == ["built mod", "no docs yet"]
+
+
+def test_tool_caches_a_session_leaves_never_reach_its_diff_or_the_shipped_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry.agents.implementation.tickets import note_fix_writes, trim_to_write_scope
+    from foundry.cli import output
+
+    src = tmp_path / "src"
+    src.mkdir()
+    cmd = (
+        "mkdir -p .hypothesis/examples tests/.hypothesis/constants htmlcov && "
+        "echo db > .hypothesis/examples/ab && echo c > tests/.hypothesis/constants/x && "
+        "echo cov > .coverage && echo h > htmlcov/index.html"
+    )
+    adapter = ProxyAgentAdapter(
+        scripted(
+            [
+                {"action": "write_file", "path": "mod.py", "content": "X = 1\n"},
+                {"action": "run", "cmd": cmd},
+                {"action": "done", "summary": "built mod"},
+            ]
+        )
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        assert json.loads(sb.get_blob(result.diff_uri))["files"] == {"mod.py": "X = 1\n"}
+        # An adapter that did ship them (a unified diff, an older walk) is cut back:
+        # silently for a ticket, and for the fixer whose writes are otherwise kept.
+        leaked = {"mod.py": "X = 1\n", ".hypothesis/examples/ab": "db\n", "a/.coverage": "c"}
+        blob = json.dumps({"kind": "full-file-snapshot", "files": leaked}).encode()
+        leaky = result.model_copy(update={"diff_uri": sb.put_blob(blob), "triage": ()})
+        for cut in (
+            trim_to_write_scope(leaky, sb, ("mod.py",), "t-1"),
+            trim_to_write_scope(leaky, sb, (), "t-1"),
+            note_fix_writes(leaky, sb, "t-1", focus=(), contracts=()),
+        ):
+            assert json.loads(sb.get_blob(cut.diff_uri))["files"] == {"mod.py": "X = 1\n"}
+            assert cut.triage == ()
+
+    def staged(state: Any, root: Path, **_: Any) -> str:
+        for rel in ("mod.py", ".hypothesis/examples/ab", "pkg/__pycache__/m.pyc"):
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text("x")
+        return "sha"
+
+    monkeypatch.setattr("foundry.graph.gate_wiring.materialize_workdir", staged)
+    out = tmp_path / "out"
+    output._write_output_tree({}, str(out), resolve=lambda _: None, resolve_blob=lambda _: b"")  # type: ignore[arg-type]
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == [
+        "mod.py"
+    ]
+
+
+def test_a_spec_conflict_reported_at_done_gets_its_own_triage_record(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    actions = iter(
+        [
+            {
+                "action": "done",
+                "summary": "parser",
+                "triage": ["Spec-conflict: PC-001 says sides >= 2 but scenario 1d1 -> 1", "x"],
+            }
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+    assert "spec-conflict:" in seen[0] and "never special-case that example" in seen[0]
+    [conflict] = [t for t in result.triage if t.name == SPEC_CONFLICT_TRIAGE]
+    assert conflict.explanation == "PC-001 says sides >= 2 but scenario 1d1 -> 1"
+    assert conflict.run_against == "task/t-1"
+
+
+def _ticket_packet(worktree: Path, **task: Any) -> TaskPacket:
+    packet = make_packet(worktree)
+    return packet.model_copy(update={"task": {**packet.task, "files": ["app.py"], **task}})
+
+
+def test_an_upstream_defect_reported_at_done_gets_its_own_triage_record(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+    note = (
+        "upstream-defect: web/routes.py: DELETE /notes/1 is answered 405 before "
+        "before_request runs; repro: client.delete('/notes/1')"
+    )
+    actions = iter([{"action": "done", "summary": "entrypoint", "triage": [note]}])
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree), sb)
+    assert "upstream-defect:" in seen[0] and "never adapt your code or test away" in seen[0]
+    [defect] = [t for t in result.triage if t.name == UPSTREAM_DEFECT_TRIAGE]
+    assert defect.explanation.startswith("web/routes.py: DELETE /notes/1")
+    assert "repro: client.delete" in defect.explanation and defect.run_against == "task/t-1"
+
+
+def test_a_fixer_is_not_told_to_report_upstream_defects(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[str] = []
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[0]["content"]))
+        return "{}", {"action": "done", "summary": "x"}
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree, fix_files=["a.py"]), sb)
+    assert "upstream-defect:" not in seen[0]
+
+
+def test_reads_of_another_tickets_test_and_feature_files_are_refused(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "tests" / "test_store.py").write_text("def test_x(): pass\n")
+    (src / "tests" / "conftest.py").write_text("X = 1\n")
+    seen: list[str] = []
+    actions = iter(
+        [
+            {"action": "read_file", "path": "tests/test_store.py"},
+            {"action": "read_file", "path": "./features/store.feature"},
+            {"action": "read_file", "path": "tests/conftest.py"},
+            {"action": "done", "summary": "x"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    blocked = ["tests/test_store.py", "features/store.feature"]
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(_ticket_packet(sb.worktree, blocked_reads=blocked), sb)
+    assert seen[1].startswith("OBSERVATION:\nNOT READ: tests/test_store.py belongs to another")
+    assert "def test_x" not in seen[1]
+    assert seen[2].startswith("OBSERVATION:\nNOT READ: features/store.feature")
+    assert "X = 1" in seen[3]  # a shared helper stays readable
+
+
+def test_a_read_of_a_missing_file_lists_the_files_that_exist(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "notes").mkdir(parents=True)
+    (src / "notes" / "contract.py").write_text("X = 1\n")
+    (src / "notes" / "store.py").write_text("Y = 1\n")
+    (src / "app.py").write_text("Z = 1\n")
+    seen: list[str] = []
+    actions = iter(
+        [
+            {"action": "read_file", "path": "notes/contracts.py"},
+            {"action": "read_file", "path": "lib/models.py"},
+            {"action": "done", "summary": "x"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(str(messages[-1]["content"]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        ProxyAgentAdapter(_complete).run(make_packet(sb.worktree), sb)
+    missing, no_dir = seen[1], seen[2]
+    assert "notes/contracts.py does not exist. Closest existing: notes/contract.py" in missing
+    assert "Files in notes/: notes/contract.py, notes/store.py." in missing
+    assert "lib/models.py does not exist." in no_dir
+    assert "(lib/ has none)" in no_dir and "app.py" in no_dir
 
 
 def test_each_action_reports_one_activity_line(tmp_path: Path) -> None:
@@ -295,7 +480,7 @@ def observations(msgs: list[dict[str, Any]]) -> list[str]:
 def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    n = 11
+    n = 20
     seen: list[list[dict[str, Any]]] = []
     runs = [{"action": "run", "cmd": f"echo body-{i}"} for i in range(n)]
     adapter = ProxyAgentAdapter(recording([*runs, {"action": "done"}], seen))
@@ -305,18 +490,19 @@ def test_masking_elides_in_batches_with_stable_placeholders(tmp_path: Path) -> N
         obs = observations(msgs)
         assert len(obs) == turn
         kept = [o for o in obs if "elided" not in o]
-        # Newest observations stay verbatim: at least min(3, all) and at most 6.
-        assert min(3, turn) <= len(kept) <= 6
+        # Newest observations stay verbatim: at least min(3, all) and at most 10.
+        assert min(3, turn) <= len(kept) <= 10
         assert kept == obs[len(obs) - len(kept) :]
-    # Prefix rewrites happen in batches (on the 7th and 11th observations), not on every turn.
+    # Prefix rewrites happen in batches (on the 11th and 19th observations, 8 turns
+    # apart), not on every turn.
     elided = [sum("elided" in o for o in observations(m)) for m in seen]
-    assert elided == [0] * 7 + [4] * 4 + [8]
+    assert elided == [0] * 11 + [8] * 8 + [16] * 2
     last = observations(seen[-1])
     assert last[0] == (
         "OBSERVATION: [output of run 'echo body-0' elided — re-run or re-read if needed]"
     )
     # Once elided, a placeholder is byte-identical on every later turn (prefix cache).
-    assert observations(seen[7])[:4] == last[:4]
+    assert observations(seen[11])[:8] == last[:8]
     # Assistant actions are never rewritten.
     assert [m["content"] for m in seen[-1] if m["role"] == "assistant"] == [
         json.dumps(a) for a in runs
@@ -784,7 +970,7 @@ def test_unchanged_file_reads_survive_masking(tmp_path: Path) -> None:
         {"action": "read_file", "path": "a.txt", "start_line": 3, "end_line": 4},
         {"action": "read_file", "path": "b.txt", "start_line": 1, "end_line": 2},
         {"action": "read_file", "path": "b.txt"},
-        *runs(8),
+        *runs(10),
         {"action": "done"},
     ]
     adapter = ProxyAgentAdapter(recording(actions, seen))
@@ -798,8 +984,8 @@ def test_unchanged_file_reads_survive_masking(tmp_path: Path) -> None:
         "OBSERVATION: [output of read_file b.txt lines 1-2 elided — re-run or re-read if needed]"
     )
     assert obs[3].endswith("b1\nb2\nb3\nb4\nb5\nb6\n")
-    assert all("elided" in o for o in obs[4:7])  # the run outputs still batch-elide
-    assert not any("elided" in o for o in obs[7:])
+    assert all("elided" in o for o in obs[4:11])  # the run outputs still batch-elide
+    assert not any("elided" in o for o in obs[11:])
 
 
 def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
@@ -810,7 +996,7 @@ def test_read_is_elided_after_the_file_is_written(tmp_path: Path) -> None:
     actions = [
         {"action": "read_file", "path": "a.py"},
         {"action": "write_file", "path": "a.py", "content": "X = 1  # changed\n"},
-        *runs(6),
+        *runs(10),
         {"action": "done"},
     ]
     adapter = ProxyAgentAdapter(recording(actions, seen))
@@ -1158,13 +1344,13 @@ def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
     src.mkdir()
     seen: list[list[dict[str, Any]]] = []
     turns: list[Any] = [
-        [("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})] for i in range(5)
+        [("run", {"cmd": f"echo a-{i}"}), ("run", {"cmd": f"echo b-{i}"})] for i in range(9)
     ]
     adapter = ProxyAgentAdapter(
         no_json, tool_complete_fn=tool_turns([*turns, [("done", {"summary": "ok"})]], seen)
     )
     with Sandbox(src) as sb:
-        adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+        adapter.run(make_packet(sb.worktree, turn_budget=10), sb)
     contents = [
         r["content"]
         for m in seen[-1]
@@ -1172,9 +1358,12 @@ def test_native_masking_elides_old_tool_results(tmp_path: Path) -> None:
         for r in m["content"]
         if r.get("type") == "tool_result"
     ]
-    assert len(contents) == 10
+    assert len(contents) == 18
     assert contents[0] == "[output of run 'echo a-0' elided — re-run or re-read if needed]"
     assert all("elided" not in c for c in contents[-3:])
+    # Two results a turn pile up past the verbatim budget by turn 6, but the prefix
+    # is rewritten once, on turn 8, not on every turn after the budget is crossed.
+    assert rewrite_passes(seen) == 1
 
 
 def test_native_tools_unsupported_falls_back_to_json_for_the_session(tmp_path: Path) -> None:
@@ -1521,6 +1710,36 @@ def test_an_undeclared_sandbox_install_is_noted_and_refuses_done_once(tmp_path: 
     assert refusal.startswith(f"OBSERVATION:\nERROR: not done —\n- {_BCRYPT_NOTE}")
 
 
+def test_an_install_by_a_ticket_without_the_manifest_says_use_declared_libraries(
+    tmp_path: Path,
+) -> None:
+    # The manifest is the harness ticket's: "add it there" cannot succeed, and a
+    # local engineer told so faked bcrypt with pbkdf2 instead.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "requirements.txt").write_text("flask\n")
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        recording(
+            [
+                {"action": "run", "cmd": _FAKE_PIP},
+                {"action": "done", "summary": "built"},
+                {"action": "done", "summary": "again"},
+            ],
+            seen,
+        )
+    )
+    packet = make_packet(src)
+    packet = packet.model_copy(update={"task": {**packet.task, "files": ["app/auth.py"]}})
+    with Sandbox(src) as sb:
+        adapter.run(packet.model_copy(update={"worktree_path": str(sb.worktree)}), sb)
+    note = observations(seen[1])[0]
+    assert "belongs to another ticket" in note and "missing-dependency: bcrypt" in note
+    assert "add it there" not in note
+    refusal = observations(seen[2])[1]
+    assert "use only declared libraries" in refusal and "Declare them now" not in refusal
+
+
 def test_a_declared_or_insisted_install_ends_the_session(tmp_path: Path) -> None:
     src = tmp_path / "src"
     src.mkdir()
@@ -1606,7 +1825,7 @@ def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) 
     )
 
     def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
-        assert "reason" in schema["properties"]
+        assert any("reason" in b["properties"] for b in schema["anyOf"])
         seen.append(dict(messages[-1]))
         act = next(actions)
         return json.dumps(act), act
@@ -1624,6 +1843,43 @@ def test_a_fenced_fixer_write_outside_its_target_needs_a_reason(tmp_path: Path) 
         t.explanation.startswith("fix pass changed app.py outside its target: the test imports")
         for t in result.triage
     )
+
+
+def test_a_fixer_cannot_create_a_module_no_ticket_owns(tmp_path: Path) -> None:
+    # A local dice fixer created parser.py beside the planned dice_parser.py.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "legacy.py").write_text("L = 1\n")
+    seen: list[dict[str, Any]] = []
+    actions = iter(
+        [
+            {"action": "write_file", "path": "parser.py", "content": "X = 1\n"},
+            {"action": "write_file", "path": "dice_parser.py", "content": "P = 1\n"},
+            {"action": "write_file", "path": "legacy.py", "content": "L = 2\n"},
+            {"action": "write_file", "path": "notes.md", "content": "n\n"},
+            {"action": "write_file", "path": "tests/__init__.py", "content": ""},
+            {"action": "done", "summary": "fixed"},
+        ]
+    )
+
+    def _complete(messages: Any, schema: dict[str, Any]) -> tuple[str, Any]:
+        seen.append(dict(messages[-1]))
+        act = next(actions)
+        return json.dumps(act), act
+
+    with Sandbox(src) as sb:
+        packet = make_packet(sb.worktree)
+        task = {**packet.task, "owned_files": ["dice_parser.py", "tests/test_parse.py"]}
+        packet = packet.model_copy(update={"task": task, "prior_failures": ("x",)})
+        result = ProxyAgentAdapter(_complete).run(packet, sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert "parser.py would be a new module no ticket owns" in str(seen[1]["content"])
+    assert body["files"] == {
+        "dice_parser.py": "P = 1\n",
+        "legacy.py": "L = 2\n",
+        "notes.md": "n\n",
+        "tests/__init__.py": "",
+    }
 
 
 def test_a_fenced_fixers_run_cannot_edit_outside_its_target(tmp_path: Path) -> None:
@@ -1683,3 +1939,213 @@ def test_native_tools_offer_the_reason_only_to_a_fenced_session(tmp_path: Path) 
     write = {t["name"]: t for t in offered[0]}["write_file"]
     assert "reason" in write["input_schema"]["properties"]
     assert offered[-1] is TOOLS
+
+
+# ---- repeated environment errors, prompt-size log ------------------------------------
+
+
+def test_one_environment_error_across_commands_nudges_at_three_and_stops_at_six(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    seen: list[list[dict[str, Any]]] = []
+    # Different commands, paths, line numbers and addresses; the same missing module.
+    cmds = [
+        f"echo 'File \"/tmp/run{i}/app_{i}.py\", line {i + 10}'; "
+        f"echo \"ModuleNotFoundError: No module named 'flask' (0x{i + 0xA0:x})\"; exit 1"
+        for i in range(7)
+    ]
+    adapter = ProxyAgentAdapter(recording([{"action": "run", "cmd": c} for c in cmds], seen))
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+    obs = observations(seen[-1])
+    assert len(seen) == 6 and len(obs) == 5  # the 6th run's error ended the session
+    assert not any("environment/dependency" in o for o in obs[:2])
+    assert obs[2].startswith("OBSERVATION:\nWARNING: this is an environment/dependency error")
+    stop = session_stop_reason(result.triage)
+    assert stop is not None and "env-loop" in stop and "No module named 'flask'" in stop
+
+
+def test_a_code_error_repeating_is_not_an_environment_loop(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    cmds = [f"echo 'AssertionError: expected 3 got {i}'; exit 1" for i in range(7)]
+    adapter = ProxyAgentAdapter(
+        scripted([*({"action": "run", "cmd": c} for c in cmds), {"action": "done"}])
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree, turn_budget=8), sb)
+    assert session_stop_reason(result.triage) is None
+
+
+def test_each_call_logs_its_prompt_size_and_unchanged_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from foundry import progress
+
+    lines: list[str] = []
+    monkeypatch.setattr(progress, "log", lambda msg, **_: lines.append(msg))
+    src = tmp_path / "src"
+    src.mkdir()
+    adapter = ProxyAgentAdapter(scripted([*runs(2), {"action": "done"}]))
+    with Sandbox(src) as sb:
+        adapter.run(make_packet(sb.worktree, turn_budget=4), sb)
+    logged = [ln for ln in lines if ln.startswith("proxy-agent t-1 turn ")]
+    assert len(logged) == 3
+    assert logged[0].endswith("(previous ~0), 0% an unchanged prefix")
+    first = int(logged[0].split("prompt ~")[1].split(" ")[0])
+    assert f"(previous ~{first})" in logged[1]
+    assert int(logged[1].rsplit("), ", 1)[1].split("%")[0]) > 50  # appended, not rewritten
+
+
+def _admits(schema: dict[str, Any], obj: dict[str, Any]) -> bool:
+    """The anyOf/const/required/additionalProperties subset of JSON-schema
+    validation the action schemas use."""
+    return any(
+        b["properties"]["action"]["const"] == obj.get("action")
+        and all(k in obj for k in b["required"])
+        and all(k in b["properties"] for k in obj)
+        for b in schema["anyOf"]
+    )
+
+
+def test_the_action_schema_rejects_a_write_without_its_path() -> None:
+    from foundry.execution.adapters.proxy_agent import _CHECK_SCHEMA, _FENCED_SCHEMAS
+
+    write = {"action": "write_file", "path": "a.py", "content": "X = 1\n"}
+    for schema in (ACTION_SCHEMA, _CHECK_SCHEMA, *_FENCED_SCHEMAS.values()):
+        assert schema["type"] == "object"
+        assert not _admits(schema, {"action": "write_file", "content": "X = 1\n"})
+        assert not _admits(schema, {"action": "read_file"})
+        assert not _admits(schema, {"action": "run"})
+        assert not _admits(schema, {"action": "read_file", "path": "a.py", "cmd": "ls"})
+        assert _admits(schema, write)
+        assert _admits(schema, {"action": "read_file", "path": "a.py", "end_line": 9})
+        assert _admits(schema, {"action": "done", "summary": "ok", "triage": []})
+    assert _admits(_CHECK_SCHEMA, {"action": "check"})
+    assert not _admits(ACTION_SCHEMA, {"action": "check"})
+    assert _admits(_FENCED_SCHEMAS[id(ACTION_SCHEMA)], {**write, "reason": "r"})
+    assert not _admits(ACTION_SCHEMA, {**write, "reason": "r"})
+    edit = {"action": "edit_file", "path": "a.py", "edits": [{"old": "1", "new": "2"}]}
+    assert _admits(ACTION_SCHEMA, edit)
+    assert not _admits(ACTION_SCHEMA, {"action": "edit_file", "path": "a.py"})
+    assert _admits(_FENCED_SCHEMAS[id(ACTION_SCHEMA)], {**edit, "reason": "r"})
+
+
+# ---- edit_file: exact replacements instead of a full rewrite -------------------------
+
+
+def _edit(path: str, *pairs: tuple[str, str], **extra: Any) -> dict[str, Any]:
+    edits = [{"old": o, "new": n} for o, n in pairs]
+    return {"action": "edit_file", "path": path, "edits": edits, **extra}
+
+
+_APP = "def area(w: int, h: int) -> int:\n    return w * h\n\n\nX = 1\nY = 1\n"
+
+
+def test_an_edit_replaces_one_exact_span(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    adapter = ProxyAgentAdapter(
+        recording([_edit("app.py", ("X = 1\n", "X = 2\n")), {"action": "done"}], seen)
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {"app.py": _APP.replace("X = 1", "X = 2")}
+    assert observations(seen[1])[0].startswith(
+        "OBSERVATION:\nedited app.py: 1 replacement at line 5"
+    )
+
+
+def test_a_native_edit_applies_several_replacements_in_order(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    edit = _edit(
+        "app.py",
+        ("w: int, h: int) -> int:", "w: float, h: float) -> float:"),
+        ("X = 1\nY = 1\n", "X = 1\nY = 2\nZ = 3\n"),
+        ("Z = 3", "Z = 4"),  # matched against the earlier edit's text
+    )
+    edit.pop("action")
+    adapter = ProxyAgentAdapter(
+        no_json,
+        tool_complete_fn=tool_turns([[("edit_file", edit)], [("done", {"summary": "ok"})]], seen),
+    )
+    with Sandbox(src) as sb:
+        result = adapter.run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"]["app.py"] == (
+        "def area(w: float, h: float) -> float:\n    return w * h\n\n\nX = 1\nY = 2\nZ = 4\n"
+    )
+    assert results_of(seen[1])[0]["content"].startswith(
+        "edited app.py: 3 replacements at line 1, lines 5-7, line 7"
+    )
+
+
+def test_a_missing_or_ambiguous_edit_leaves_the_file_unchanged(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "app.py").write_text(_APP)
+    seen: list[list[dict[str, Any]]] = []
+    actions = [
+        # The first edit would apply; the second's text is absent: neither lands.
+        _edit("app.py", ("X = 1", "X = 2"), ("    return w * hh", "    return 0")),
+        _edit("app.py", (" = 1\n", " = 2\n")),
+        _edit("app.py", ("X = 1", "X = 2"), ("X = 2", "X = (")),
+        _edit("missing.py", ("a", "b")),
+        {"action": "done"},
+    ]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(make_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+        assert (sb.worktree / "app.py").read_text() == _APP
+    assert body["files"] == {}
+    missing, ambiguous, broken, absent = (
+        o.removeprefix("OBSERVATION:\n") for o in observations(seen[-1])
+    )
+    assert missing.startswith("ERROR: not edited — edit 2: `old` not found in app.py")
+    assert "The closest line is 2:\n    1| def area" in missing
+    assert "    2|     return w * h" in missing
+    assert "no edit of this call was applied" in missing
+    assert ambiguous.startswith(
+        "ERROR: not edited — edit 1: `old` occurs 2 times in app.py (at lines 5, 6)"
+    )
+    assert "    5| X = 1" in ambiguous
+    assert broken.startswith("ERROR: edit rejected — after these edits app.py")
+    assert absent.startswith("ERROR: not edited — missing.py does not exist")
+
+
+def test_an_edit_outside_the_tickets_files_or_a_fixers_target_is_refused(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "tests").mkdir(parents=True)
+    (src / "other.py").write_text("O = 1\n")
+    (src / "app.py").write_text("A = 1\n")
+    (src / "tests" / "test_b.py").write_text("B = 1\n")
+    seen: list[list[dict[str, Any]]] = []
+    actions = [_edit("other.py", ("O = 1", "O = 2")), {"action": "done"}]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(_ticket_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    assert body["files"] == {}
+    assert "other.py is outside this ticket's files" in observations(seen[1])[0]
+
+    seen = []
+    actions = [
+        _edit("app.py", ("A = 1", "A = 2")),
+        _edit("app.py", ("A = 1", "A = 3"), reason="the test imports A"),
+        _edit("tests/test_b.py", ("B = 1", "B = 2")),
+        {"action": "done", "summary": "fixed"},
+    ]
+    with Sandbox(src) as sb:
+        result = ProxyAgentAdapter(recording(actions, seen)).run(_fenced_packet(sb.worktree), sb)
+        body = json.loads(sb.get_blob(result.diff_uri))
+    refused = observations(seen[-1])[0]
+    assert "app.py is outside this fix pass's target" in refused and "`reason`" in refused
+    assert body["files"] == {"app.py": "A = 3\n", "tests/test_b.py": "B = 2\n"}
+    assert any(t.explanation.startswith("fix pass changed app.py") for t in result.triage)

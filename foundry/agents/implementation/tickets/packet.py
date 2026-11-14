@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,7 @@ from foundry.agents.implementation.interface_map import signature_map
 from foundry.agents.implementation.junior_engineer import pinned_texts
 from foundry.agents.implementation.personas import persona_for
 from foundry.agents.implementation.tickets.constants import (
+    CONTRACT_KIND,
     FAIL_TRIAGE,
     MAX_TICKET_ATTEMPTS,
     NODE_ID,
@@ -24,12 +26,13 @@ from foundry.agents.implementation.tickets.rules import (
     verify_rules,
 )
 from foundry.execution.adapter_contract import TaskPacket
-from foundry.gates.bdd_scaffold import step_module, step_scaffold
-from foundry.gates.profiles import pytest_bdd_binds
+from foundry.gates.bdd_scaffold import is_helper_module, step_module, step_scaffold
+from foundry.gates.profiles import property_testing, pytest_bdd_binds
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
     FEATURE_DIR,
     HARNESS_TICKET_ID,
     Specialty,
@@ -79,6 +82,56 @@ def _newest_by(
             if k not in newest or handle.seq > newest[k][0]:
                 newest[k] = (handle.seq, body)
     return {k: v[1] for k, v in newest.items()}
+
+
+_PROPERTY_ID = re.compile(r"\bPR\d+\b", re.IGNORECASE)
+
+
+def conflicted_properties(
+    state: FactoryState, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> frozenset[str]:
+    """The contract property ids a build session's spec-conflict report names: the
+    spec contradicts them, so no gate requires them (the build manifest lists the
+    report). Only the reporting ticket's own properties: one session must not waive
+    a property another ticket proves."""
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    by_task = {f"task/{t.id}": t for t in tickets}  # ticket ids are their task ids
+    out: set[str] = set()
+    for note in state.get("gate_triage") or ():
+        ticket = by_task.get(note.run_against)
+        if note.name != SPEC_CONFLICT_TRIAGE or ticket is None:
+            continue
+        own = {
+            line.split(": ", 2)[1].upper() for line in ticket_properties(ticket, tickets, contracts)
+        }
+        out |= {pid.upper() for pid in _PROPERTY_ID.findall(str(note.explanation))} & own
+    return frozenset(out)
+
+
+def live_contracts(state: FactoryState, resolve: ArtifactResolver) -> dict[str, InterfaceContract]:
+    """The newest contract per name, without the properties a spec conflict names."""
+    from foundry.agents.implementation.tickets.tasks import read_tickets
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    contracts: dict[str, InterfaceContract] = _newest_by(
+        state, resolve, CONTRACT_KIND, InterfaceContract, "name"
+    )
+    if not any(t.name == SPEC_CONFLICT_TRIAGE for t in state.get("gate_triage") or ()):
+        return contracts
+    dropped = conflicted_properties(state, read_tickets(state, resolve), contracts)
+    if not dropped:
+        return contracts
+    return {
+        name: c.model_copy(
+            update={
+                "properties": tuple(
+                    p for p in c.properties if p.partition(":")[0].strip().upper() not in dropped
+                )
+            }
+        )
+        for name, c in contracts.items()
+    }
 
 
 def _contract_body(rt: AgentRuntime, contract: InterfaceContract) -> str:
@@ -131,8 +184,12 @@ def _ticket_context(
     ticket: Ticket,
     criteria: Mapping[str, AcceptanceCriterion],
     contracts: Mapping[str, InterfaceContract],
+    tickets: Sequence[Ticket] = (),
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """(spans, feature files): the ticket's scenarios and its contracts, verbatim."""
+    """(spans, feature files): the ticket's scenarios and its contracts, verbatim,
+    then the signature of each contract a dependency ticket implements that it does
+    not name (sessions otherwise opened turns reading the dependency's files, or a
+    contracts module that never existed, to learn them)."""
     spans: list[str] = []
     features: set[str] = set()
     for cid in ticket.scenario_ids:
@@ -150,6 +207,19 @@ def _ticket_context(
             contract = contracts.get(name)
             body = _contract_body(rt, contract) if contract else "(not in the plan)"
             spans.append(f"INTERFACE CONTRACT {name} ({role}):\n{body}")
+    named = {*ticket.implements, *ticket.consumes}
+    by_id = {t.id: t for t in tickets}
+    for dep in ticket.depends_on:
+        for name in by_id[dep].implements if dep in by_id else ():
+            contract = contracts.get(name)
+            if name in named or contract is None:
+                continue
+            named.add(name)
+            body = contract.signature or _contract_body(rt, contract)
+            spans.append(
+                f"INTERFACE CONTRACT {name} (ticket {dep}, which this ticket depends on, "
+                f"implements it — call it exactly as signed):\n{body}"
+            )
     return tuple(spans), tuple(sorted(features))
 
 
@@ -266,10 +336,26 @@ def _ticket_check(
     scenarios: Mapping[str, Sequence[str]],
 ) -> CheckSpec:
     """A ticket session's gate check: the scenarios whose carriers are built once
-    this ticket is, its own among them (those it carries or owns), its files."""
+    this ticket is, its own among them (those it carries or owns), its files, the
+    tests in them and its contracts' properties. The session that completes the app
+    (every other ticket built, or the entrypoint once its dependencies are) also
+    runs the Launch gate; a red launch is the entrypoint's own."""
+    from foundry.agents.implementation.tickets.tasks import built_task_ids, read_tickets
     from foundry.gates.self_check import CheckSpec
     from foundry.graph.gate_wiring import wave_scenarios
 
+    tickets = read_tickets(state, resolve)
+    contracts = live_contracts(state, resolve)
+    properties: dict[str, str] = {}
+    for line in ticket_properties(ticket, tickets, contracts):
+        name, _, rest = line.partition(": ")
+        pid, _, text = rest.partition(": ")
+        properties[pid] = f"{name}: {text}"
+    # Ticket ids are their task ids (task_id_for_ticket).
+    built = built_task_ids(state) | {task.id}
+    launch = (bool(tickets) and all(t.id in built for t in tickets)) or (
+        ticket.entrypoint and all(d in built for d in ticket.depends_on)
+    )
     stack = state.get("stack")
     own = frozenset(
         scenario_ref(c.ticket_id or ticket.id, c.id)
@@ -289,7 +375,156 @@ def _ticket_check(
         own_refs=own,
         own_files=tuple(ticket.files),
         rules=check_rewrites(plain, checked),
+        # A paired ticket still unbuilt writes code its tests import: judged later.
+        own_tests=tuple(ticket.files) if own <= scope else (),
+        properties=properties if own <= scope else {},
+        launch=launch,
+        own_smoke=ticket.entrypoint,
     )
+
+
+ENTRYPOINT_RULE = (
+    "ENTRYPOINT: you wire the app together. Import the modules the tickets you depend "
+    "on built and register or call them (their routes, blueprints, services, models, "
+    "CLI commands); never re-implement their routes or logic here. A second copy "
+    "type-checks, while the tested modules ship as dead code."
+)
+
+
+PRODUCTION_WIRING_RULE = (
+    "TEST THROUGH PRODUCTION WIRING: step and test setup builds the app through its "
+    "real factory or entrypoint (e.g. create_app() with a test config, the CLI's "
+    "main(), the server's app object), never a hand-assembled copy of its routes, "
+    "services or store: a test that wires its own app passes while the shipped "
+    "entrypoint is broken."
+)
+
+
+HONOUR_INPUT_RULE = (
+    "HONOUR WHAT YOU ACCEPT: every operator, sign, flag, option or field your code "
+    "accepts must change the result as it means, or be rejected with an error. Never "
+    "parse a token and then drop or ignore it: input the data types cannot represent "
+    "is rejected, not silently misread into a different answer."
+)
+
+
+def ticket_properties(
+    ticket: Ticket, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> tuple[str, ...]:
+    """ "<contract>: PRn: <statement>" for each contract property ``ticket`` tests:
+    those of the contracts it implements when it writes a test file, else (a test
+    ticket) those of the tickets it depends on that write none."""
+
+    def props(t: Ticket) -> list[str]:
+        return [
+            f"{name}: {p}"
+            for name in t.implements
+            if (c := contracts.get(name)) is not None
+            for p in c.properties
+        ]
+
+    if any(_is_test_path(f) for f in ticket.files):
+        out = props(ticket)
+        if ticket.specialty is Specialty.TEST:
+            by_id = {t.id: t for t in tickets}
+            for d in ticket.depends_on:
+                dep = by_id.get(d)
+                if dep is not None and not any(_is_test_path(f) for f in dep.files):
+                    out += props(dep)
+        return tuple(dict.fromkeys(out))
+    return ()
+
+
+def property_rule(properties: Sequence[str], stack: StackDecision | None) -> str | None:
+    """The rule a ticket implementing contracts with ``properties`` follows: one
+    property-based test per property, in the stack language's library (None when
+    there are none, or the language has no library)."""
+    lib = property_testing(stack.language if stack is not None else "python")
+    if not properties or lib is None:
+        return None
+    return (
+        f"PROPERTY TESTS (checked: the Test gate FAILs a property no test names): write "
+        f"ONE property-based test per contract property below with {lib.library}: "
+        f"{lib.usage}. Put the property id (PR1, ...) in the test's name. Each test "
+        "generates its inputs across the whole domain the property states (every "
+        "feature of the input and their combinations, never a fixed example list) and "
+        "calls the real function you implement, never a copy or a mock of it. Import "
+        f"{lib.library} unconditionally: never behind a try/except ImportError, an "
+        "optional or dynamic import, or a skip when it is missing (the gate counts a "
+        "guarded test as no test)"
+        + (f"; declare {lib.dependency} if no ticket has yet" if lib.dependency else "")
+        + ". Never skip inside a property (the gate counts a skipped test as not run, "
+        "and a skip on the first input it tries skips it every run): discard the inputs "
+        "it does not cover with the library's assume() or a filtered strategy. A "
+        "failing property is a bug in the code: fix the code, never weaken the "
+        "property. Properties: " + "; ".join(properties)
+    )
+
+
+def _is_test_path(path: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1]
+    return (
+        name.startswith("test_")
+        or name.rsplit(".", 1)[0].endswith(("_test", ".test", ".spec"))
+        or any(p in ("tests", "test", "step_definitions", "__tests__") for p in parts[:-1])
+    )
+
+
+def _inline_rule(spans: Sequence[str], blocked: Sequence[str] = ()) -> str:
+    """Where the packet already carries what a session would otherwise open turns
+    re-reading: its scenarios, contracts and dependency notes."""
+    has = [
+        what
+        for what, head in (("scenarios", "SCENARIO "), ("interface contracts", "INTERFACE "))
+        if any(s.startswith(head) for s in spans)
+    ]
+    carried = (
+        f"Your {' and '.join(has)} are inline in this packet, verbatim: do not read "
+        f"{FEATURE_DIR}/*.feature to find them"
+        if has
+        else f"This ticket owns no scenario: do not read {FEATURE_DIR}/*.feature"
+    )
+    tests = " or test/step module" if any(not p.endswith(".feature") for p in blocked) else ""
+    return (
+        f"{carried}, nor another ticket's feature file{tests} (not your spec). Do not re-read "
+        "requirements.txt or another manifest unless it is one of the paths you write "
+        "(the check installs what it declares). Read a file only for content this "
+        "packet does not carry, then write."
+    )
+
+
+def _foreign_feature(path: str, own: Sequence[str]) -> bool:
+    return path.startswith(f"{FEATURE_DIR}/") and path.endswith(".feature") and path not in own
+
+
+def blocked_reads(
+    ticket: Ticket, tickets: Sequence[Ticket], feature_files: Sequence[str]
+) -> tuple[str, ...]:
+    """The files a ticket session may not read: other tickets' feature files and
+    their test and step modules — not its spec, and a local session opened each
+    ticket with reads of them. Shared helpers (conftest.py, fixtures, utils) and the
+    contracts and BDD harness tickets' files stay readable; the harness ticket
+    itself reads anything."""
+    if ticket.id == HARNESS_TICKET_ID:
+        return ()
+    own = set(ticket.files)
+    out: list[str] = []
+    for t in tickets:
+        if t.id in (ticket.id, CONTRACTS_TICKET_ID, HARNESS_TICKET_ID):
+            continue
+        if _foreign_feature(path := feature_path(t.id), feature_files):
+            out.append(path)
+        out += [
+            f
+            for f in t.files
+            if f not in own
+            and not f.endswith("/")
+            and _is_test_path(f)
+            and f.rsplit("/", 1)[-1] not in ("conftest.py", "__init__.py")
+            and not (f.endswith(".py") and is_helper_module(f))
+        ]
+    return tuple(dict.fromkeys(out))
 
 
 def _ticket_packet(
@@ -305,12 +540,16 @@ def _ticket_packet(
     stack: StackDecision | None = None,
     contract_files: Sequence[str] = (),
     scenarios: Mapping[str, Sequence[str]] | None = None,
+    properties: Sequence[str] = (),
+    tickets: Sequence[Ticket] = (),
 ) -> TaskPacket:
     scenarios = scenarios or {}
+    blocked = blocked_reads(ticket, tickets, feature_files)
     rules = [
         "You can read the whole project in the working directory: it holds everything "
         "the earlier tickets built.",
         f"Never edit {FEATURE_DIR}/*.feature files: they are the executable spec.",
+        _inline_rule(spans, blocked),
         *_check_rules(task, ticket, stack, contract_files, scenarios),
     ]
     if ticket.files:
@@ -320,6 +559,15 @@ def _ticket_packet(
             + ", ".join(ticket.files)
             + ".",
         )
+    if ticket.entrypoint:
+        rules.append(ENTRYPOINT_RULE)
+    if any(not _is_test_path(f) for f in ticket.files):
+        rules.append(HONOUR_INPUT_RULE)
+    if ticket.specialty is Specialty.TEST or any(_is_test_path(f) for f in ticket.files):
+        rules.append(PRODUCTION_WIRING_RULE)
+    if rule := property_rule(properties, stack):
+        rules.append(rule)
+    extra: dict[str, Any] = {"blocked_reads": list(blocked)} if blocked else {}
     return TaskPacket(
         task={
             "id": task.id,
@@ -328,19 +576,25 @@ def _ticket_packet(
             "description": ticket.description,
             "specialty": ticket.specialty.value,
             "difficulty": ticket.difficulty.value,
+            "entrypoint": ticket.entrypoint,
             "tier": task.tier,
             "spec_uri": task.spec_uri,
             "branch": task.branch,
             "criterion_ids": list(task.criterion_ids),
             "depends_on": list(task.depends_on),
             "files": list(ticket.files),
-            "reads": list(ticket.reads),
+            "reads": [
+                r
+                for r in ticket.reads
+                if not _foreign_feature(r, feature_files) and r not in blocked
+            ],
             "feature_files": list(feature_files),
             "rules": rules,
             "verify": {
                 **verify_commands(stack),
                 **scenario_verify(ticket.files, scenarios, stack, ticket.id),
             },
+            **extra,
         },
         persona=persona_for(ticket.specialty.value, stack, harness=ticket.id == HARNESS_TICKET_ID),
         pinned_constraints=pinned_texts(constraints),  # VERBATIM + FIRST (arch §2)
@@ -352,6 +606,38 @@ def _ticket_packet(
         cost_budget_microusd=cost_budget_microusd,
         proxy_endpoint=None,
     )
+
+
+def upstream_defect_context(
+    state: FactoryState, tickets: Sequence[Ticket]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(failure lines, files) a fixer pass gets for the upstream defects ticket
+    sessions reported: each report under a header, and every file of each ticket
+    owning a file a report names, for the pass's write fence. A session may not
+    write another ticket's file, so the fixer is where such a bug gets fixed;
+    ``((), ())`` when none was reported."""
+    from foundry.manifest import upstream_defects
+
+    reports = upstream_defects(state)
+    if not reports:
+        return (), ()
+    files: list[str] = []
+    for t in tickets:
+        if any(_names(f, r) for f in t.files for r in reports):
+            files.extend(t.files)
+    lines = (
+        "[upstream-defect] a dependent ticket's session found these bugs in a file it "
+        "may not write, and kept its test as a real client calls it: confirm each still "
+        "reproduces, then fix it in the named file (not by changing the caller's test)",
+        *reports,
+    )
+    return lines, tuple(dict.fromkeys(files))
+
+
+def _names(path: str, text: str) -> bool:
+    """Whether ``text`` names ``path`` as a whole path (``app.py`` is not in
+    ``webapp.py``)."""
+    return re.search(rf"(?<![\w/.-]){re.escape(path.rstrip('/'))}(?![\w-])", text) is not None
 
 
 def _failure_notes(

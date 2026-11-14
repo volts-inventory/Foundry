@@ -169,7 +169,8 @@ def test_session_token_usage_is_recorded_for_the_manifest(source_dir: Path) -> N
     adapter = ClaudeCodeAdapter(exec_fn=fake_exec({"a.py": "A = 1\n"}, envelope(usage=usage)))
     with Sandbox(source_dir) as sb:
         adapter.run(make_packet(sb.worktree), sb)
-    assert adapter.usage == [usage]
+    # The envelope's own total_cost_usd (0 here) rides along for the manifest's cost.
+    assert adapter.usage == [usage | {"cost_microusd": 0}]
 
 
 def test_progress_logs_each_agent_session(
@@ -325,6 +326,20 @@ def test_walk_worktree_excludes_scratch_dirs(tmp_path: Path) -> None:
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude" / "settings.json").write_text("{}")
     (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "m.py").write_text("M = 1\n")
+    assert set(walk_worktree(tmp_path)) == {"src/m.py"}
+
+
+def test_walk_worktree_skips_every_shared_cache_dir_and_file(tmp_path: Path) -> None:
+    from foundry.state.tree_sha import CACHE_DIRS
+
+    for d in CACHE_DIRS:
+        (tmp_path / "src" / d).mkdir(parents=True)
+        (tmp_path / "src" / d / "f").write_text("x")
+    (tmp_path / ".hypothesis" / "examples").mkdir(parents=True)
+    (tmp_path / ".hypothesis" / "examples" / "ab").write_text("db")
+    for name in (".coverage", ".coverage.host.1", "src/m.pyc"):
+        (tmp_path / name).write_text("x")
     (tmp_path / "src" / "m.py").write_text("M = 1\n")
     assert set(walk_worktree(tmp_path)) == {"src/m.py"}
 

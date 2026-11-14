@@ -32,7 +32,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -45,6 +45,7 @@ from foundry.schemas.gates import GateStatus
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
     from foundry.gates.profiles import VerificationProfile
+    from foundry.gates.pydeps import PythonBuildEnv
     from foundry.gates.runner import GateImpl
     from foundry.graph.gate_wiring import ArtifactResolver, BlobResolver
     from foundry.state.factory_state import FactoryState
@@ -75,6 +76,11 @@ CHECK_TIMEOUT_S = 180.0
 # A smoke run boots the app for one request: seconds. A server that never exits
 # (the app's `run` command as smoke) is the failure to report, not to wait out.
 SMOKE_TIMEOUT_S = 60.0
+# The Launch gate in a check: the final gate's boot limit (a slow first boot is real),
+# tighter per-request and per-CLI-run limits, since it re-runs on every check.
+LAUNCH_BOOT_S = 30.0
+LAUNCH_REQUEST_S = 5.0
+LAUNCH_CLI_S = 15.0
 # "0"/"off": no check anywhere; "local": local-tier sessions only (an A/B on the bench).
 DISABLE_ENV = "FOUNDRY_SELF_CHECK"
 _OFF = frozenset({"0", "off", "false", "no"})
@@ -149,8 +155,8 @@ class CheckBase:
         self._resolve_blob = resolve_blob
         self._lock = threading.Lock()
         self._built: tuple[Path, tuple[str, ...]] | None = None
-        self._openings: dict[tuple[frozenset[str], bool], tuple[GateOutcome, ...]] = {}
-        self._opening_locks: dict[tuple[frozenset[str], bool], threading.Lock] = {}
+        self._openings: dict[Hashable, tuple[GateOutcome, ...]] = {}
+        self._opening_locks: dict[Hashable, threading.Lock] = {}
 
     def tree(self) -> tuple[Path, tuple[str, ...]]:
         """(the materialized tree, every ticket's planned files). Raises
@@ -181,7 +187,13 @@ class CheckBase:
         """The gates on the unchanged tree for ``spec``'s scope, run once per scope.
         The unbuilt files are the planned files still absent, the session's own
         included: each session judges which of them are its own."""
-        key = (spec.scope, spec.smoke)
+        key = (
+            spec.scope,
+            spec.smoke,
+            spec.launch,
+            spec.own_tests,
+            tuple(sorted(spec.properties.items())),
+        )
         with self._lock:
             lock = self._opening_locks.setdefault(key, threading.Lock())
         with lock:
@@ -232,6 +244,17 @@ class CheckSpec:
     smoke: bool = False
     own_smoke: bool = False
     rules: Mapping[str, str] = field(default_factory=dict)
+    # The session's own test files and its contracts' properties (id -> "<contract>:
+    # <statement>"): the scoped Test gate also runs and judges them (TestGate.owning).
+    own_tests: tuple[str, ...] = ()
+    properties: Mapping[str, str] = field(default_factory=dict)
+    # Also the Launch gate (alone, without the smoke command): the session that
+    # completes the app. ``own_smoke`` says whether a red launch is its own.
+    launch: bool = False
+    # A green opening check with the session's files already built ends it unrun:
+    # set only where the starting tree's files are what the opening check judged
+    # (no carried attempt) and no failure of its own is pending (not a retry).
+    skip_green: bool = False
 
 
 # A ContextVar so concurrent pool workers each see their own session's spec.
@@ -317,6 +340,8 @@ def run_check(
         _scaffold_manifest,
         _wave_test_gate,
         gate_profile,
+        launch_gate,
+        owned_paths,
         planned_paths,
         wave_stack,
     )
@@ -343,12 +368,19 @@ def run_check(
         )
         with _build_env(profile, work, base.rt) as pyenv:
             gates: list[GateImpl] = [
-                _build_gate(profile, None, pyenv, planned=planned, timeout_s=timeout)
+                _build_gate(
+                    profile,
+                    None,
+                    pyenv,
+                    planned=planned,
+                    timeout_s=timeout,
+                    owned=owned_paths(base.state, base._resolve),
+                )
             ]
-            if spec.scope:
+            if spec.scope or spec.own_tests or spec.properties:
                 test = _wave_test_gate(profile, None, spec.scope, pyenv, timeout_s=timeout)
                 if test is not None:
-                    gates.append(test)
+                    gates.append(test.owning(spec.own_tests, spec.properties))
             if spec.smoke and profile is not None and profile.smoke_cmd and not profile.unavailable:
                 from foundry.gates.smoke import SmokeGate
 
@@ -357,7 +389,40 @@ def run_check(
                         profile.smoke_cmd, pyenv=pyenv, timeout_s=min(timeout, SMOKE_TIMEOUT_S)
                     )
                 )
-            return tuple(_unattested(g, work, unbuilt, root) for g in gates)
+            outcomes = [_unattested(g, work, unbuilt, root) for g in gates]
+            if (
+                (spec.smoke or spec.launch)
+                and (profile is None or not profile.unavailable)
+                # An app that does not build cannot launch: no minutes spent proving it.
+                and outcomes[0].status is GateStatus.PASS
+            ):
+                outcomes.append(
+                    _unattested(
+                        _bounded(
+                            launch_gate(base.state, base._resolve, profile, pyenv=pyenv), pyenv
+                        ),
+                        work,
+                        unbuilt,
+                        root,
+                    )
+                )
+            return tuple(outcomes)
+
+
+def _bounded(gate: GateImpl, pyenv: PythonBuildEnv | None) -> GateImpl:
+    """``gate`` (the Launch gate) with an in-session check's tighter per-request and
+    per-run limits: it runs on every check, the final gate's bounds once."""
+    from foundry.gates.launch import LaunchGate
+
+    if not isinstance(gate, LaunchGate):
+        return gate
+    return LaunchGate(
+        gate.target,
+        pyenv=pyenv,
+        boot_s=LAUNCH_BOOT_S,
+        request_s=LAUNCH_REQUEST_S,
+        cli_s=LAUNCH_CLI_S,
+    )
 
 
 @dataclass(frozen=True)
@@ -472,11 +537,95 @@ def _split_build(
     return ([head, *own] if own and head else own), ([head, *other] if other and head else other)
 
 
+# The files that configure a test harness or a module layout, any language: a change
+# to one can stop another ticket's test modules collecting.
+_HARNESS_CONFIG = re.compile(
+    r"(^|/)(pyproject\.toml|setup\.cfg|setup\.py|pytest\.ini|tox\.ini|conftest\.py|"
+    r"package\.json|tsconfig[\w.-]*\.json|"
+    r"(jest|vitest|babel|cucumber|playwright|vite|webpack)\.config\.[cm]?[jt]s|"
+    r"\.babelrc|\.mocharc[\w.-]*|cucumber\.(js|cjs|mjs|json|ya?ml)|go\.mod|go\.work|"
+    r"Cargo\.toml|requirements[\w.-]*\.txt|pom\.xml|build\.gradle(\.kts)?)$"
+)
+_UNIMPORTED = re.compile(r"was not executed — (.+?) binds? it, but pytest failed to import")
+
+
+def _uncollected(findings: Iterable[str]) -> set[str]:
+    from foundry.graph.gate_wiring import failing_ids
+    from foundry.graph.gate_wiring.routing import is_collection_error
+
+    lines = list(findings)
+    mods = {i for i in failing_ids(lines) if is_collection_error(i)}
+    for line in lines:
+        if m := _UNIMPORTED.search(line):
+            mods.update(x.strip() for x in m.group(1).split(","))
+    return mods
+
+
+def _foreign_collection(
+    spec: CheckSpec, g: GateOutcome, before: GateOutcome, changed: Iterable[str]
+) -> tuple[str, ...]:
+    """``g``'s findings, re-advised when a test module the session may not edit
+    stopped collecting during it: "fix the import error" sent a session that broke
+    the harness config into another ticket's module it could not even read. The
+    fix is in the harness/config files the session changed (else owns)."""
+    from foundry.agents.implementation.tickets import in_write_scope
+    from foundry.gates.test import UNCOLLECTED_FIX
+
+    if not spec.own_files:
+        return g.findings
+    was = _uncollected(before.findings)
+    foreign = sorted(
+        m
+        for m in _uncollected(g.findings) - was
+        if not in_write_scope(m.removeprefix("./"), spec.own_files)
+    )
+    if not foreign:
+        return g.findings
+    configs = [p for p in dict.fromkeys(changed) if _HARNESS_CONFIG.search(p)]
+    how = "changed"
+    if not configs:
+        configs = [p for p in spec.own_files if _HARNESS_CONFIG.search(p)]
+        how = "own"
+    names = ", ".join(foreign)
+    one = len(foreign) == 1
+    them = "it" if one else "them"
+    where = (
+        f"the harness/config file{'' if len(configs) == 1 else 's'} you {how} "
+        f"({', '.join(configs)}): a test-runner setting there (a rootdir or base dir, "
+        f"test paths, a plugin, a fixture, a module path) most likely stopped {them} "
+        "collecting — fix that setting"
+        if configs
+        else f"your own changes (a harness setting, a module {them} import{'s' if one else ''})"
+        " — fix it in your files"
+    )
+    note = (
+        f"NOT IN THEIR FILES: {names} {'is' if one else 'are'} another ticket's test "
+        f"module{'' if one else 's'}, not yours to edit, and collected before this "
+        f"session; {'it' if one else 'they'} stopped collecting during it. The cause is "
+        f"{where}, not {names}."
+    )
+    pointer = f"the fix is not in {names} (see NOT IN THEIR FILES above)"
+    out = [note]
+    for line in g.findings:
+        if UNCOLLECTED_FIX in line and any(m in line for m in foreign):
+            line = line.replace(UNCOLLECTED_FIX, pointer)
+        out.append(line)
+    return tuple(out)
+
+
+# The scoped Test gate's lines about the session's own tests and properties
+# (TestGate.owning): the gate judged them for this session only.
+_OWN_TEST_LINE = re.compile(
+    r"property \S+ (?:missing|not covered|not run|failing)\b|this ticket's own tests failed"
+)
+
+
 def judge(
     spec: CheckSpec,
     gates: tuple[GateOutcome, ...],
     start: Mapping[str, GateOutcome] | None = None,
     seconds: float = 0.0,
+    changed: Iterable[str] = (),
 ) -> CheckVerdict:
     """Split ``gates`` against ``start`` (each gate's baseline: its first result that
     judged the tree; a gate with none yet is its own baseline, as in the opening
@@ -493,7 +642,10 @@ def judge(
     checked: list[str] = []
     for g in gates:
         if g.name == "test":
-            checked.append(f"{len(spec.scope)} scenario(s)")
+            checked.append(
+                f"{len(spec.scope)} scenario(s)"
+                + (" + your tests and properties" if spec.own_tests or spec.properties else "")
+            )
         else:
             checked.append(g.name)
         if g.status is GateStatus.ERROR:
@@ -504,7 +656,9 @@ def judge(
         before = base[g.name]
         head = f"[{g.name} gate FAILED]"
         if g.name != "test":
-            own_all = everything or (spec.own_smoke if g.name == "smoke" else spec.own_build)
+            own_all = everything or (
+                spec.own_smoke if g.name in ("smoke", "launch") else spec.own_build
+            )
             own, other = _split_build(spec, g, before, own_all)
             if own:
                 yours += [head, *own]
@@ -515,24 +669,26 @@ def judge(
         red = {r for r, o in g.scenarios.items() if o != "passed"}
         mine = {r for r in red if everything or r in (spec.own_refs or ()) or r not in start_red}
         theirs = red - mine
+        findings = _foreign_collection(spec, g, before, changed)
         if (
             not red
             and before.status is GateStatus.FAIL
             and not everything
             and not _mentions(g.findings, spec.own_files)
+            and not any(_OWN_TEST_LINE.match(line) for line in g.findings)
         ):
             # Red with no scenario to blame (a module failing to collect) and red at
             # the baseline too: not the session's unless it names the session's files.
-            pre += [head, *g.findings]
+            pre += [head, *findings]
             continue
         if not theirs:
-            yours += [head, *g.findings]
+            yours += [head, *findings]
             continue
         own_lines: list[str] = []
         pre_lines: list[str] = []
-        for line in g.findings:
+        for line in findings:
             ids = set(failing_ids([line]))
-            if ids & mine or _mentions([line], spec.own_files):
+            if ids & mine or _mentions([line], spec.own_files) or _OWN_TEST_LINE.match(line):
                 own_lines.append(line)
             elif ids:  # a pre-existing scenario, or a test of a module not the session's
                 pre_lines.append(line)
@@ -648,7 +804,9 @@ class SessionCheck:
         gates = (
             self.spec.base.opening(self.spec) if opening else run_check(self.spec, files, deleted)
         )
-        verdict = judge(self.spec, gates, self._start, time.monotonic() - t0)
+        verdict = judge(
+            self.spec, gates, self._start, time.monotonic() - t0, changed=(*files, *deleted)
+        )
         for g in gates:
             if g.status in (GateStatus.PASS, GateStatus.FAIL):
                 self._start.setdefault(g.name, g)

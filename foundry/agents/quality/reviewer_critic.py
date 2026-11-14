@@ -24,6 +24,7 @@ honored: the agent emitted a verdict it could never have signed itself.
 from __future__ import annotations
 
 import difflib
+import re
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,12 +38,15 @@ from foundry.agents.quality._common import (
     subject_artifact_uri,
 )
 from foundry.durability.artifact_store import UnknownArtifactError
+from foundry.proxy.model_provider_proxy import OutputLimitReached
+from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.gates import GateResult, GateStatus
-from foundry.schemas.implementation import FEATURE_DIR, FeatureDiff
+from foundry.schemas.implementation import FEATURE_DIR, Effort, FeatureDiff
+from foundry.schemas.product import PRD
 from foundry.schemas.quality import ReviewedTree
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from langchain_core.runnables import RunnableConfig
 
@@ -164,16 +168,60 @@ def _reviewed_tree(
 _DIFF_CHAR_CAP = 60_000
 
 
-def _capped(text: str) -> tuple[str, bool]:
+# A template, whatever the stack: a templates/views directory or a template file.
+_TEMPLATE_PATH = re.compile(
+    r"(^|/)(templates?|views?)/|\.(html?|jinja2?|j2|hbs|ejs|tmpl|erb|mustache|njk|liquid)$"
+)
+
+
+def _file_sections(diff: str) -> list[tuple[str, str]]:
+    """``diff`` split per file: (section text, its path or "")."""
+    splitter = _DIFF_FILE_SPLIT if _DIFF_FILE_SPLIT.search(diff) else _HUNK_FILE_SPLIT
+    sections = [x for x in splitter.split(diff) if x.strip()]
+    return [(x, m.group(1) if (m := _DIFF_PATH.search(x)) else "") for x in sections]
+
+
+def _capped(text: str, keep: Callable[[str], bool] | None = None) -> tuple[str, bool]:
     """``text`` cut to :data:`_DIFF_CHAR_CAP` with a ``[TRUNCATED]`` note, and
-    whether it fit whole."""
+    whether it fit whole. A cut keeps the files ``keep`` names (the entrypoint and
+    the templates) in front, whole up to half the cap: a review that missed the
+    composition root and the templates passed their bugs."""
     if len(text) <= _DIFF_CHAR_CAP:
         return text, True
-    note = f"\n\n[TRUNCATED: showing the first {_DIFF_CHAR_CAP} of {len(text)} chars.]"
-    return text[:_DIFF_CHAR_CAP] + note, False
+    pinned = ""
+    for x, path in _file_sections(text):
+        # Whole files only: one too big to fit is skipped, the smaller ones still go.
+        if path and keep and keep(path) and len(pinned) + len(x) <= _DIFF_CHAR_CAP // 2:
+            pinned += x
+    head = ""
+    if pinned:
+        head = (
+            "[The change is truncated below; the entrypoint and template files come "
+            "first, in full:]\n" + pinned + "\n\n[The whole change, in order:]\n"
+        )
+    room = max(_DIFF_CHAR_CAP - len(head), _DIFF_CHAR_CAP // 2)
+    note = f"\n\n[TRUNCATED: showing the first {room} of {len(text)} chars.]"
+    return head + text[:room] + note, False
 
 
-def _diff_text(rt: AgentRuntime, state: FactoryState) -> tuple[str, bool]:
+def _always_shown(rt: AgentRuntime, state: FactoryState) -> Callable[[str], bool]:
+    """Whether a changed path is one the review must always see: a file of an
+    entrypoint ticket (the composition root) or a template."""
+    entry: set[str] = set()
+    if rt.cas is not None:
+        from foundry.agents.implementation.tickets import read_tickets
+
+        try:
+            tickets = read_tickets(state, rt.cas.resolve)
+        except Exception:
+            tickets = ()
+        entry = {f.removeprefix("./") for t in tickets if t.entrypoint for f in t.files}
+    return lambda path: path in entry or bool(_TEMPLATE_PATH.search(path))
+
+
+def _diff_text(
+    rt: AgentRuntime, state: FactoryState, keep: Callable[[str], bool] | None = None
+) -> tuple[str, bool]:
     """The change under review as unified-diff text: every ``feature_diff`` body in
     ``Seq`` order (the order ``materialize_workdir`` applies them), capped at
     :data:`_DIFF_CHAR_CAP`, and whether that text is the whole change (nothing cut
@@ -202,7 +250,7 @@ def _diff_text(rt: AgentRuntime, state: FactoryState) -> tuple[str, bool]:
         parts.append(f"--- task {handle.task_id or body.task_id} ({handle.uri}) ---\n{text}")
     if not parts:
         return "(None of the feature_diff bodies could be resolved: no diff text to review.)", False
-    out, whole = _capped("\n\n".join(parts))
+    out, whole = _capped("\n\n".join(parts), keep)
     if missing:
         out += "\n\n[Unresolvable diffs, not shown: " + ", ".join(missing) + "]"
     return out, whole and not missing
@@ -227,12 +275,11 @@ def review_tree(
 
 def _prior_review(
     state: FactoryState, resolve: ArtifactResolver, resolve_blob: BlobResolver
-) -> tuple[GateResult, dict[str, str]] | None:
-    """The run's newest review verdict and the files of the tree it judged, or
-    ``None`` before the first review, when that review did not see its whole
-    change (truncated, or recorded before completeness was), or when that tree's
-    snapshot is not on state or no longer resolves (a resume without the store):
-    the review is then full."""
+) -> tuple[GateResult, dict[str, str], bool] | None:
+    """The run's newest review verdict, the files of the tree it judged and whether
+    it saw its whole change, or ``None`` before the first review, or when that
+    tree's snapshot is not on state or no longer resolves (a resume without the
+    store): the review is then full."""
     from foundry.graph.gate_wiring import MaterializationError, snapshot_files
 
     reviews = [g for g in state.get("gates") or () if g.name == _GATE_NAME]
@@ -247,16 +294,18 @@ def _prior_review(
         except UnknownArtifactError:
             continue
         if isinstance(body, ReviewedTree) and body.verdict_seq == prior.seq:
-            if not body.complete:
-                return None
             try:
-                return prior, snapshot_files(body.snapshot_uri, resolve_blob)
+                return prior, snapshot_files(body.snapshot_uri, resolve_blob), body.complete
             except (UnknownArtifactError, MaterializationError):
                 return None
     return None
 
 
-def _delta_text(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[str, bool]:
+def _delta_text(
+    before: Mapping[str, str],
+    after: Mapping[str, str],
+    keep: Callable[[str], bool] | None = None,
+) -> tuple[str, bool]:
     """The change from ``before`` to ``after`` as unified diffs, path by path,
     capped like :func:`_diff_text`, and whether it fit whole."""
     parts: list[str] = []
@@ -276,7 +325,7 @@ def _delta_text(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[st
         )
     if not parts:
         return "(No file changed since the tree you reviewed.)", True
-    return _capped("\n".join(parts))
+    return _capped("\n".join(parts), keep)
 
 
 _SOP = (
@@ -287,13 +336,208 @@ _SOP = (
     "criteria; otherwise request-changes with specific, actionable findings. "
     "A finding blocks only if it cites real evidence: a check that is failing in "
     "this tree's gate results (listed in the request) in failing_check, or a "
-    "reproducible command with an expected result and a DIFFERENT actual result "
-    "you observed. Citing a passing test or scenario does not count. Opinions on "
+    "reproducible command with correct_result (what a CORRECT app returns, not "
+    "your prediction of what this one does) and a DIFFERENT observed_result (what "
+    "this app actually returned when you ran it). An exception, traceback, 5xx or "
+    "crash you observed is a defect: never copy it into correct_result. Citing a "
+    "passing test or scenario does not count. A finding about runtime behaviour (a "
+    "crash, a traceback, a 5xx, a race or other concurrency fault, a hang, a wrong "
+    "output) must carry a command that EXERCISES that behaviour: start the app and "
+    "curl it (for a race, fire the requests concurrently, e.g. 20 creates of one resource at once "
+    "from a short python script with threads), run the CLI, or run a small script "
+    "that drives the code. Never grep or cat as evidence of runtime behaviour: "
+    "reading the source shows what the code says, not what it does, and the repro "
+    "gate cannot reproduce it. Grep or cat evidence is allowed only for a static "
+    "finding (a hardcoded secret, dead code, a special-cased literal). Opinions on "
     "test quality (fragile asserts, missing edge cases, needless mocks) are "
     "advisory while every check passes: record them, they do not block. "
+    "Work through this checklist against the spec, the contracts and the launch "
+    "result in the request, and for each problem you find give a concrete "
+    "reproduction: a shell command (curl against the launched app, a CLI call, a "
+    "python -c one-liner) with its correct_result and its observed_result. "
+    "(1) Structure: logic duplicated across files, dead modules nothing imports, an "
+    "entry point that re-implements what another module owns. "
+    "(2) Spec coverage: every edge case the spec names, and BOTH branches of every "
+    "'X or Y' requirement. "
+    "(3) Security: hardcoded or fallback secret keys; POST forms without CSRF "
+    "protection; SQL built by string formatting, and LIKE patterns that do not "
+    "escape the user's % and _; passwords hashed with a fast digest (md5/sha*) "
+    "instead of a password KDF; routes reachable without the auth or role the spec "
+    "requires; request bodies and uploads with no size limit. "
+    "(4) Persistence: one database connection shared across server threads (sqlite3 "
+    "without check_same_thread, or no lock, or a shared service whose connection each "
+    "request swaps for its own), an in-memory database holding data "
+    "that must persist, and multi-step writes that are not one transaction. "
+    "(5) Spec workarounds: code that special-cases one of the spec's literal examples "
+    "(a branch or input rewrite keyed on that exact value) or works around a "
+    "contradiction in the spec instead of implementing the general rule is a "
+    "BLOCKING finding even when every check passes. Reproduce it: a neighbouring "
+    "input the workaround breaks (correct vs observed result), or a grep for the "
+    "special-cased literal (correct_result: no match; observed_result: the file and "
+    "line). "
+    "(6) Pinned constraints and must-haves: each one listed in the request is a "
+    "criterion. Try to break it with hostile input the scenarios never use: a "
+    "10,000-character argument, 2,000 nested brackets, a 5,000-digit number, a long run "
+    "of a repeated operator or sign, an empty string, an oversized form field. A "
+    "violation (e.g. a traceback, panic or crash where a constraint forbids one) is "
+    "BLOCKING: give the command, the constraint's id as correct_result's basis, and the "
+    "observed output. "
+    "(7) Accepted input: for each operator, sign, flag, option or field the app "
+    "accepts (including ones beyond the spec), run it on a small input and compare "
+    "with the answer you compute by hand. Input that is accepted but dropped, ignored "
+    "or misread into a different answer is BLOCKING; rejecting it with an error is "
+    "fine. "
     "Report at most 10 findings, most important first, each in a sentence or two; "
     "never repeat a finding."
 )
+
+# The local reviewer's output budget: thinking at low effort plus a verdict of at
+# most 10 findings fits well inside it; a reply that runs past it is rambling.
+_REVIEW_MAX_TOKENS = 24_576
+_REVIEW_EFFORT: Effort = "low"
+_SPEC_CHAR_CAP = 12_000
+_CONTRACT_CHAR_CAP = 8_000
+_LAUNCH_FINDINGS = 20
+# The launch gate (foundry/gates/launch.py) is read by name only: the reviewer never
+# depends on its module.
+_LAUNCH_GATE = "launch"
+_INTERFACE_CONTRACT_KIND = "interface_contract"
+
+
+def _clip(text: str, cap: int) -> str:
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n[TRUNCATED: first {cap} of {len(text)} chars]"
+
+
+def _spec_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The spec the build answers to: the design spec (else the request), then the
+    newest PRD's prose body when the store holds it."""
+    parts = [str(state.get("spec") or state.get("request") or "").strip()]
+    prds = [a for a in state.get("artifacts") or () if a.kind == "prd"]
+    if prds and rt.cas is not None:
+        try:
+            prd = rt.cas.resolve(max(prds, key=lambda a: a.seq))
+            body = rt.cas.get_body(prd.prd_uri) if isinstance(prd, PRD) else None
+        except Exception:
+            body = None
+        text = str(getattr(body, "text", "") or "").strip()
+        if text:
+            parts.append("PRD:\n" + text)
+    return _clip("\n\n".join(p for p in parts if p), _SPEC_CHAR_CAP)
+
+
+def _contract_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The planned contracts, newest record per name: each signature, else its
+    authored prose body."""
+    if rt.cas is None:
+        return ""
+    newest: dict[str, tuple[Any, InterfaceContract]] = {}
+    for handle in state.get("artifacts") or ():
+        if handle.kind != _INTERFACE_CONTRACT_KIND:
+            continue
+        try:
+            body = rt.cas.resolve(handle)
+        except Exception:
+            continue
+        if isinstance(body, InterfaceContract) and (
+            body.name not in newest or handle.seq > newest[body.name][0]
+        ):
+            newest[body.name] = (handle.seq, body)
+    lines: list[str] = []
+    for name in sorted(newest):
+        c = newest[name][1]
+        text = c.signature.strip()
+        if not text:
+            try:
+                text = str(getattr(rt.cas.get_body(c.spec_uri), "text", "") or "").strip()
+            except Exception:
+                text = ""
+        lines.append(
+            f"- {name}" + (f" [{c.kind}]" if c.kind else "") + (f": {text}" if text else "")
+        )
+    return _clip("\n".join(lines), _CONTRACT_CHAR_CAP)
+
+
+def _plan_rules_text(rt: AgentRuntime, state: FactoryState) -> str:
+    """The plan's live pinned constraints and the newest brief's must-haves, one
+    per line with its id: no check verifies them, so the review must."""
+    from foundry.schemas.product import IntentBrief
+    from foundry.state.reducers import live_constraints
+
+    lines = [
+        f"- {c.id} (pinned constraint): {c.text}"
+        for c in sorted(
+            live_constraints(list(state.get("pinned_constraints") or ())), key=lambda c: c.id
+        )
+    ]
+    briefs = [a for a in state.get("artifacts") or () if a.kind == "intent_brief"]
+    if briefs and rt.cas is not None:
+        try:
+            brief = rt.cas.resolve(max(briefs, key=lambda a: a.seq))
+        except Exception:
+            brief = None
+        if isinstance(brief, IntentBrief):
+            ids = brief.must_have_ids
+            lines += [
+                f"- {ids[i] if i < len(ids) else f'MH-{i + 1}'} (must-have): {text}"
+                for i, text in enumerate(brief.must_haves)
+            ]
+    return _clip("\n".join(lines), _SPEC_CHAR_CAP)
+
+
+def launch_result(state: FactoryState) -> GateResult | None:
+    """The newest launch-gate verdict on state, if the launch gate has run."""
+    launches = [g for g in state.get("gates") or () if g.name == _LAUNCH_GATE]
+    return max(launches, key=lambda g: g.seq) if launches else None
+
+
+def _launch_text(state: FactoryState) -> str:
+    g = launch_result(state)
+    if g is None:
+        return "not run yet on this build."
+    shown = "\n".join(f"  {f}" for f in g.findings[:_LAUNCH_FINDINGS])
+    return f"{g.status.value} (tree {g.run_against})" + (f":\n{shown}" if shown else ".")
+
+
+_DIFF_FILE_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
+_HUNK_FILE_SPLIT = re.compile(r"^(?=--- (?:a/|/dev/null))", re.MULTILINE)
+_DIFF_PATH = re.compile(r"^(?:\+\+\+ b/|--- a/)(\S+)", re.MULTILINE)
+_TEST_PATH = re.compile(r"(^|/)(tests?|features|steps|__tests__)/|(^|/)(test_[^/]*|conftest\.py)$")
+
+
+def _failing_findings(state: FactoryState) -> str:
+    """Every finding of the newest non-judgment verdict per gate that failed."""
+    from foundry.state.reducers import JUDGMENT_VERDICTS
+
+    latest: dict[str, GateResult] = {}
+    for g in state.get("gates") or ():
+        if g.name not in JUDGMENT_VERDICTS and (g.name not in latest or g.seq > latest[g.name].seq):
+            latest[g.name] = g
+    return "\n".join(
+        f
+        for g in latest.values()
+        if g.status in (GateStatus.FAIL, GateStatus.ERROR)
+        for f in g.findings
+    )
+
+
+def trimmed_diff(diff: str, failing: str, keep: Callable[[str], bool] | None = None) -> str:
+    """``diff`` cut to the files the failing checks name, else to its non-test
+    source files, within half the usual cap: the retry after a reply ran past the
+    output cap. The files ``keep`` names (entrypoint, templates) come first."""
+    paths = _file_sections(diff)
+    sections = [s for s, _ in paths]
+    named = [s for s, p in paths if p and p in failing]
+    kept = named or [s for s, p in paths if p and not _TEST_PATH.search(p)] or sections
+    first = [s for s, p in paths if p and keep is not None and keep(p)]
+    kept = list(dict.fromkeys([*first, *kept]))
+    text = "".join(kept)
+    cap = _DIFF_CHAR_CAP // 2
+    if len(text) > cap:
+        text = text[:cap] + f"\n[TRUNCATED: first {cap} of {len(text)} chars]"
+    which = "the files the failing checks name" if named else "the changed source files"
+    return f"[Trimmed to {which} after your last reply ran past the output limit.]\n" + text
 
 
 def review(
@@ -316,12 +560,12 @@ def review(
     ``criteria`` (when given) are put in front of the judge so it reviews against
     them. ``resolve`` / ``resolve_blob`` rebuild the tree under review so only gate
     verdicts on that tree can back a finding. ``tree`` is that tree already built
-    (:func:`review_tree`): when the run's last review saw its whole change and left
-    a snapshot of the tree it judged, and the change since fits untruncated, this
-    review is sent only that change and that verdict's findings, at medium local
-    thinking, and still answers for the whole tree. Returns the
+    (:func:`review_tree`): when the run's last review left a snapshot of the tree
+    it judged, this review is sent only the change since and that verdict's
+    findings, and still answers for the whole tree. Returns the
     :class:`JudgmentResult`, the advisory journal entry, and whether this review
-    saw its whole change (what a :class:`ReviewedTree` records as ``complete``).
+    and every one it builds on saw its whole change (what a :class:`ReviewedTree`
+    records as ``complete``).
     """
     # Seq.node_id MUST equal the node_id passed to judge() — the binding
     # signs seq.node_id, so judge() rejects a mismatched record (proxy L5).
@@ -365,63 +609,97 @@ def review(
         else None
     )
     delta: str | None = None
+    keep = _always_shown(rt, state)
     if prior is not None and tree is not None:
-        delta, whole = _delta_text(prior[1], tree[1])
-        if not whole:
-            prior = delta = None
+        # Always the delta after a fix, even when the last review or this delta was
+        # truncated: a full re-review re-reads the same capped head of the change
+        # (a local re-review cost the first one's 15 minutes again) and sees no
+        # more of the tree than the delta and the open findings do.
+        delta, whole = _delta_text(prior[1], tree[1], keep)
     content = (
-        f"Review the artifact under {subject_uri} against the interfaces and "
-        "acceptance criteria. Emit your verdict."
+        f"Review the artifact under {subject_uri} against the spec, the contracts and "
+        "the acceptance criteria. Emit your verdict."
     )
+    spec = _spec_text(rt, state)
+    if spec:
+        content += "\n\nThe spec:\n" + spec
+    contracts = _contract_text(rt, state)
+    if contracts:
+        content += "\n\nThe planned contracts:\n" + contracts
     if criteria:
         content += "\n\nAcceptance criteria:\n" + "\n".join(
             f"- {c.id} [{c.criticality}]: {c.text}" for c in criteria
         )
-    if prior is None or delta is None:
-        diff, complete = _diff_text(rt, state)
-        content += "\n\nThe change (unified diffs, applied in order):\n" + diff
-    else:
-        verdict, complete = prior[0], True
+    rules = _plan_rules_text(rt, state)
+    if rules:
         content += (
-            "\n\nThis is a re-review: you already judged an earlier tree of this build "
-            f"({verdict.status.value}), and a fix pass has changed it since. Your verdict is "
-            "still for the WHOLE current tree. For each of your earlier findings below, "
-            "decide from the change whether it is resolved: drop a resolved one, and "
-            "repeat every unresolved one in your findings, with its evidence. Add only "
-            "the new problems the change introduced; the rest of the tree is what you "
-            "already reviewed.\n\nYour earlier findings:\n"
-            + ("\n".join(f"- {f}" for f in verdict.findings) or "(none)")
-            + "\n\nThe change since the tree you reviewed (unified diffs):\n"
-            + delta
+            "\n\nThe plan's pinned constraints and must-haves (no check verifies these: "
+            "check each one, and a violation you reproduce is a blocking finding):\n" + rules
         )
+    content += (
+        "\n\nThe launch gate (the factory started the real app and probed it): "
+        + _launch_text(state)
+    )
+    if prior is None or delta is None:
+        diff, complete = _diff_text(rt, state, keep)
+
+        def body(change: str) -> str:
+            return "\n\nThe change (unified diffs, applied in order):\n" + change
+
+    else:
+        verdict, complete, diff = prior[0], prior[2] and whole, delta
+
+        def body(change: str) -> str:
+            return (
+                "\n\nThis is a re-review: you already judged an earlier tree of this build "
+                f"({verdict.status.value}), and a fix pass has changed it since. Your verdict "
+                "is still for the WHOLE current tree. For each of your earlier findings "
+                "below, decide from the change whether it is resolved: drop a resolved one, "
+                "and repeat every unresolved one in your findings, with its evidence. Add "
+                "only the new problems the change introduced; the rest of the tree is what "
+                "you already reviewed.\n\nYour earlier findings:\n"
+                + ("\n".join(f"- {f}" for f in verdict.findings) or "(none)")
+                + "\n\nThe change since the tree you reviewed (unified diffs):\n"
+                + change
+            )
+
     # Without this the judge flags every build: the .feature files and criteria.json
     # never appear in the tickets' diffs because the gates write them.
-    content += (
+    tail = (
         f"\n\nNot in the diffs by design: the factory writes {FEATURE_DIR}/*.feature (one "
         "per ticket, rendered from the acceptance criteria above) and criteria.json "
         "into the tree before the Test gate runs. Do not flag them as missing."
     )
     built = tree[0] if tree is not None else _reviewed_tree(state, resolve, resolve_blob)
     gates, tests = failing_checks(state, built)
-    content += (
+    tail += (
         "\n\nChecks failing on this tree in its gate results: "
         + (", ".join((*gates, *tests)) or "none (no gate has failed on it)")
         + "."
     )
-    result = rt.proxy.judge(
-        node_id,
-        subject_uri,
-        run_against,
-        nonce,
-        _SOP,
-        [{"role": "user", "content": content}],
-        seq=seq,
-        tier=_REVIEW_TIER,
-        gate_name=_GATE_NAME,
-        failing_gates=gates,
-        failing_tests=tests,
-        effort=None if prior is None else "medium",
-    )
+
+    def judge(change: str) -> JudgmentResult:
+        return rt.proxy.judge(
+            node_id,
+            subject_uri,
+            run_against,
+            nonce,
+            _SOP,
+            [{"role": "user", "content": content + body(change) + tail}],
+            seq=seq,
+            tier=_REVIEW_TIER,
+            gate_name=_GATE_NAME,
+            failing_gates=gates,
+            failing_tests=tests,
+            effort=_REVIEW_EFFORT,
+            max_tokens=_REVIEW_MAX_TOKENS,
+        )
+
+    try:
+        result = judge(diff)
+    except OutputLimitReached:
+        # Once: the trimmed request differs, so the call cache cannot replay the miss.
+        result, complete = judge(trimmed_diff(diff, _failing_findings(state), keep)), False
 
     # ADVISORY journal entry (plan [11]): it only ECHOES the proxy-stamped verdict
     # onto the SEPARATE `agent_journal` channel, which no gate/router reads. The

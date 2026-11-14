@@ -116,7 +116,12 @@ PLAN: dict[str, Any] = {
     ],
     "stack": PYTHON_STACK,
     "interfaces": [
-        {"name": "TodoStore.add", "spec": "add(todo) -> id", "consumers": ["api"]},
+        {
+            "name": "TodoStore.add",
+            "spec": "add(todo) -> id",
+            "errors": ["sqlite3.IntegrityError on a duplicate id"],
+            "consumers": ["api"],
+        },
         {"name": "TodoStore.list", "spec": "list() -> [todo]", "consumers": ["api"]},
     ],
     "tickets": [
@@ -295,11 +300,13 @@ def test_one_model_call_emits_every_planning_artifact_kind() -> None:
     # Distinct ADRs get distinct handles (content_identity, not body digest).
     assert len({a.uri for a in artifacts if a.kind == "adr"}) == 2
     assert writes["scope_tier"].tier.value == "standard"
-    # PLAN persists in SQLite on Python: the planner pins the :memory: footgun itself.
+    # PLAN's contract raises sqlite3 errors on Python: the planner pins the :memory:
+    # footgun itself.
     assert {c.id for c in writes["pinned_constraints"]} == {
         "PC-001",
         "PC-002",
         "PC-python-sqlite-memory",
+        "PC-python-app-safety",
     }
     assert "gates" not in writes  # agents triage, never bless (L5)
 
@@ -415,12 +422,16 @@ def _content(request: dict[str, Any]) -> str:
 
 
 def _efforts(rt: AgentRuntime) -> list[str | None]:
-    """The ``effort`` of every model call ``rt`` makes from here on."""
+    """The ``effort`` of every model call ``rt`` makes from here on, a repair's
+    (capped at its output budget, so a cut is never re-rolled) marked ``/repair``."""
+    from foundry.agents.planner import _REPAIR_MAX_TOKENS
+
     seen: list[str | None] = []
     real = rt.proxy.complete
 
     def spy(*args: Any, **kwargs: Any) -> Any:
-        seen.append(kwargs.get("effort"))
+        repair = kwargs.get("max_tokens") == _REPAIR_MAX_TOKENS
+        seen.append(f"{kwargs.get('effort')}{'/repair' if repair else ''}")
         return real(*args, **kwargs)
 
     rt.proxy.complete = spy  # type: ignore[method-assign]
@@ -448,7 +459,7 @@ def test_reentry_after_spec_fail_repairs_the_prior_plan() -> None:
 
     assert len(tx.requests) == 3
     assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
-    assert efforts == ["medium", "medium"]
+    assert efforts == ["medium", "medium/repair"]
     prompt = _content(tx.requests[2])
     assert "REPAIR PASS — the signed Spec gate" in prompt
     assert "no criterion flags security_abuse=true" in prompt
@@ -615,7 +626,8 @@ def test_one_bad_field_does_not_kill_the_plan() -> None:
     }
     rt, _ = runtime_for(_plan(tickets=[bad], sprint_plan={"usd_cap_microusd": None}))
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 1
+    # The kept scenario plus the security one code adds ("the list is empty" is no misuse).
+    assert sum(a.kind == "acceptance_criterion" for a in writes["artifacts"]) == 2
     assert sum(a.kind == "ticket" for a in writes["artifacts"]) == 1
 
 
@@ -863,7 +875,7 @@ def test_flagged_self_review_revises_once_in_node() -> None:
     efforts = _efforts(rt)
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
-    assert len(tx.requests) == 3 and efforts == [None, "medium", None]
+    assert len(tx.requests) == 3 and efforts == ["medium", "medium/repair", "medium"]
     assert "SELF-REVIEW REVISION" not in json.dumps(tx.requests[0])
     repair = _content(tx.requests[1])
     assert "REPAIR PASS — your own criteria_review" in repair and "no rate limit" in repair
@@ -938,6 +950,7 @@ def test_replan_retires_constraints_it_no_longer_emits() -> None:
         "PC-001",
         "OP-1",
         "PC-python-sqlite-memory",
+        "PC-python-app-safety",
     }
 
 

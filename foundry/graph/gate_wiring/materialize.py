@@ -4,6 +4,7 @@ content-addressed artifacts on ``state``."""
 from __future__ import annotations
 
 import ast
+import re
 import sys
 import tempfile
 from importlib import metadata as _im
@@ -13,7 +14,15 @@ from typing import TYPE_CHECKING, Any
 from foundry.agents._common import as_text
 from foundry.base_tree import base_features, copy_base_tree
 from foundry.canonical import content_digest
-from foundry.gates.pydeps import SCAFFOLD_HEADER
+from foundry.gates.profiles import property_testing
+from foundry.gates.pydeps import (
+    SCAFFOLD_HEADER,
+    _dist_for,
+    _host_distributions,
+    _import_declared,
+    _normalized,
+    requirement_name,
+)
 from foundry.graph.gate_wiring.diffs import (
     FeatureDiffBodyError,
     MaterializationError,
@@ -339,19 +348,47 @@ def _pin(dist: str) -> str:
         return dist
 
 
-def _has_tests(dest: Path) -> bool:
-    if any((dest / n).exists() for n in ("tests", "conftest.py", "pytest.ini")):
-        return True
-    return any(p.name.startswith("test_") or p.stem.endswith("_test") for p in dest.rglob("*.py"))
+# Never shipped: the harness's own plugins (a test never imports them) and pure dev
+# tools. A library the shipped tests import IS shipped, the harness's included.
+_DEV_TOOLS = frozenset(
+    {"pluggy", "xdist", "pytest_cov", "coverage"}
+    | {"mypy", "mypy_extensions", "ruff", "black", "flake8", "pylint", "isort"}
+)
+
+
+def _harness_test_libraries() -> tuple[str, ...]:
+    """Import names of what the gate harness provides that shipped tests import: the
+    pytest runner, pytest-bdd and the Python profile's property-testing library. The
+    gates run Foundry's copies, so a manifest without them passes every gate yet
+    ships tests that cannot be collected."""
+    lib = property_testing("python")
+    return ("pytest", "_pytest", "pytest_bdd", *((lib.library,) if lib else ()))
+
+
+def _imported_modules(dest: Path, py_files: list[Path] | None = None) -> set[str]:
+    """The top-level module names the tree's ``.py`` files import (absolute imports)."""
+    imported: set[str] = set()
+    for path in dest.rglob("*.py") if py_files is None else py_files:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".", 1)[0])
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".", 1)[0])
+    return imported
 
 
 def _python_third_party_requirements(dest: Path) -> list[str] | None:
     """Requirement lines derived from the tree's real imports, or ``None`` when
     ``dest`` is not a Python tree (no ``.py`` — nothing to scaffold here).
 
-    The third-party top-level modules the code actually imports (stdlib and
-    in-tree local modules excluded), mapped to their installed distribution +
-    pinned version when resolvable, plus the test runner when a suite is present.
+    The third-party top-level modules the app and its tests import (stdlib, in-tree
+    local modules, what the gate harness provides and dev tools excluded), mapped
+    to their installed distribution + pinned version when resolvable.
     Deterministic (sorted, no clock) so the integrated ``tree_sha`` is stable
     across the repeated materializations of one run.
     """
@@ -363,19 +400,10 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     local = {p.name for p in dest.iterdir() if p.is_dir()}
     local |= {p.stem for p in dest.glob("*.py")}
     stdlib = sys.stdlib_module_names  # guaranteed on the pinned floor (requires-python >=3.11)
-    imported: set[str] = set()
-    for path in py_files:
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, SyntaxError, ValueError):
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    imported.add(alias.name.split(".", 1)[0])
-            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                imported.add(node.module.split(".", 1)[0])
-    third_party = {n for n in imported if n and n not in stdlib and n not in local}
+    imported = _imported_modules(dest, py_files)
+    third_party = {
+        n for n in imported if n and n not in stdlib and n not in local and n not in _DEV_TOOLS
+    }
     try:
         pkg_dist = _im.packages_distributions()
     except Exception:
@@ -384,13 +412,9 @@ def _python_third_party_requirements(dest: Path) -> list[str] | None:
     for name in third_party:
         dists = pkg_dist.get(name)
         if dists:
-            reqs.update(_pin(d) for d in dists)
+            reqs.update(_pin(d) for d in dists if not d.lower().startswith("types-"))
         else:
             reqs.add(name)  # unresolved import: list the bare name, still auditable
-    if _has_tests(dest):
-        reqs.add(_pin("pytest"))
-    if any((dest / FEATURE_DIR).glob("*.feature")):
-        reqs.update((_pin("pytest"), _pin("pytest-bdd")))
     return sorted(reqs)
 
 
@@ -414,6 +438,42 @@ def _scaffold_manifest(dest: Path) -> None:
     )
     body = "".join(f"{line}\n" for line in reqs)
     (dest / "requirements.txt").write_text(header + body, encoding="utf-8")
+
+
+def _ship_test_manifest(dest: Path) -> None:
+    """Append to the shipped ``requirements.txt`` (at Foundry's pin) each library the
+    harness provides that the tests import and the manifest omits, so the shipped
+    tests collect outside the gates. A line naming one of those libraries is
+    rewritten to Foundry's pin: the gates only ever ran the tests on Foundry's
+    copies, and another version (pytest 8.2 under pytest-bdd 7.0) may not even
+    import. Never drops a line: a package can be loaded with no import (a server, a
+    DB driver, a plugin), and a wrong drop breaks the app."""
+    manifest = dest / "requirements.txt"
+    if not manifest.is_file():
+        return  # none (the scaffold derives one from imports) or pyproject-only
+    text = manifest.read_text(encoding="utf-8")
+    imported = _imported_modules(dest)
+    installed = _host_distributions()
+    harness = {_normalized(_dist_for(lib, installed)) for lib in _harness_test_libraries()}
+    kept = text.splitlines()
+    declared: set[str] = set()
+    for i, line in enumerate(kept):
+        spec = re.sub(r"(^|\s)#.*$", "", line).strip()
+        dist = requirement_name(spec) if spec and not spec.startswith("-") else None
+        if dist is None:
+            continue
+        declared.add(_normalized(dist))
+        if _normalized(dist) in harness and (pin := _pin(dist)) != dist:
+            marker = spec.partition(";")[2].strip()
+            kept[i] = f"{pin}; {marker}" if marker else pin
+    added = [
+        _pin(_dist_for(lib, installed))
+        for lib in _harness_test_libraries()
+        if lib in imported and not _import_declared(lib, declared, installed)
+    ]
+    out = "".join(f"{line}\n" for line in [*kept, *dict.fromkeys(added)])
+    if out != text:
+        manifest.write_text(out, encoding="utf-8")
 
 
 # ---- gate-owned contract files (the wave-0 contracts ticket) -----------------
@@ -595,6 +655,7 @@ def _gated_tree_sha(dest: Path, state: FactoryState) -> str:
     stack = state.get("stack")
     if stack is None or stack.language == "python":
         _scaffold_manifest(dest)
+        _ship_test_manifest(dest)
     # The stack's commands are part of what a verdict judges, so they join the
     # toolchain digest: the stable-FAIL latch keys on run_against, and a re-planned
     # stack must be able to re-gate the same source. No stack keeps the old digest.

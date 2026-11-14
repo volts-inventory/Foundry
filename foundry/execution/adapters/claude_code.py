@@ -49,6 +49,7 @@ level permission UX. Nothing outside the worktree is writable in production
 from __future__ import annotations
 
 import contextlib
+import fnmatch
 import json
 import os
 import shutil
@@ -66,8 +67,10 @@ from foundry.execution.adapter_contract import (
 )
 from foundry.execution.adapters.claude_check import CheckRelay, check_note, open_check
 from foundry.execution.sandbox import Sandbox, SandboxResult
+from foundry.proxy.cli_transports import cost_usage
 from foundry.schemas.gates import GateTriage
 from foundry.state.seq import Seq
+from foundry.state.tree_sha import CACHE_DIRS, CACHE_GLOBS
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -96,22 +99,8 @@ _EPILOGUE = (
 )
 
 # Worktree walk exclusions: VCS internals and the substrate's own scratch dirs
-# are never part of the authored tree slice.
-_EXCLUDED_TOP_DIRS = frozenset({".git", ".claude", "node_modules", "__pycache__"})
-# Toolchain output the agent's own install/typecheck/test runs leave anywhere in the
-# tree: environments and caches, never authored source.
-_EXCLUDED_DIRS = frozenset(
-    {
-        "__pycache__",
-        "node_modules",
-        ".venv",
-        "venv",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".tox",
-    }
-)
+# are never part of the authored tree slice (nor, at any depth, CACHE_DIRS).
+_EXCLUDED_TOP_DIRS = frozenset({".git", ".claude"})
 
 
 # Cargo and Maven build into a top-level target/: output, not source, in their projects.
@@ -173,8 +162,9 @@ def walk_worktree(
             except OSError:
                 continue
             if stat.S_ISREG(mode):
-                read(dfd, name, rel)
-            elif stat.S_ISDIR(mode) and name not in _EXCLUDED_DIRS:
+                if not any(fnmatch.fnmatch(name, pat) for pat in CACHE_GLOBS):
+                    read(dfd, name, rel)
+            elif stat.S_ISDIR(mode) and name not in CACHE_DIRS:
                 try:
                     sub = os.open(name, _DIR_FLAGS, dir_fd=dfd)
                 except OSError:
@@ -425,6 +415,7 @@ class ClaudeCodeAdapter:
         # Per-session token usage, read into the BUILD-MANIFEST: coding sessions are
         # most of a run's spend and never pass through the proxy's per-call records.
         self.usage: list[dict[str, int]] = []
+        self.served_models: set[str] = set()
         # Per-run token cap shared with the proxy; None = uncapped.
         self.token_meter: TokenMeter | None = None
 
@@ -532,6 +523,9 @@ class ClaudeCodeAdapter:
             summary = raw if isinstance(raw, str) else ""
 
         u = envelope.get("usage")
+        observed = _observed_model(envelope)
+        if observed:
+            self.served_models.add(observed)
         if isinstance(u, dict):
             self.usage.append(
                 {
@@ -543,6 +537,7 @@ class ClaudeCodeAdapter:
                         "cache_creation_input_tokens",
                     )
                 }
+                | cost_usage(envelope)
             )
             if self.token_meter is not None:
                 self.token_meter.charge(self.usage[-1])

@@ -195,8 +195,8 @@ def test_request_changes_is_latched_by_the_supervisor_ledger_commit(records: Any
         "finding": "x",
         "failing_check": "",
         "command": "app",
-        "expected": "1",
-        "actual": "2",
+        "correct_result": "1",
+        "observed_result": "2",
     }
     final, _cas = _run(MockTransport(verdicts=[verdict_json("request-changes", [finding])]))
     [rc] = final["gates"]
@@ -228,8 +228,8 @@ _CITES_S001 = {
     "finding": "total-sum check is fragile",
     "failing_check": "S001",
     "command": "pytest -k S001",
-    "expected": "",
-    "actual": "",
+    "correct_result": "",
+    "observed_result": "",
 }
 
 
@@ -293,7 +293,14 @@ def test_reviewer_emits_every_quality_artifact_kind(records: Any) -> None:
     final, _cas = _run()
     arts = [a for a in final["artifacts"] if a.produced_by == "reviewer"]
     kinds = sorted(a.kind for a in arts)
-    assert kinds == ["e2e_report", "oracle_binding", "oracle_binding", "test_plan", "test_report"]
+    assert kinds == [
+        "e2e_report",
+        "oracle_binding",
+        "oracle_binding",
+        "review_findings",
+        "test_plan",
+        "test_report",
+    ]
     assert all(a.uri.startswith("cas://") for a in final["artifacts"])
     # The seeded criterion + diff handles are still on the channel.
     assert sum(a.kind == ACCEPTANCE_CRITERION_KIND for a in final["artifacts"]) == len(CRITERIA)
@@ -339,8 +346,8 @@ _UNROUNDED = {
     "finding": "tip is not rounded to cents",
     "failing_check": "",
     "command": "python -c 'print(tip(0.1))'",
-    "expected": "0.02",
-    "actual": "0.015",
+    "correct_result": "0.02",
+    "observed_result": "0.015",
 }
 
 
@@ -373,7 +380,9 @@ def _two_reviews(
     keep_snapshot: bool = True,
     built_body: str = _ADD_APP,
     fix_body: str = _FIX_APP,
-) -> tuple[list[str], list[str | None], GateResult]:
+) -> tuple[list[str], list[str | None], GateResult, bool]:
+    """Both review prompts, their efforts, the re-review's verdict and whether its
+    ReviewedTree records it complete."""
     cas = ArtifactStore()
     transport = MockTransport(
         verdicts=[
@@ -407,16 +416,18 @@ def _two_reviews(
         "artifacts": [*criteria, built, *produced, fix],
         "gates": first["gates"],
     }
-    [verdict] = node(state, _config(step=2))["gates"]
+    second = node(state, _config(step=2))
+    [verdict] = second["gates"]
+    [tree] = [a for a in second["artifacts"] if a.kind == reviewer_critic.REVIEWED_TREE_KIND]
     prompts = [r["messages"][0]["content"] for r in transport.requests]
-    return prompts, efforts, verdict
+    return prompts, efforts, verdict, cas.resolve(tree).complete
 
 
 def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findings(
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (full, delta), efforts, verdict = _two_reviews(monkeypatch)
-    assert efforts == [None, "medium"]
+    (full, delta), efforts, verdict, complete = _two_reviews(monkeypatch)
+    assert efforts == ["low", "low"] and complete
     assert "--- task T1" in full and "UNTOUCHED" in full and "re-review" not in full
 
     assert "re-review" in delta and "--- task T1" not in delta
@@ -432,26 +443,33 @@ def test_first_review_is_full_and_a_re_review_gets_only_the_change_and_its_findi
 def test_a_re_review_without_the_last_reviewed_tree_is_full(
     records: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (_, second), efforts, _ = _two_reviews(monkeypatch, keep_snapshot=False)
-    assert efforts == [None, None]
+    (_, second), efforts, _, _ = _two_reviews(monkeypatch, keep_snapshot=False)
+    assert efforts == ["low", "low"]
     assert "re-review" not in second and "--- task fix-1" in second
 
 
 @pytest.mark.parametrize(
     ("built_body", "fix_body"),
     [
-        # The first review saw only the head of its change: the rest was never judged.
+        # The first review saw only the head of its change.
         (_ADD_APP + _big_file("big.py"), _FIX_APP),
-        # The change since the last review would itself be cut.
+        # The change since the last review is itself cut.
         (_ADD_APP, _FIX_APP + _big_file("big.py")),
     ],
 )
-def test_a_re_review_is_full_unless_both_reviews_see_their_whole_change(
+def test_a_re_review_after_a_truncated_change_is_still_the_delta_and_recorded_incomplete(
     records: Any, monkeypatch: pytest.MonkeyPatch, built_body: str, fix_body: str
 ) -> None:
-    (_, second), efforts, _ = _two_reviews(monkeypatch, built_body=built_body, fix_body=fix_body)
-    assert efforts == [None, None]
-    assert "re-review" not in second and "--- task T1" in second
+    # A full re-review would re-read the same capped head (the fix is appended last,
+    # so past the cut): the delta and the open findings show the judge more.
+    (_, second), efforts, _, complete = _two_reviews(
+        monkeypatch, built_body=built_body, fix_body=fix_body
+    )
+    assert efforts == ["low", "low"]
+    assert "re-review" in second and "--- task T1" not in second
+    assert "+    return round(t * 0.15, 2)" in second
+    assert "- tip is not rounded to cents [evidence:" in second
+    assert not complete
 
 
 def test_a_reviewed_tree_recorded_before_completeness_reads_as_incomplete() -> None:
@@ -499,3 +517,106 @@ def test_a_review_builds_the_tree_once_and_judges_checks_on_its_gated_sha(
     # S001 fails on the very tree under review, so the finding citing it blocks.
     assert verdict.status is GateStatus.FAIL
     assert "test, features/T1.feature::S001" in transport.requests[0]["messages"][0]["content"]
+
+
+# ---- spec, contracts, launch result, checklist, length stop --------------------
+
+
+def _reviewer_state(cas: ArtifactStore, body: str = _ADD_APP) -> FactoryState:
+    from foundry.schemas.architecture import InterfaceContract
+
+    criteria = [
+        emit_artifact(c, ACCEPTANCE_CRITERION_KIND, "product_manager", c.seq, store=cas)
+        for c in CRITERIA
+    ]
+    contract = InterfaceContract(
+        name="tip",
+        spec_uri="cas://contract/tip",
+        kind="function",
+        signature="def tip(total: float) -> float",
+        seq=Seq("r", 0, 0, "planner", 0),
+    )
+    handle = emit_artifact(contract, "interface_contract", "planner", contract.seq, store=cas)
+    launch = _gate("launch", GateStatus.FAIL, "GET / returned 500", local=3)
+    return {
+        "spec": "A tip calculator. Tips round to cents or to whole dollars.",
+        "artifacts": [*criteria, handle, _stored_diff(cas, "T1", body, 1)],
+        "gates": [launch],
+    }
+
+
+def test_the_review_sees_the_spec_contracts_launch_result_and_checklist(records: Any) -> None:
+    cas = ArtifactStore()
+    transport = MockTransport(verdicts=["approve"])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    node(_reviewer_state(cas), _config())
+    [request] = transport.requests
+    prompt = request["messages"][0]["content"]
+    assert "round to cents or to whole dollars" in prompt
+    assert "- tip [function]: def tip(total: float) -> float" in prompt
+    assert "launch gate" in prompt and "GET / returned 500" in prompt
+    sop = reviewer_critic._SOP
+    for item in (
+        "CSRF",
+        "LIKE",
+        "check_same_thread",
+        "transaction",
+        "'X or Y'",
+        "dead modules",
+        "special-cases one of the spec's literal examples",
+    ):
+        assert item in sop
+    assert request["max_tokens"] <= reviewer_critic._REVIEW_MAX_TOKENS
+
+
+def test_advisory_findings_are_kept_on_a_review_findings_record(records: Any) -> None:
+    from foundry.agents.quality.reviewer import REVIEW_FINDINGS_KIND
+    from foundry.schemas.quality import ReviewFindings
+
+    cas = ArtifactStore()
+    advisory = {**_UNROUNDED, "finding": "names are terse", "observed_result": "0.02"}
+    transport = MockTransport(verdicts=[verdict_json("request-changes", [_UNROUNDED, advisory])])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    out = node(_reviewer_state(cas), _config())
+    [handle] = [a for a in out["artifacts"] if a.kind == REVIEW_FINDINGS_KIND]
+    body = cas.get_body(handle.uri)
+    assert isinstance(body, ReviewFindings)
+    assert body.status == "fail" and body.verdict_seq == out["gates"][0].seq
+    assert [f.split(" [")[0] for f in body.blocking] == ["tip is not rounded to cents"]
+    assert body.advisory == ("names are terse",)
+
+
+class _CutOnce(MockTransport):
+    """Its first verdict stops at the output cap mid-JSON; the rest are whole."""
+
+    def send(self, request: dict[str, Any]) -> Any:
+        from dataclasses import replace
+
+        response = super().send(request)
+        if len(self.requests) == 1:
+            return replace(response, text='{"status": "request-ch', stop_reason="max_tokens")
+        return response
+
+
+def test_a_review_cut_at_the_output_cap_retries_once_on_the_trimmed_diff(records: Any) -> None:
+    cas = ArtifactStore()
+    test_file = "--- /dev/null\n+++ b/tests/test_app.py\n@@ -0,0 +1 @@\n+TESTS_ONLY = 1\n"
+    transport = _CutOnce(verdicts=["approve", "approve"])
+    node = make_reviewer_node(
+        _runtime(transport, cas), resolve=cas.resolve, resolve_blob=cas.resolve_blob
+    )
+    out = node(_reviewer_state(cas, _ADD_APP + test_file), _config())
+    first, second = (r["messages"][0]["content"] for r in transport.requests)
+    assert "TESTS_ONLY" in first
+    assert "after your last reply ran past the output limit" in second
+    assert "TESTS_ONLY" not in second and "def tip" in second
+    assert out["gates"][0].status is GateStatus.PASS
+
+
+def test_the_trimmed_diff_keeps_the_files_a_failing_check_names() -> None:
+    trimmed = reviewer_critic.trimmed_diff(_ADD_APP, "build: lib.py:1: name error")
+    assert "UNTOUCHED" in trimmed and "def tip" not in trimmed

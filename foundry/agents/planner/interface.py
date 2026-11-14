@@ -239,12 +239,11 @@ def _revised(
                 continue
         # The planned prose (inputs, outputs, errors) stands unless the reply restates it.
         planned = _prose(rt, old.spec_uri).partition("\n")[2]
+        restated = _str(item.get("description")).strip()
         text = _contract_text(
-            {
-                "kind": old.kind,
-                "signature": signature,
-                "description": _str(item.get("description")).strip() or planned,
-            }
+            {"kind": old.kind, "signature": signature, "description": restated or planned},
+            # The planned prose already lists them.
+            old.properties if restated else (),
         )
         out.append(
             old.model_copy(

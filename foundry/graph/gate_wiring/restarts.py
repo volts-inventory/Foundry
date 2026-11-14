@@ -61,6 +61,13 @@ if TYPE_CHECKING:
 _ROTATE_AFTER = 2  # passes on a cluster without the tree improving
 _RESTART_TICKETS = 2  # the most tickets one restart rebuilds
 _BDD_LINE = re.compile(r"^BDD criterion (\S+): scenario (\S+)")
+# foundry.gates.properties' finding head: "property PR1 missing: <contract>: ...".
+_PROPERTY_LINE = re.compile(
+    r"^property (\S+) (?:missing|not covered \([^)]*\)|not run \([^)]*\)|failing \([^)]*\)): "
+    r"([^:]+): "
+)
+# The gates whose failures are the app's own run, not one test's.
+_ENTRY_GATES = ("launch",)
 
 
 @dataclass(frozen=True)
@@ -111,6 +118,12 @@ def failure_clusters(
         if task_id_for_ticket(t.id) in built:
             for cid in t.scenario_ids:
                 carriers.setdefault(cid, set()).add(task_id_for_ticket(t.id))
+    entry = {
+        task_id_for_ticket(t.id)
+        for t in tickets
+        if t.entrypoint and task_id_for_ticket(t.id) in built
+    }
+    later: list[tuple[int, list[str]]] = []
     stage = {name: i for i, name in enumerate(_STAGES)}
     # key -> (stage, collection error?, items, owners, in a test module?)
     groups: dict[str, list[Any]] = {}
@@ -139,13 +152,24 @@ def failure_clusters(
                 m.group(2): m.group(1) for line in g.findings if (m := _BDD_LINE.match(line))
             }
             unbound = set(failure_files([g]))
+            contracts = {
+                f"property:{m.group(1)}": m.group(2)
+                for line in g.findings
+                if (m := _PROPERTY_LINE.match(line))
+            }
             for ident in ids:
                 path = ident.split("::", 1)[0]
-                owners = (
-                    sorted(carriers.get(criteria[ident], ()))
-                    if ident in criteria
-                    else _owners(tickets, built, path)
-                )
+                if ident in contracts:
+                    # A contract property is proved by the tickets implementing it.
+                    owners = sorted(
+                        task_id_for_ticket(t.id)
+                        for t in tickets
+                        if contracts[ident] in t.implements and task_id_for_ticket(t.id) in built
+                    )
+                elif ident in criteria:
+                    owners = sorted(carriers.get(criteria[ident], ()))
+                else:
+                    owners = _owners(tickets, built, path)
                 kind = "feature" if ident in criteria else "file"
                 key = "ticket:" + "+".join(owners) if owners else f"{kind}:{path}"
                 collect = is_collection_error(ident)
@@ -161,10 +185,24 @@ def failure_clusters(
         signature = _failure_signature([g]) or frozenset()
         named = failure_files([g]) if g.name == "build" else ()
         owners = sorted({o for f in named for o in _owners(tickets, built, f)})
+        if g.name in _ENTRY_GATES and entry:
+            later.append((rank, [f"{g.name}:{i}" for _, i in sorted(signature)] or [f"{g.name}:"]))
+            continue
         for _, ident in sorted(signature):
             add(g.name, rank, f"{g.name}:{ident}", owners)
         if not signature:
             add(g.name, rank, f"{g.name}:", owners)
+    # The app failing to launch is the entrypoint ticket's: its items join the
+    # cluster already holding that ticket's failures (the fewest tickets first), so
+    # one pass owns both — a separate "launch" pass showed the other's failures as
+    # someone else's, and neither saw the whole of it.
+    for rank, items in later:
+        holding = sorted(
+            (k for k, grp in groups.items() if grp[3] & entry), key=lambda k: (len(groups[k][3]), k)
+        )
+        key = holding[0] if holding else "ticket:" + "+".join(sorted(entry))
+        for item in items:
+            add(key, rank, item, () if holding else entry)
     return tuple(
         FailureCluster(
             key=key, stage=rank, items=tuple(items), tickets=tuple(sorted(own)), in_tests=in_tests

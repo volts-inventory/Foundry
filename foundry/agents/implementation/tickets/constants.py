@@ -22,6 +22,8 @@ CAP_TRIAGE = "token-cap"
 OVERLAY_TRIAGE = "wave-overlay"
 # A ticket declared a type the contracts file already defines (a parallel copy).
 CONTRACT_DUP_TRIAGE = "contract-duplicate"
+# The entrypoint ticket redefined a function or class another module of the tree owns.
+ENTRYPOINT_DUP_TRIAGE = "entrypoint-redefinition"
 # The contracts ticket's last attempt still left out names its planned contracts declare.
 CONTRACT_DRIFT_TRIAGE = "contract-drift"
 # An implementation ticket's last attempt still changed a stubbed public signature.
@@ -52,6 +54,11 @@ SPLIT_CHILD_TRIAGE = "split-child"
 SKELETON_TRIAGE = "skeleton"
 # A failed attempt's written files its retry starts from (explanation: their snapshot blob).
 CARRY_TRIAGE = "ticket-carry"
+# The best carried attempt so far (explanation: "<failing lines|-> <snapshot blob>"):
+# a later carry is the better of it and the newest attempt, so a retry never starts
+# from a worse attempt than one it already had. Not prefixed by CARRY_TRIAGE, whose
+# readers match by prefix.
+CARRY_SCORE_TRIAGE = "carry-score"
 # Attempts a ticket gets before it is skipped; bounds the loop on a ticket that
 # keeps erroring.
 MAX_TICKET_ATTEMPTS = 2

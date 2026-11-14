@@ -60,9 +60,20 @@ def finished(label: str, started: float, usage: Mapping[str, Any] | None, meter:
 
     secs = time.monotonic() - started
     took = f"{secs / 60:.1f}m" if secs >= 90 else f"{secs:.0f}s"
-    tokens = f", {weighted_tokens(usage) / 1000:.0f}k tokens" if usage else ""
+    tokens = ""
+    if usage:
+        # Raw prompt tokens (cache reads and writes included) beside the output: the
+        # bench's input/output ratio per node reads them off this line.
+        sent = sum(
+            int(usage.get(k, 0) or 0)
+            for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        )
+        out = int(usage.get("output_tokens", 0) or 0)
+        tokens = f", {weighted_tokens(usage) / 1000:.0f}k tokens (in {sent}, out {out})"
     total = ""
     if meter is not None:
         of = f" of {meter.cap / 1e6:.1f}M" if meter.cap is not None else ""
-        total = f" (run {meter.used / 1e6:.2f}M{of})"
+        local = getattr(meter, "local_used", 0)
+        local_part = f", local {local / 1e6:.2f}M" if local else ""
+        total = f" (run {meter.used / 1e6:.2f}M{of}{local_part})"
     log(f"done  {label} in {took}{tokens}{total}")

@@ -52,6 +52,7 @@ from foundry.schemas.product import (
     AcceptanceCriterion,
     CriteriaCritique,
     Criticality,
+    IntentBrief,
 )
 from foundry.state.factory_state import FactoryState
 from foundry.state.global_records import GlobalRecords
@@ -224,6 +225,8 @@ def _synthetic_resolve(handle: Artifact) -> FrozenModel:
             security_abuse=True,  # guarantees Spec-gate security coverage
             seq=handle.seq,
         )
+    if handle.kind == "intent_brief":
+        return IntentBrief(intent="a todo service", seq=handle.seq)
     if handle.kind == "prd":
         # No criterion ids: the synthetic criteria ids above are never filtered.
         return PRD(title="Requested service", prd_uri="cas://design/prd", seq=handle.seq)
@@ -307,13 +310,16 @@ def test_classify_request_defaults_to_greenfield() -> None:
 
 
 def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[Any, MockTransport]:
-    """A supervisor whose first plan FAILs the Spec gate (no security/abuse
-    criterion) and whose REPAIR PASS plan passes it."""
+    """A supervisor whose first plan FAILs the Spec gate (a criterion with no text)
+    and whose REPAIR PASS plan passes it."""
     src = tmp_path / "src"
     src.mkdir()
     (src / "README.md").write_text("seed\n")
 
-    no_abuse = {**PRD_PAYLOAD, "acceptance_criteria": [PRD_PAYLOAD["acceptance_criteria"][0]]}
+    # A missing security criterion is now added in code, so the first pass fails the
+    # gate on a structural gap the planner does not check in-node.
+    first, second = PRD_PAYLOAD["acceptance_criteria"]
+    no_text = {**PRD_PAYLOAD, "acceptance_criteria": [{**first, "text": ""}, second]}
 
     def _plan(prd: dict[str, Any]) -> str:
         return json.dumps(
@@ -328,13 +334,13 @@ def _respec_app(tmp_path: Any, records: GlobalRecords, **kwargs: Any) -> tuple[A
         )
 
     # First match wins: the repair prompt gets the fixed plan, the first pass
-    # a plan with no security/abuse criterion (a Spec FAIL); an empty delta falls
+    # a plan with a text-less criterion (a Spec FAIL); an empty delta falls
     # back to that repair.
     scripts = {
         "REPAIR PASS": _plan(PRD_PAYLOAD),
         DELTA_SOP_KEY: "{}",
         **_SCRIPTS,
-        PLANNER_SOP_KEY: _plan(no_abuse),
+        PLANNER_SOP_KEY: _plan(no_text),
     }
     tx = MockTransport.scripted(scripts, default_verdict="approve")
     cas = ArtifactStore()
@@ -377,7 +383,7 @@ def test_spec_fail_replans_with_the_gate_findings_then_advances(tmp_path: Any) -
     assert len(planner_prompts) == 2
     assert "REPAIR PASS" not in planner_prompts[0]
     assert "REPAIR PASS" in planner_prompts[1]
-    assert "no criterion flags security_abuse=true" in planner_prompts[1]
+    assert "criterion AC-001: missing/empty text" in planner_prompts[1]
 
     spec = [g for g in final["gates"] if g.name == "spec"]
     assert {g.status for g in spec} == {GateStatus.FAIL, GateStatus.PASS}

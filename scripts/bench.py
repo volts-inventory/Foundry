@@ -39,6 +39,8 @@ CASES = {
 START = re.compile(r"start model call: (\S+) \((\w+), ([^)]*)\)")
 REUSE = re.compile(r"reuse model call: ")
 DONE = re.compile(r"done\s+model call: (\S+) \([^)]*\) in ([\d.]+)([sm])\b")
+# The call's raw prompt and output tokens (foundry.progress.finished), when logged.
+IO = re.compile(r"k tokens \(in (\d+), out (\d+)\)")
 STAGE = re.compile(r"·\s+\S+\s+▸\s+(\w+)")
 RUN_MARK = "=== foundry bench run ==="
 VERDICTS = {0: "pass", 1: "fail", 3: "stopped", 2: "usage-error"}
@@ -111,6 +113,7 @@ def summarize_case(root: Path) -> dict[str, Any]:
     by_node: Counter[str] = Counter()
     by_tier: Counter[str] = Counter()
     secs_by_node: dict[str, float] = {}
+    io_by_node: dict[str, list[int]] = {}
     stages: Counter[str] = Counter()
     reused = 0
     for line in log.splitlines():
@@ -123,6 +126,10 @@ def summarize_case(root: Path) -> dict[str, Any]:
             secs_by_node[m[1]] = secs_by_node.get(m[1], 0.0) + float(m[2]) * (
                 60 if m[3] == "m" else 1
             )
+            if io := IO.search(line):
+                tally = io_by_node.setdefault(m[1], [0, 0])
+                tally[0] += int(io[1])
+                tally[1] += int(io[2])
         elif m := STAGE.search(line):
             stages[m[1]] += 1
     out = root / "out"
@@ -143,6 +150,10 @@ def summarize_case(root: Path) -> dict[str, Any]:
         "reused_calls": reused,
         "call_seconds_by_node": {k: round(v, 1) for k, v in secs_by_node.items()},
         "tokens": sum_tokens(root / "state"),
+        "tokens_by_node": {
+            node: {"input": i, "output": o, "ratio": round(i / o, 1) if o else None}
+            for node, (i, o) in io_by_node.items()
+        },
         "fix_passes": stages["fixer"],
         "wave_gates": stages["wave_gate"],
         "out_files": len(files),
@@ -178,6 +189,14 @@ def render(summary: dict[str, dict[str, Any]]) -> str:
         rows.append(f"{case} hints: {fired}")
         if efforts := s.get("calls_by_effort"):
             rows.append(f"{case} effort: " + ", ".join(f"{k}={v}" for k, v in efforts.items()))
+        if by_node := s.get("tokens_by_node"):
+            rows.append(
+                f"{case} in/out: "
+                + ", ".join(
+                    f"{node}={t['ratio'] if t['ratio'] is not None else '-'}"
+                    for node, t in by_node.items()
+                )
+            )
     return "\n".join(rows)
 
 

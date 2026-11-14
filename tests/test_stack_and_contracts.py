@@ -77,6 +77,16 @@ TS_STACK: dict[str, Any] = {
 
 TS_INTERFACES = [
     {
+        "name": "Todo",
+        "kind": "type",
+        "signature": "interface Todo { id: string; title: string }",
+        "inputs": [],
+        "outputs": [],
+        "errors": [],
+        "description": "A todo.",
+        "consumers": ["api"],
+    },
+    {
         "name": "TodoStore.add",
         "kind": "function",
         "signature": "add(todo: Todo): string",
@@ -166,6 +176,17 @@ def test_planner_writes_the_chosen_stack_and_offers_the_detected_languages() -> 
     assert enum["language"]["enum"] == ["python", "typescript"]
 
 
+def test_the_stack_carries_the_specs_declared_interface() -> None:
+    writes, _, _ = _plan_once(
+        {**PLAN, "stack": {**TS_STACK, "interface": [" --seed ", "", "roll"]}}
+    )
+    assert writes["stack"].interface == ("--seed", "roll")
+    bare, _, _ = _plan_once({**PLAN, "stack": TS_STACK})
+    assert bare["stack"].interface == ()
+    schema = _plan_schema(["typescript"])["properties"]["stack"]
+    assert "interface" in schema["properties"] and "interface" in schema["required"]
+
+
 def test_undetected_language_writes_no_stack_and_says_so() -> None:
     writes, _, _ = _plan_once({**PLAN, "stack": {**TS_STACK, "language": "rust"}})
     assert "stack" not in writes
@@ -201,9 +222,10 @@ def test_code_contracts_and_bdd_stack_generate_wave_zero_tickets() -> None:
     contracts, harness, *rest = tickets
     assert contracts.id == CONTRACTS_TICKET_ID and contracts.depends_on == ()
     assert contracts.files == ("src/contracts.ts",)
-    assert contracts.implements == ("TodoStore.add", "TodoStore.list")  # not the http one
+    # Only the data type: the functions are defined by the ticket implementing them.
+    assert contracts.implements == ("Todo",)
     assert contracts.specialty is Specialty.BACKEND and contracts.difficulty.value == "trivial"
-    assert "only `interface` and `type` declarations" in contracts.description
+    assert "errors as classes extending Error" in contracts.description
     assert harness.id == HARNESS_TICKET_ID and harness.specialty is Specialty.TEST
     assert harness.files == ("package.json", "tsconfig.json", "cucumber.json", "package-lock.json")
     assert harness.depends_on == () and "$FOUNDRY_BDD_REPORT" in harness.description
@@ -367,8 +389,11 @@ def test_python_manifest_on_a_late_ticket_gets_a_wave_zero_deps_ticket() -> None
     assert deps.files == ("requirements.txt",)
     assert "Flask" in deps.description and "pinned with ==" in deps.description
     assert all(HARNESS_TICKET_ID in t.depends_on for t in rest)
-    # The owner can still extend it.
-    assert "requirements.txt" in next(t for t in rest if t.id == entry["id"]).files
+    # The late owner loses it: its edit would change what every earlier wave installs.
+    owner = next(t for t in rest if t.id == entry["id"])
+    assert "requirements.txt" not in owner.files
+    assert f"is written by ticket {HARNESS_TICKET_ID}" in owner.description
+    assert f"{entry['id']}: {entry['title']}" in deps.description
 
 
 def test_python_manifest_already_in_the_first_wave_adds_no_ticket() -> None:
@@ -452,7 +477,10 @@ def test_consuming_a_type_contract_needs_no_implementing_ticket() -> None:
     writes, cas, _ = _plan_once({**_ts_plan(), "tickets": tickets, "interfaces": interfaces})
     findings = _critique(writes, cas).contract_findings
     assert not any("contract Errors" in f or "contract NotFound" in f for f in findings)
-    assert "Ticket T-002 consumes contract Missing, but no ticket implements it." in findings
+    assert any(
+        f.startswith("Ticket T-002 consumes contract Missing, but no ticket implements it")
+        for f in findings
+    )
 
 
 def test_fit_violations_become_blocking_spec_findings() -> None:
@@ -473,8 +501,8 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         },
         {
             "name": "Unused",
-            "kind": "type",
-            "signature": "type U = 1",
+            "kind": "function",
+            "signature": "u(): void",
             "inputs": [],
             "outputs": [],
             "errors": [],
@@ -488,8 +516,9 @@ def test_fit_violations_become_blocking_spec_findings() -> None:
         "Contract TodoStore.list is implemented by 2 tickets (T-001, T-003); exactly "
         "one ticket may implement it." in findings
     )
-    assert (
-        "Ticket T-002 consumes contract TodoStore.missing, but no ticket implements it." in findings
+    assert any(
+        f.startswith("Ticket T-002 consumes contract TodoStore.missing, but no ticket implements")
+        for f in findings
     )
     # A forgotten edge to the one implementer is added, not sent back for a re-plan.
     assert not any("does not depend on" in f for f in findings)
@@ -588,13 +617,14 @@ def test_undetected_stack_language_is_an_error_not_another_stack(
         ("build", GateStatus.ERROR),
         ("test", GateStatus.ERROR),
         ("smoke", GateStatus.ERROR),
+        ("launch", GateStatus.ERROR),
     ]
     for g in out["gates"]:
         assert any("missing toolchain" in f and "'rust'" in f for f in g.findings)
         assert not runner.records.stable_fail_latched(g.run_against, g.name)
     check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
-    [build] = check.run(state, config)["gates"]
-    assert build.status is GateStatus.ERROR
+    build, launch = check.run(state, config)["gates"]  # the last wave also launches
+    assert build.status is launch.status is GateStatus.ERROR
 
 
 def test_stack_without_test_or_bdd_never_falls_back_to_pytest(
@@ -665,7 +695,9 @@ def test_python_stack_keeps_the_trusted_harness() -> None:
     typed = stack_profile(StackDecision(language="python", typecheck="python3 -m mypy ."))
     assert typed.build_cmd is not None and typed.build_cmd[2].endswith(
         "-m compileall -q . && python3 -m mypy --ignore-missing-imports "
-        "--disable-error-code import-not-found --disable-error-code import-untyped ."
+        "--disable-error-code import-not-found --disable-error-code import-untyped --strict "
+        "--exclude '(^|/)(tests?|features|step_defs)/|(^|/)(test_[^/]*|[^/]*_test|conftest)"
+        "\\.py$' ."
     )
 
 
@@ -741,7 +773,12 @@ def test_build_test_gates_run_the_stack_commands(
         workdir=tmp_path,
     )
     by_name = {g.name: g.status for g in out["gates"]}
-    assert by_name == {"build": GateStatus.PASS, "test": GateStatus.PASS, "smoke": GateStatus.FAIL}
+    assert by_name == {
+        "build": GateStatus.PASS,
+        "test": GateStatus.PASS,
+        "smoke": GateStatus.FAIL,
+        "launch": GateStatus.PASS,
+    }
     assert (tmp_path / "typed.txt").read_text().strip() == "typed"  # typecheck ran in BUILD
 
 
@@ -842,8 +879,10 @@ def test_wave_build_check_reads_the_stack(monkeypatch: pytest.MonkeyPatch) -> No
     runner, rt, config = _runner_rt()
     check = WaveBuildCheck(rt, runner, lambda h: None, lambda u: b"")
     state: Any = {"artifacts": [], "stack": _js(typecheck="exit 2")}
-    [build] = check.run(state, config)["gates"]
+    # No wave left to build: the check also launches the app (a library here).
+    build, launch = check.run(state, config)["gates"]
     assert build.name == "build" and build.status is GateStatus.FAIL
+    assert launch.name == "launch" and launch.status is GateStatus.PASS
 
 
 @pytest.mark.parametrize(
@@ -1043,9 +1082,7 @@ def test_targeted_replan_carries_the_contracts_ticket() -> None:
     from tests.test_planner import _epic_of, _epic_runtime, _epic_scripts, _failed, _match
 
     plan, replies = multi_epic_plan()
-    plan["interfaces"] = [
-        {**i, "kind": "function", "signature": i["spec"]} for i in plan["interfaces"]
-    ]
+    plan["interfaces"] = [{**i, "kind": "type", "signature": i["spec"]} for i in plan["interfaces"]]
     plan["stack"] = {
         **PYTHON_STACK,
         "contracts_file": "notes/contracts.py",
@@ -1201,3 +1238,69 @@ def test_stack_profile_adds_mypy_flags_only_to_a_mypy_invocation() -> None:
     assert fix("pip install mypy && mypy .") == f"pip install mypy && {_MYPY_LENIENT} ."
     assert fix("uv run mypy .") == f"uv run {_MYPY_LENIENT} ."
     assert fix("mypy .") == f"{_MYPY_LENIENT} ."
+
+
+def test_python_typecheck_is_strict_on_source_and_leaves_tests_out(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text(
+        "def add(a: int, b: int) -> int:\n    return a + b\n"
+    )
+    (tmp_path / "tests" / "test_app.py").write_text("def test_add(client):\n    assert client\n")
+    (tmp_path / "conftest.py").write_text("def helper(x):\n    return x\n")
+    typecheck = f"{sys.executable} -m mypy --cache-dir /dev/null app tests"
+    profile = stack_profile(StackDecision(language="python", build="true", typecheck=typecheck))
+    assert profile.build_cmd is not None
+    cmd = profile.build_cmd
+
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(cmd, cwd=tmp_path, capture_output=True, text=True)
+
+    first = run()
+    assert first.returncode == 0, first.stdout
+    (tmp_path / "app" / "util.py").write_text("def untyped(x):\n    return x\n")
+    got = run()
+    assert got.returncode == 1 and "no-untyped-def" in got.stdout and "tests/" not in got.stdout
+
+
+def test_typescript_typecheck_is_strict() -> None:
+    profile = stack_profile(
+        StackDecision(language="typescript", test="npm test", typecheck="npx tsc --noEmit")
+    )
+    assert profile.build_cmd is not None and "npx tsc --strict --noEmit" in profile.build_cmd[2]
+
+
+def test_the_plans_stack_carries_what_the_app_is_and_how_a_user_starts_it() -> None:
+    from foundry.agents.planner import _stack_decision
+
+    raw = {"language": "python", "test": "pytest", "kind": "http", "launch": "python3 -m app"}
+    stack, _ = _stack_decision({"stack": raw}, ["python"])
+    assert stack is not None
+    assert (stack.kind, stack.launch) == ("http", "python3 -m app")
+
+
+def test_python_typecheck_keeps_a_flags_value_and_only_drops_test_targets() -> None:
+    import shlex
+
+    from foundry.gates.profiles import python_typecheck
+
+    def argv(cmd: str) -> list[str]:
+        words = shlex.split(python_typecheck(cmd))
+        return words[words.index("--strict") + 3 :]  # past the gate's own --exclude
+
+    assert argv("mypy --exclude tests/ src") == ["--exclude", "tests/", "src"]
+    assert argv("mypy --exclude=tests/ src tests") == ["--exclude=tests/", "src"]
+    assert argv("mypy --config-file tests/mypy.ini -p app") == [
+        "--config-file",
+        "tests/mypy.ini",
+        "-p",
+        "app",
+    ]
+    assert argv("mypy --cache-dir /dev/null tests conftest.py") == [
+        "--cache-dir",
+        "/dev/null",
+        ".",
+    ]

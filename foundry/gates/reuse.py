@@ -36,6 +36,7 @@ gate, this ``run_against`` and this runner's revisions.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import importlib.metadata
@@ -97,6 +98,8 @@ def _value(v: object) -> object:
         return sorted((_value(x) for x in v), key=repr)
     if isinstance(v, dict):
         return {str(k): _value(x) for k, x in sorted(v.items(), key=lambda kv: str(kv[0]))}
+    if dataclasses.is_dataclass(v) and not isinstance(v, type):
+        return {"dataclass": type(v).__qualname__, "fields": _value(dataclasses.asdict(v))}
     if isinstance(v, PythonBuildEnv):
         if v.digest is None:  # local-path requirements: the venv is not a pure function
             raise _Unkeyable("venv without a manifest digest")

@@ -15,6 +15,8 @@ from foundry.agents.implementation.tickets import (
     scenario_verify,
 )
 from foundry.agents.planner import _build_tickets, _own_stack_files, stack_files
+from foundry.agents.planner.folds import _declare_dependencies, _own_harness_files
+from foundry.agents.planner.stack import _python_deps_ticket
 from foundry.gates.smoke import SmokeGate
 from foundry.gates.test import BDD_KEY, TestGate
 from foundry.schemas.gates import GateStatus
@@ -610,3 +612,85 @@ def test_the_shared_state_hint_names_the_other_modules_writing_the_value(
     assert "'testuser' (tests/test_auth.py, tests/test_t2.py)" in hint
     assert "(auth.py" not in hint and " auth.py" not in hint and "hashed_secret" not in hint
     assert shared_state_hints("E   AssertionError: assert 1 == 2\n", tmp_path) == ()
+
+
+# ---- the harness config belongs to the first wave -------------------------------
+
+
+def test_a_late_ticket_loses_the_harness_config_to_the_harness_ticket() -> None:
+    # A local dice plan: pyproject.toml belonged to T3, the last-wave CLI ticket, whose
+    # change to bdd_features_base_dir broke T1's and T2's test collection.
+    harness = _ticket("bdd-harness", ("pyproject.toml",))
+    tickets = [
+        harness,
+        _ticket("T1", ("dice/parser.py", "tests/test_t1.py"), depends_on=("bdd-harness",)),
+        _ticket("T2", ("dice/roll.py", "tests/test_t2.py"), depends_on=("bdd-harness", "T1")),
+        _ticket(
+            "T3",
+            ("dice/cli.py", "pyproject.toml", "pytest.ini", "tests/test_t3.py"),
+            depends_on=("bdd-harness", "T2"),
+        ),
+    ]
+    out, concerns = _own_harness_files(tickets)
+    h, t1, t2, t3 = out
+    assert h.files == ("pyproject.toml", "pytest.ini")
+    assert "T3: T3" in h.description and "declare up front" in h.description
+    assert t3.files == ("dice/cli.py", "tests/test_t3.py")
+    assert "pyproject.toml, pytest.ini (the build/test config" in t3.description
+    assert "written by ticket bdd-harness" in t3.description
+    assert (t1, t2) == (tickets[1], tickets[2]) and len(concerns) == 1
+    # Nothing to move: unchanged.
+    assert _own_harness_files(out) == (out, [])
+
+
+def test_without_a_harness_ticket_the_config_goes_to_the_first_wave_ticket_tests_follow() -> None:
+    # Language-agnostic: a TypeScript jest config, a Rust and a Go manifest alike.
+    for config in ("jest.config.ts", "tsconfig.json", "Cargo.toml", "go.mod"):
+        tickets = [
+            _ticket("core", ("src/core.ts", "src/core.test.ts")),
+            _ticket("api", ("src/api.ts",), depends_on=("core",)),
+            _ticket("cli", ("src/cli.ts", config), depends_on=("api",)),
+        ]
+        out, concerns = _own_harness_files(tickets)
+        assert out[0].files == ("src/core.ts", "src/core.test.ts", config), config
+        assert config not in out[2].files and concerns
+    # No first-wave ticket precedes every test-writing ticket: left as planned.
+    split = [
+        _ticket("a", ("src/a.ts", "src/a.test.ts")),
+        _ticket("b", ("src/b.ts", "src/b.test.ts")),
+        _ticket("cli", ("src/cli.ts", "package.json"), depends_on=("a", "b")),
+    ]
+    assert _own_harness_files(split) == (split, [])
+    # A nested file of the same name is not the root config.
+    nested = [_ticket("a", ("src/a.ts",)), _ticket("b", ("web/package.json",), depends_on=("a",))]
+    assert _own_harness_files(nested) == (nested, [])
+
+
+def test_the_plans_dependencies_go_to_the_manifest_owner_up_front() -> None:
+    # The notes bench: ADR-2 named bcrypt, the auth ticket could not edit the
+    # harness-owned requirements file, and it faked bcrypt with pbkdf2.
+    deps = ("flask==3.0.3", "bcrypt==4.2.0")
+    tickets = [
+        _ticket("bdd-harness", ("requirements.txt",)),
+        _ticket("auth", ("app/auth.py",), depends_on=("bdd-harness",)),
+    ]
+    out, concerns = _declare_dependencies(tickets, deps)
+    assert "requirements.txt, as given: flask==3.0.3, bcrypt==4.2.0" in out[0].description
+    assert out[1] == tickets[1] and len(concerns) == 1
+    assert _declare_dependencies(out, deps) == (out, [])
+    # No harness ticket: the first ticket writing a root manifest, in any language.
+    rust = [_ticket("core", ("src/lib.rs", "Cargo.toml")), _ticket("cli", ("src/main.rs",))]
+    assert 'serde = "1"' in _declare_dependencies(rust, ('serde = "1"',))[0][0].description
+    # None to declare, or nobody to declare them: unchanged.
+    assert _declare_dependencies(tickets, ()) == (tickets, [])
+    bare = [_ticket("a", ("src/a.go",))]
+    out, concerns = _declare_dependencies(bare, ("github.com/google/uuid",))
+    assert out == bare and "github.com/google/uuid" in concerns[0]
+
+
+def test_declared_dependencies_alone_get_a_python_deps_ticket() -> None:
+    stack = StackDecision(language="python", test="python3 -m pytest -q")
+    tickets = [_ticket("auth", ("app/auth.py",))]
+    assert _python_deps_ticket(tickets, (), stack, None, _SEQ) == []
+    (deps,) = _python_deps_ticket(tickets, (), stack, None, _SEQ, ("bcrypt==4.2.0",))
+    assert deps.files == ("requirements.txt",)

@@ -86,6 +86,8 @@ class TokenMeter:
         self.cancel = cancel
         self.ledger = ledger
         self.used = 0
+        # Local tokens are free and never capped; counted only for the progress line.
+        self.local_used = 0
         self._elapsed_base = 0.0
         if ledger is not None and ledger.exists():
             saved = json.loads(ledger.read_text())
@@ -143,6 +145,10 @@ class TokenMeter:
                         f"time cap reached: {elapsed / 60:.1f} of "
                         f"{self.time_cap_s / 60:.1f} minutes used"
                     )
+
+    def note_local(self, usage: Mapping[str, int]) -> None:
+        with self._lock:
+            self.local_used += weighted_tokens(usage)
 
     def charge(self, usage: Mapping[str, int]) -> None:
         with self._lock:

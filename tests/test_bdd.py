@@ -116,7 +116,7 @@ def test_features_materialized_per_ticket_and_kept_out_of_gate_inputs(tmp_path: 
     assert feats == ["T1.feature", "T2.feature"]
     assert "Scenario: AC-1" in (tmp_path / "features/T1.feature").read_text()
     assert "AC-3" not in (tmp_path / "features/T2.feature").read_text()
-    assert "pytest-bdd" in (tmp_path / "requirements.txt").read_text()
+    assert "pytest-bdd" not in (tmp_path / "requirements.txt").read_text()  # a dev tool
 
 
 def test_output_tree_ships_features_but_not_criteria(tmp_path: Path) -> None:
@@ -153,7 +153,7 @@ def test_foreign_profile_gets_advisory_triage(tmp_path: Path) -> None:
         workdir=tmp_path,
         profile=profile,
     )
-    assert [g.status for g in out["gates"]] == [GateStatus.PASS] * 3
+    assert [g.status for g in out["gates"]] == [GateStatus.PASS] * 4
     (triage,) = out["gate_triage"]
     assert "node-web" in triage.explanation and "not enforced" in triage.explanation
 

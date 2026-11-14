@@ -89,3 +89,4 @@ class BudgetLedger(FrozenModel):
     cap_microusd: int = 0
     fix_attempts_since_all_green: int = 0  # global convergence bound (arch §7)
     fix_attempts_total: int = 0  # build-side fixes this run (fix_cap); a resumed rerun starts at 0
+    review_fixes: int = 0  # review checks that reproduced a finding (max_review_fixes)

@@ -465,6 +465,8 @@ class BuildGate:
         pyenv: PythonBuildEnv | None = None,
         python: bool = False,
         first_party: frozenset[str] = frozenset(),
+        app_checks: str = "",
+        owned: frozenset[str] | None = None,
     ) -> None:
         self.cmd = cmd or (sys.executable, "-m", "compileall", "-q", ".")
         self.install_cmd = install_cmd or None  # shell line, e.g. the stack's `npm ci`
@@ -473,6 +475,11 @@ class BuildGate:
         # ``first_party`` names the modules later tickets will add to the tree.
         self._python = python
         self._first_party = first_party
+        # The language whose static app checks run once the build passes ("" = none).
+        self._app_checks = app_checks
+        # The plan's files (``foundry.gates.ownership``): a code file outside them
+        # FAILs the build. None = no plan to judge against.
+        self._owned = owned
         self._timeout_s = timeout_s
         # The networked install keeps the gate's bound when the steps after it are
         # bounded tighter (an agent's in-session check).
@@ -489,6 +496,8 @@ class BuildGate:
             profile=profile_name,
             pip_install=list(pyenv.requirements) if pyenv is not None else None,
             import_scan=sorted(first_party) if python else None,
+            app_checks=app_checks or None,
+            **({"owned": sorted(owned)} if owned is not None else {}),
         )
 
     # ---- zone A: [install, then] build; observe the exit code(s) ------------
@@ -583,6 +592,20 @@ class BuildGate:
                     )
                 else:
                     findings = (*findings, *scan)
+        if rc == 0 and not findings and self._app_checks:
+            from .app_checks import APP_CHECKS_FAILED, app_check_findings
+
+            hits = app_check_findings(workdir, self._app_checks)
+            if hits:
+                structured["app_checks"] = list(hits)
+                findings = (APP_CHECKS_FAILED, *hits)
+        if self._owned is not None:
+            from .ownership import unowned_files, unowned_findings
+
+            stray = unowned_files(workdir, self._owned)
+            if stray:
+                structured["unowned"] = stray
+                findings = (*findings, *unowned_findings(stray))
         return observe(
             self.name,
             exit_codes=(*codes, rc),
@@ -612,6 +635,11 @@ class BuildGate:
             return GateStatus.ERROR
         if self.install_cmd is not None and codes[0] != 0:
             return GateStatus.ERROR  # failed install (network/registry): retriable
-        if any(c != 0 for c in codes) or obs.structured.get("undeclared_imports"):
+        if (
+            any(c != 0 for c in codes)
+            or obs.structured.get("undeclared_imports")
+            or obs.structured.get("app_checks")
+            or obs.structured.get("unowned")
+        ):
             return GateStatus.FAIL
         return GateStatus.PASS if len(codes) == expected else GateStatus.ERROR

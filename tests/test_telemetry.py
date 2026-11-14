@@ -50,8 +50,8 @@ def test_a_hint_helper_counts_once_per_call_that_fires(tmp_path: Path) -> None:
 
 def test_each_pinned_stack_constraint_is_counted_by_id() -> None:
     with telemetry.counting() as counts:
-        _stack_constraints(StackDecision(language="python"), {"x": "SQLAlchemy over SQLite"})
-        _stack_constraints(StackDecision(language="python"), {"x": "Postgres"})
+        _stack_constraints(StackDecision(language="python", framework="SQLAlchemy, SQLite"), {})
+        _stack_constraints(StackDecision(language="python", framework="Postgres"), {})
     assert counts.snapshot() == {
         "planner.PC-python-sqlalchemy-relationships": 1,
         "planner.PC-python-sqlalchemy-sqlite": 1,

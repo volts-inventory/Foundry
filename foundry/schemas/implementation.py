@@ -52,11 +52,13 @@ DEFAULT_TICKET_TIERS: dict[Difficulty, str] = {
 Effort = Literal["low", "medium", "xhigh"]
 EFFORT_LEVELS: tuple[Effort, ...] = ("low", "medium", "xhigh")
 
-# Difficulty -> the local thinking level its coding session runs at.
+# Difficulty -> the local thinking level its coding session runs at. A complex
+# ticket's first attempt stays at medium: xhigh doubled local dice's build time
+# (51 xhigh calls) without fewer fix passes, so it is kept for retries.
 TICKET_EFFORT: dict[Difficulty, Effort] = {
     Difficulty.TRIVIAL: "low",
     Difficulty.STANDARD: "medium",
-    Difficulty.COMPLEX: "xhigh",
+    Difficulty.COMPLEX: "medium",
 }
 
 
@@ -110,6 +112,14 @@ class StackDecision(FrozenModel):
     test: str = ""
     bdd: str = ""  # must write Cucumber Messages to $FOUNDRY_BDD_REPORT
     run: str = ""  # optional smoke command
+    # What the app is: "cli" | "http" | "" (a library, or undeclared). The launch gate
+    # starts ``launch`` (an http app reads $PORT/$HOST) and drives it as that kind.
+    kind: str = ""
+    launch: str = ""
+    # The app's external interface as the spec names it: CLI options/subcommands
+    # ("--seed", "roll") or http routes ("GET /notes"). The launch gate FAILs one
+    # the running app lacks; () skips that check.
+    interface: tuple[str, ...] = ()
     profile: str = ""  # a pinned/legacy gate profile name, when one was used
     notes: str = ""
 

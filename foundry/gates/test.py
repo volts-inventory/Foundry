@@ -32,7 +32,9 @@ definition actually asserts anything.
 from __future__ import annotations
 
 import ast
+import copy
 import hmac
+import itertools
 import json
 import os
 import re
@@ -67,6 +69,10 @@ DISCRIMINATOR_KEY = "discriminator"
 BDD_KEY = "bdd"
 # Exit code of the planned Cucumber ``bdd`` command (absent on the pytest-bdd path).
 BDD_EXIT_KEY = "bdd_exit_code"
+# {property id: "covered" | "missing" | "skipped"} for every planned contract property.
+PROPERTIES_KEY = "properties"
+# A scoped check's run of the session's own test modules: its exit code.
+OWN_EXIT_KEY = "own_exit_code"
 
 _SUMMARY_RE = re.compile(r"(\d+) (passed|failed|errors?|skipped)")
 
@@ -129,6 +135,51 @@ from pytest import console_main
     + """\
 sys.path.insert(0, wd)
 sys.exit(console_main())
+"""
+)
+
+# A scoped check's run of a session's own test modules (TestGate.owning): a step
+# module among them runs too, its scenario tests deselected (the BDD run judges
+# those, scoped), so its other tests and an import error in it are judged here.
+# pytest-bdd is registered by module object before the workdir joins sys.path, as
+# in the BDD bootstrap.
+_ISOLATED_PYTEST_OWN_BOOTSTRAP = (
+    _BOOTSTRAP_PREAMBLE
+    + """\
+import pytest
+try:
+    import pytest_bdd.plugin as _bdd_plugin
+    import pytest_bdd.scenario as _bdd_scenario
+    _bdd_registry = getattr(_bdd_scenario, "scenario_wrapper_template_registry", {})
+    _plugins = [_bdd_plugin]
+except ImportError:
+    _bdd_registry, _plugins = {}, []
+
+
+def _is_scenario(item):
+    fn = getattr(item, "function", None)
+    if fn is None:
+        return False
+    try:
+        if fn in _bdd_registry:
+            return True
+    except TypeError:
+        pass
+    return getattr(fn, "__scenario__", None) is not None
+
+
+class _OwnTestsOnly:
+    @pytest.hookimpl(trylast=True)
+    def pytest_collection_modifyitems(self, config, items):
+        drop = [i for i in items if _is_scenario(i)]
+        if drop:
+            config.hook.pytest_deselected(items=drop)
+            items[:] = [i for i in items if not _is_scenario(i)]
+"""
+    + ADD_BUILD_SITE
+    + """\
+sys.path.insert(0, wd)
+sys.exit(pytest.main(sys.argv[1:], plugins=[*_plugins, _OwnTestsOnly()]))
 """
 )
 
@@ -478,12 +529,17 @@ def uncollected_binding_reasons(output: str, workdir: Path, refs: list[str]) -> 
                 f"was not executed — {', '.join(mods)} {'binds' if one else 'bind'} it, "
                 f"but pytest failed to import {'that module' if one else 'those modules'} "
                 f"(`ERROR collecting {mods[0]}` in the output), so none of "
-                f"{'its' if one else 'their'} scenarios ran: fix the import error the "
-                "traceback shows "
-                "(a missing module, a name the code under test does not define); the "
-                "`scenarios(...)` binding is already in place, keep it"
+                f"{'its' if one else 'their'} scenarios ran: {UNCOLLECTED_FIX}"
             )
     return out
+
+
+# The self-check swaps this advice out when the module is another ticket's
+# (foundry/gates/self_check.py): its fix is then in the session's own files.
+UNCOLLECTED_FIX = (
+    "fix the import error the traceback shows (a missing module, a name the code under "
+    "test does not define); the `scenarios(...)` binding is already in place, keep it"
+)
 
 
 def binding_modules(workdir: Path, features: set[str]) -> tuple[str, ...]:
@@ -1314,6 +1370,638 @@ def step_module_notes(
     return tuple(out)
 
 
+# ---- step-definition lint: steps that cannot fail where they should ------------
+#
+# A scenario whose steps check nothing passes whatever the code does. These static
+# checks FAIL such a scenario (it is marked "weak-steps"): a When step that asserts
+# (the action is checked, not the outcome), a Then step that is empty or checks only
+# an exit code or truthiness, and a Then step that computes its expected value by
+# calling the function the When step exercised (it passes whatever that returns).
+
+WEAK_STEPS = "weak-steps"
+_EXIT_NAME = re.compile(r"^(returncode|exit_?code|exitcode|exit_status|rc)$", re.I)
+_CHECK_CALL = re.compile(r"^(assert|check|expect|verify|fail|raises)", re.I)
+# Calls too generic to be "the function under test" when both steps make them.
+_GENERIC_CALLS = frozenset(
+    {
+        "len", "str", "int", "float", "bool", "list", "dict", "set", "tuple", "sorted",
+        "repr", "type", "isinstance", "getattr", "range", "print", "open", "min", "max",
+        "sum", "any", "all", "get", "pop", "setdefault", "json", "items", "keys",
+        "values", "strip", "split", "lower", "upper", "format", "decode", "encode",
+        "read_text", "loads", "dumps", "append", "join", "copy",
+    }
+)  # fmt: skip
+
+
+def _callee(func: ast.expr) -> str:
+    return (
+        func.id
+        if isinstance(func, ast.Name)
+        else func.attr
+        if isinstance(func, ast.Attribute)
+        else ""
+    )
+
+
+def _own_nodes(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.AST]:
+    """``fn``'s nodes, minus nested functions and classes (helpers it only defines)."""
+    out: list[ast.AST] = []
+    todo: list[ast.AST] = list(fn.body)
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        out.append(node)
+        todo.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _calls_made(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
+    return {
+        name
+        for n in _own_nodes(fn)
+        if isinstance(n, ast.Call) and (name := _callee(n.func)) and name not in _GENERIC_CALLS
+    }
+
+
+# A Then line that names only an exit code or none-ness is checked in full by an
+# assert of exactly that; one that also states output, a message or a quoted value
+# is not.
+_THEN_ASKS_MORE = re.compile(
+    r"(?i)\b(output|message|shows?|prints?|displays?|contains?|lists?|says|reads|text)\b"
+    r"|\"[^\"]+\"|'[^']+'|`[^`]+`"
+)
+_THEN_EXIT = re.compile(r"(?i)\b(exit(s|ed)?|code|status|fail(s|ed)?|succeed(s|ed)?|success)\b")
+_THEN_NONENESS = re.compile(
+    r"(?i)\b(no|none|nothing|not|null|nil|absent|missing|empty|never|without|true|false)\b"
+)
+
+
+# A Then line that says only that an error is raised or the input refused is
+# checked in full by the error's type (isinstance, pytest.raises, toThrow(X),
+# errors.Is/As): it states no message, so agents asserting one would invent it.
+_THEN_ERROR = re.compile(
+    r"(?i)\b(errors?|exceptions?|rais(e|es|ed)|reject(s|ed)?|refuse(s|d)?|throws?|thrown)\b"
+)
+_JS_ERROR_TYPE = re.compile(
+    r"\.(toThrow|toThrowError)\s*\(\s*[A-Za-z_$]|\.toBeInstanceOf\s*\(|\binstanceof\b"
+    r"|\bassert\.(throws|rejects)\s*\("
+)
+_GO_ERROR_TYPE = re.compile(r"\berrors\.(Is|As)\s*\(")
+_THEN_QUOTED = re.compile(r"\"([^\"]+)\"|'([^']+)'|`([^`]+)`")
+
+
+def _states_only(then: str, what: re.Pattern[str]) -> bool:
+    return bool(what.search(then)) and not _THEN_ASKS_MORE.search(then)
+
+
+def _then_example(then: str, language: str) -> str:
+    """A Then step that would pass the lint for ``then``, as a concrete hint."""
+    m = _THEN_QUOTED.search(then)
+    quoted = next((g for g in m.groups() if g), "") if m else ""
+    q = json.dumps(quoted or "the text the Then line states")
+    error = bool(_THEN_ERROR.search(then))
+    if language == "go":
+        if error and not quoted:
+            return 'if !errors.Is(err, ErrInvalid) { return fmt.Errorf("got %v", err) }'
+        return f'if !strings.Contains(out, {q}) {{ return fmt.Errorf("got %q", out) }}'
+    if language in ("javascript", "typescript"):
+        if error:
+            return f"expect(() => this.act()).toThrow({q if quoted else 'ValidationError'})"
+        return f"expect(this.output).toContain({q})"
+    if error:
+        if quoted:
+            return (
+                f'assert isinstance(context["error"], ValueError) and {q} in str(context["error"])'
+            )
+        return 'assert isinstance(context["error"], ValueError)'
+    if _THEN_EXIT.search(then):
+        return f"assert result.returncode == 0 and {q} in result.stdout"
+    return (
+        f"assert result == {q}" if quoted else "assert result == <the value the Then line states>"
+    )
+
+
+def _weak_test(test: ast.expr, then: str = "") -> bool:
+    """An assert condition that holds for nearly any outcome: truthiness, a bare
+    ``len``/``bool``, or a not-None / exit-code / ``isinstance`` check the Then line
+    asks more of."""
+    if isinstance(test, (ast.Name, ast.Attribute, ast.Subscript)):
+        return True
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        return _weak_test(test.operand, then)
+    if isinstance(test, ast.Call):
+        name = _callee(test.func)
+        if name == "isinstance":
+            return not _states_only(then, _THEN_ERROR)
+        return name in ("bool", "len", "callable", "hasattr")
+    if isinstance(test, ast.BoolOp):
+        # `a or b` holds whenever its weakest branch does.
+        weak = any if isinstance(test.op, ast.Or) else all
+        return weak(_weak_test(v, then) for v in test.values)
+    if isinstance(test, ast.Compare) and len(test.ops) == 1:
+        left, right, op = test.left, test.comparators[0], test.ops[0]
+        sides = (left, right)
+
+        def empty(e: ast.expr) -> bool:
+            return isinstance(e, ast.Constant) and e.value == ""
+
+        # `x != ""`, `x > ""`: truthiness spelled as a comparison.
+        if (
+            (isinstance(op, ast.NotEq) and (empty(left) or empty(right)))
+            or (isinstance(op, ast.Gt) and empty(right))
+            or (isinstance(op, ast.Lt) and empty(left))
+        ):
+            return True
+        if isinstance(op, (ast.Is, ast.IsNot)) and any(
+            isinstance(s, ast.Constant) and s.value in (None, True, False) for s in sides
+        ):
+            return not _states_only(then, _THEN_NONENESS)
+        if any(
+            _EXIT_NAME.match(_callee(s) or (s.id if isinstance(s, ast.Name) else "")) for s in sides
+        ) or any(
+            isinstance(s, ast.Subscript)
+            and isinstance(s.slice, ast.Constant)
+            and isinstance(s.slice.value, str)
+            and _EXIT_NAME.match(s.slice.value)
+            for s in sides
+        ):
+            return not _states_only(then, _THEN_EXIT)
+        if (
+            isinstance(left, ast.Call)
+            and _callee(left.func) == "len"
+            and isinstance(right, ast.Constant)
+        ):
+            return isinstance(op, (ast.Gt, ast.GtE, ast.NotEq)) and right.value in (0, 1)
+    return False
+
+
+def _vacuous(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    body = [
+        s
+        for s in fn.body
+        if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+        and not isinstance(s, ast.Pass)
+    ]
+    return not body
+
+
+def _is_literal(e: ast.expr) -> bool:
+    try:
+        ast.literal_eval(e)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return False
+    return True
+
+
+def _expected_from_sut(fn: ast.FunctionDef | ast.AsyncFunctionDef, sut: set[str]) -> str | None:
+    """The function a Then step's assert calls on both sides of a comparison: the
+    expected value is computed by the function under test (or an oracle copy of the
+    actual's own call), so it passes whatever that returns. Re-reading the actual
+    through the SUT and comparing it with a literal is fine."""
+    assigned: dict[str, set[str]] = {}
+    nodes = _own_nodes(fn)
+    for n in nodes:
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    assigned.setdefault(t.id, set()).update(
+                        _callee(c.func) for c in ast.walk(n.value) if isinstance(c, ast.Call)
+                    )
+
+    def side(e: ast.expr) -> set[str]:
+        out: set[str] = set()
+        for c in ast.walk(e):
+            if isinstance(c, ast.Call):
+                out.add(_callee(c.func))
+            elif isinstance(c, ast.Name):
+                out |= assigned.get(c.id, set())
+        return out - _GENERIC_CALLS - {""}
+
+    for n in nodes:
+        if not (isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)):
+            continue
+        exprs = [n.test.left, *n.test.comparators]
+        for a, b in itertools.pairwise(exprs):
+            if _is_literal(a) or _is_literal(b):
+                continue
+            left, right = side(a), side(b)
+            if shared := sorted(left & right):
+                return shared[0]
+            if (ls := sorted(left & sut)) and right & sut:
+                return ls[0]
+    return None
+
+
+# What a When line names literally: a route path, a CLI flag, a quoted value.
+_WHEN_ROUTE = re.compile(r"(?<![\w.:/])/(?:[\w\-.]+/?)+|(?<![\w.:/])/(?![\w/])")
+_WHEN_FLAG = re.compile(r"(?<![\w-])--?[A-Za-z][\w-]*")
+_CODE_STRING = re.compile(r"(['\"`])((?:\\.|(?!\1).)*)\1")
+
+
+def _when_fidelity(line: str, pattern: str, strings: Sequence[str]) -> str | None:
+    """A When step whose code uses a variant of a route, flag or quoted value its
+    line states (``/notes/`` for ``GET /notes``) and never the value as written: the
+    step tests around a difference the line would catch. Only values the step's
+    pattern holds literally count (a captured parameter flows in as written)."""
+    plain = re.sub(r"\\(.)", r"\1", pattern)
+
+    def norm(t: str) -> str:
+        return re.sub(r"[\W_]+", "", t.casefold())
+
+    checks: list[tuple[str, str, re.Pattern[str]]] = [
+        *(("route", t, _WHEN_ROUTE) for t in _WHEN_ROUTE.findall(line)),
+        *(("flag", t, _WHEN_FLAG) for t in _WHEN_FLAG.findall(line)),
+    ]
+    for what, token, rx in checks:
+        if token not in plain or token == "/":
+            continue
+        words = [w for text in strings for w in rx.findall(text)]
+        if token in words:
+            continue
+        if variant := next((w for w in words if norm(w) == norm(token)), None):
+            return _infidel(what, token, variant)
+    for m in _THEN_QUOTED.finditer(line):
+        token = next(g for g in m.groups() if g)
+        if token not in plain or norm(token) == "" or any(token in t for t in strings):
+            continue
+        if variant := next((t for t in strings if norm(token) in norm(t)), None):
+            return _infidel("quoted value", token, variant)
+    return None
+
+
+def _infidel(what: str, token: str, variant: str) -> str:
+    return (
+        f"is a When step that never uses the line's {what} `{token}` as written (its code "
+        f"uses `{variant[:80]}`): act exactly as the When line states — a step that "
+        "adjusts the input tests around a bug the scenario would catch"
+    )
+
+
+def _python_strings(fn: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    """The string constants the step's body uses (not its decorator's pattern, not
+    its docstring)."""
+    body = [
+        s for s in fn.body if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant))
+    ]
+    return [
+        n.value
+        for s in body
+        for n in ast.walk(s)
+        if isinstance(n, ast.Constant) and isinstance(n.value, str)
+    ]
+
+
+def _python_step_lint(
+    fn: ast.FunctionDef | ast.AsyncFunctionDef, kind: str, sut: set[str], text: str = ""
+) -> str | None:
+    nodes = _own_nodes(fn)
+    asserts = [n for n in nodes if isinstance(n, ast.Assert)]
+    if kind == "when":
+        return (
+            "asserts inside a When step (a When step acts; its outcome belongs in a Then step)"
+            if asserts
+            else None
+        )
+    if kind != "then":
+        return None
+    if _vacuous(fn):
+        return "is an empty Then step (only `pass`, `...` or a docstring): it checks nothing"
+    checks = [
+        n
+        for n in nodes
+        if isinstance(n, ast.Raise)
+        or (
+            isinstance(n, ast.Call)
+            and _CHECK_CALL.match(_callee(n.func))
+            and not isinstance(n, ast.Assert)
+        )
+    ]
+    if not asserts and not checks:
+        return "is a Then step with no assert: it checks nothing"
+    if asserts and not checks and all(_weak_test(a.test, text) for a in asserts):
+        return (
+            "is a Then step whose only check is truthiness, not-None or an exit code: "
+            "assert the actual output the scenario's Then line states, e.g. "
+            f"`{_then_example(text, 'python')}`"
+        )
+    if (name := _expected_from_sut(fn, sut)) is not None:
+        return (
+            f"is a Then step that computes its expected value by calling `{name}`, the "
+            "function under test, so it passes whatever that returns: compare against "
+            "the literal value the scenario states"
+        )
+    return None
+
+
+def _step_functions(
+    root: Path, modules: Iterable[str]
+) -> list[tuple[_StepDef, ast.FunctionDef | ast.AsyncFunctionDef]]:
+    out: list[tuple[_StepDef, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+    for rel in modules:
+        tree = _parse_module(root, rel)
+        if tree is None:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.extend(
+                    (replace(s, function=node.name), node)
+                    for d in node.decorator_list
+                    if (s := _step_def(rel, d))
+                )
+    return sorted(out, key=lambda p: (p[0].module, p[0].line))
+
+
+def weak_step_notes(
+    workdir: Path, trusted: Mapping[str, Sequence[tuple[str, str]]]
+) -> dict[str, tuple[str, ...]]:
+    """``{scenario ref: why}`` for each trusted scenario a pytest-bdd step that
+    cannot fail where it should runs in (AST only, nothing runs)."""
+    root = Path(workdir)
+    features = {r.split("::", 1)[0] for r in trusted}
+    modules = [
+        *binding_modules(root, features),
+        *(
+            p.relative_to(root).as_posix()
+            for p in sorted(root.rglob("conftest.py"))
+            if not p.relative_to(root).as_posix().startswith(".")
+        ),
+    ]
+    defs = _step_functions(root, dict.fromkeys(modules))
+    out: dict[str, tuple[str, ...]] = {}
+    for ref, steps in trusted.items():
+        bound: list[tuple[str, str, _StepDef, ast.FunctionDef | ast.AsyncFunctionDef]] = []
+        for kind, text in steps:
+            hits = [
+                (d, fn) for d, fn in defs if d.kind == kind and step_matches(d.parser, d.text, text)
+            ]
+            if hits:
+                bound.append((kind, text, *hits[-1]))
+        sut = set().union(*(_calls_made(fn) for kind, _, _, fn in bound if kind == "when"))
+        notes = [
+            f'`@{d.kind}("{d.text}")` ({d.module}:{d.line}, {d.function}) {why}'
+            for kind, text, d, fn in bound
+            if (
+                why := _python_step_lint(fn, kind, sut, text)
+                or (_when_fidelity(text, d.text, _python_strings(fn)) if kind == "when" else None)
+            )
+        ]
+        if notes:
+            out[ref] = tuple(dict.fromkeys(notes))
+    return out
+
+
+# Cucumber step files (JS/TS, Go): regex checks, judged per step definition.
+_JS_STEP = re.compile(
+    r"\b(Given|When|Then)\(\s*(?:(['\"`])((?:\\.|(?!\2).)*)\2|/((?:\\.|[^/\n])+)/)\s*,"
+)
+_GO_STEP = re.compile(
+    r"\.(Step|Given|When|Then)\(\s*(?:`([^`]*)`|\"((?:\\.|[^\"\\])*)\")\s*,\s*([\w.]+|func\b)"
+)
+_JS_ASSERT = re.compile(r"\b(assert(?:\.\w+)?|expect)\s*\(|\.should\b|\bthrow\b")
+_JS_WEAK = re.compile(
+    r"\bassert(?:\.ok)?\s*\(\s*!?[\w.$\[\]'\"]+\s*\)"
+    r"|\.(toBeTruthy|toBeDefined|toBeFalsy|toBeUndefined|toBeNull)\s*\(\s*\)"
+    r"|\.not\.toBeNull\s*\(\s*\)"
+)
+# One branch of an assert's condition that holds for nearly any value: a bare
+# value (truthiness), `x !== ""`, `x > ""`, `x.length > 0`, `x != null`.
+_JS_WEAK_BRANCH = re.compile(
+    r"^!*[\w.$\[\]'\"]+$"
+    r"|^[^=<>!]+(?:!==?|>)\s*(?:''|\"\"|``)$|^(?:''|\"\"|``)\s*(?:!==?|<)[^=<>!]+$"
+    r"|\.length\s*(?:>|!==?)\s*0$|^[^=<>!]+!==?\s*(?:null|undefined)$"
+)
+# A Go failure condition (`if <cond> { fail }`) that only rejects an empty value.
+_GO_WEAK_BRANCH = re.compile(
+    r'^[\w.]+\s*==\s*(?:""|nil)$|^len\([^()]*\)\s*(?:==|<)\s*[01]$|^![\w.]+$'
+)
+_GO_ASSERT = re.compile(r"\b(assert|require)\.\w+\(|\bt\.(Error|Fatal)")
+_GO_CHECK = re.compile(r"\bif\b|\b(assert|require)\.\w+\(|Errorf\(|errors\.New\(|\bpanic\(")
+_GO_IF = re.compile(r"\bif\s+([^{]+)\{")
+_EXIT_TEXT = re.compile(r"exit_?code|ExitCode|exitCode|returncode|\bcode\s*[!=]=", re.I)
+
+
+def _braced(text: str, start: int) -> str:
+    """The ``{...}`` block starting at the first brace at or after ``start``."""
+    i = text.find("{", start)
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1 : j]
+    return text[i + 1 :]
+
+
+def _cucumber_step_defs(root: Path, language: str) -> list[tuple[str, str, str, str]]:
+    """(kind or "step", pattern regex, location, body) per step definition."""
+    out: list[tuple[str, str, str, str]] = []
+    suffixes = (".go",) if language == "go" else (".js", ".mjs", ".cjs", ".ts", ".mts")
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if (
+            path.suffix not in suffixes
+            or not path.is_file()
+            or rel.startswith((".", "node_modules/"))
+            or "/node_modules/" in rel
+        ):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if language == "go":
+            for m in _GO_STEP.finditer(text):
+                kind, pattern = (
+                    m.group(1).lower(),
+                    m.group(2) if m.group(2) is not None else m.group(3),
+                )
+                fn = m.group(4)
+                if fn == "func":
+                    body = _braced(text, m.end())
+                else:
+                    name = fn.rsplit(".", 1)[-1]
+                    d = re.search(rf"\bfunc\s+(?:\([^)]*\)\s*)?{re.escape(name)}\s*\(", text)
+                    body = _braced(text, d.end()) if d else ""
+                out.append((kind, pattern, f"{rel}:{text.count(chr(10), 0, m.start()) + 1}", body))
+            continue
+        for m in _JS_STEP.finditer(text):
+            if m.group(4) is not None:
+                pattern = cucumber._js_to_py(m.group(4))
+            else:
+                pattern = cucumber.expression_to_regex(m.group(3), {})
+            body = _braced(text, m.end())
+            out.append(
+                (
+                    m.group(1).lower(),
+                    pattern,
+                    f"{rel}:{text.count(chr(10), 0, m.start()) + 1}",
+                    body,
+                )
+            )
+    return out
+
+
+def _paren(text: str) -> str:
+    """The text inside the first balanced ``(...)`` of ``text``."""
+    i = text.find("(")
+    if i < 0:
+        return ""
+    depth = 0
+    for j in range(i, len(text)):
+        depth += {"(": 1, ")": -1}.get(text[j], 0)
+        if depth == 0:
+            return text[i + 1 : j]
+    return text[i + 1 :]
+
+
+def _branches(cond: str, op: str) -> list[str]:
+    """``cond`` split on top-level ``op`` (``||`` / ``&&``), outer parens dropped."""
+    parts: list[str] = []
+    depth, start, i = 0, 0, 0
+    while i < len(cond):
+        c = cond[i]
+        depth += {"(": 1, ")": -1, "[": 1, "]": -1}.get(c, 0)
+        if depth == 0 and cond.startswith(op, i):
+            parts.append(cond[start:i])
+            start = i = i + len(op)
+            continue
+        i += 1
+    parts.append(cond[start:])
+    out = []
+    for p in parts:
+        p = p.strip()
+        while p.startswith("(") and p.endswith(")") and _paren(p) == p[1:-1]:
+            p = p[1:-1].strip()
+        out.append(p)
+    return out
+
+
+def _js_weak_check(check: str) -> bool:
+    """An ``assert(...)``/``assert.ok(...)``/``expect(...).toBe(true)`` whose
+    condition is weak: any ``||`` branch weak, or the whole a weak comparison."""
+    head = check.lstrip()
+    if head.startswith("expect"):
+        if not re.search(r"\)\s*\.(?:toBe\(\s*true\s*\)|toBeTruthy\(|toEqual\(\s*true)", head):
+            return False
+    elif not re.match(r"assert(?:\.ok)?\s*\(", head):
+        return False
+    cond = " ".join(_paren(head).split())
+    return any(_JS_WEAK_BRANCH.search(b) for b in _branches(cond, "||"))
+
+
+def _go_weak_cond(cond: str) -> bool:
+    """A Go failure condition that passes nearly any value: it fails only on an
+    empty one, or (an ``&&`` of failure conditions is an ``or`` of checks) any
+    branch does."""
+    return any(_GO_WEAK_BRANCH.search(b) for b in _branches(" ".join(cond.split()), "&&"))
+
+
+def _cucumber_lint(kind: str, body: str, language: str, then: str = "") -> str | None:
+    code = re.sub(r"//[^\n]*|/\*.*?\*/", "", body, flags=re.S)
+    if kind == "when":
+        rx = _GO_ASSERT if language == "go" else _JS_ASSERT
+        return (
+            "asserts inside a When step (its outcome belongs in a Then step)"
+            if rx.search(code)
+            else None
+        )
+    if kind != "then":
+        return None
+    if language == "go":
+        if not _GO_CHECK.search(code):
+            return "is a Then step that checks nothing (no condition, assertion or error)"
+        conds = _GO_IF.findall(code)
+        error_ok = _states_only(then, _THEN_ERROR)
+        if (
+            conds
+            and not _GO_ASSERT.search(code)
+            and all(
+                _EXIT_TEXT.search(c) and not (error_ok and _GO_ERROR_TYPE.search(c)) for c in conds
+            )
+        ):
+            return (
+                "is a Then step whose only check is the exit code: check the actual "
+                f"output, e.g. `{_then_example(then, language)}`"
+            )
+        if conds and not _GO_ASSERT.search(code) and all(_go_weak_cond(c) for c in conds):
+            return (
+                "is a Then step whose only check is that a value is non-empty (any branch "
+                "of an `or` that passes on any value makes the whole check pass): check the "
+                f"actual output, e.g. `{_then_example(then, language)}`"
+            )
+        return None
+    checks = [
+        m.group(0)
+        for m in re.finditer(
+            r"(assert(?:\.\w+)?|expect)\s*\([^;\n]*|\.should[^;\n]*|\bthrow\b[^;\n]*", code
+        )
+    ]
+    if not checks:
+        return "is a Then step that checks nothing (no assert or expect)"
+    error_ok = _states_only(then, _THEN_ERROR)
+    if all(
+        (_JS_WEAK.search(c) or _EXIT_TEXT.search(c) or _js_weak_check(c))
+        and not (error_ok and _JS_ERROR_TYPE.search(c))
+        for c in checks
+    ):
+        return (
+            "is a Then step whose only check is truthiness or an exit code: assert the "
+            "actual output the scenario's Then line states, e.g. "
+            f"`{_then_example(then, language)}`"
+        )
+    return None
+
+
+def cucumber_weak_step_notes(
+    workdir: Path, trusted: Mapping[str, Sequence[tuple[str, str]]], language: str
+) -> dict[str, tuple[str, ...]]:
+    """:func:`weak_step_notes` for a Cucumber stack's step files (``language``:
+    javascript, typescript or go), by regex; a definition is bound to the trusted
+    step lines its pattern fully matches."""
+    defs = _cucumber_step_defs(Path(workdir), language)
+    out: dict[str, tuple[str, ...]] = {}
+    for ref, steps in trusted.items():
+        notes: list[str] = []
+        for kind, text in steps:
+            for dkind, pattern, where, body in defs:
+                if dkind not in (kind, "step"):
+                    continue
+                try:
+                    if re.fullmatch(pattern.removeprefix("^").removesuffix("$"), text) is None:
+                        continue
+                except re.error:
+                    continue
+                strings = [m.group(2) for m in _CODE_STRING.finditer(body)]
+                if why := _cucumber_lint(kind, body, language, text) or (
+                    _when_fidelity(text, pattern, strings) if kind == "when" else None
+                ):
+                    notes.append(f"step `{text}` ({where}) {why}")
+                break
+        if notes:
+            out[ref] = tuple(dict.fromkeys(notes))
+    return out
+
+
+def lint_scenarios(scenarios: dict[str, str], notes: Mapping[str, Sequence[str]]) -> dict[str, str]:
+    """``{ref: why}`` for each passed scenario ``notes`` flags, now marked
+    :data:`WEAK_STEPS` in ``scenarios`` (in place)."""
+    why: dict[str, str] = {}
+    for ref, lines in notes.items():
+        if scenarios.get(ref) == "passed":
+            scenarios[ref] = WEAK_STEPS
+            why[ref] = (
+                "passed, but its steps cannot fail where they should — "
+                + "; ".join(lines)
+                + ". Rewrite the step definitions (the .feature file is gate-owned)"
+            )
+    return why
+
+
 @counted("test.static_step")
 def static_step_notes(
     workdir: Path, features: Iterable[str], *, params: bool = True
@@ -1377,7 +2065,14 @@ class TestGate:
         profile_name: str = "",
         scope: frozenset[str] | None = None,
         pyenv: PythonBuildEnv | None = None,
+        step_lint: str = "",
+        properties: Mapping[str, str] | None = None,
+        language: str = "python",
     ) -> None:
+        # Planned contract properties (id -> "<contract>: <statement>"): the full gate
+        # FAILs one no property-based test of ``language``'s library names.
+        self.properties = dict(properties or {})
+        self.language = language
         # Default: the ISOLATED pinned harness (fences the host source off sys.path
         # so generated modules can't collide with / reach ours). An explicit cmd is
         # honored verbatim (tests inject one). With a planned Cucumber ``bdd_cmd``
@@ -1386,6 +2081,10 @@ class TestGate:
         self.bdd_cmd = bdd_cmd or None
         self._runs_bdd = cmd is None and self.bdd_cmd is None
         self.cmd = cmd or (sys.executable, "-c", _ISOLATED_PYTEST_BOOTSTRAP, "-q", "--tb=short")
+        if cmd is None and self.properties and scope is None:
+            # -rs names each skip's location, so a skipped property counts as not run;
+            # -r replaces pytest's default "fE", so those are spelled out again.
+            self.cmd = (*self.cmd, "-rfEs")
         self.min_passed = min_passed
         # The held-out-mutant + behavioral-invariance discriminator: a green
         # pytest run is NECESSARY but NOT SUFFICIENT — a vacuous/gamed-green
@@ -1406,17 +2105,70 @@ class TestGate:
         # these scenarios run and decide the verdict; other tests are not judged.
         self.scope = scope
         # The command digest: a cached verdict never outlives a change of commands.
-        self.scanner_rule_version = "test-harness-v3:" + commands_digest(
+        # The Cucumber step files' lint language (the pytest-bdd lint always runs).
+        self.step_lint = step_lint
+        # v4: the step-definition lint FAILs scenarios whose steps cannot fail.
+        self.scanner_rule_version = "test-harness-v4:" + commands_digest(
             cmd=list(self.cmd),
             bdd_cmd=self.bdd_cmd,
+            step_lint=step_lint,
             stack_harness=stack_harness,
             profile=profile_name,
             scope=sorted(scope) if scope is not None else None,
+            **(
+                {"properties": sorted(self.properties.items()), "language": language}
+                if self.properties
+                else {}
+            ),
         )
         self._timeout_s = timeout_s
         self._seal_key = seal_key  # zone-A observation seal (None ⇒ unsealed channel)
         # A Python build's declared deps, installed by BuildGate into their own venv.
         self._pyenv = pyenv
+        # A scoped check's own test files (see :meth:`owning`): run and judged too.
+        self.own_tests: tuple[str, ...] = ()
+
+    def owning(self, tests: Sequence[str], properties: Mapping[str, str]) -> TestGate:
+        """This scoped gate also judging one session's own work: the non-scenario
+        tests in its files ``tests`` (paths, or ``dir/`` subtrees) run, and a red one
+        FAILs it; so does one of its contracts' ``properties`` (id -> "<contract>:
+        <statement>") that is missing, skipped or failing. The default pytest harness
+        only: a stack's own test command has no way to run one file."""
+        gate = copy.copy(self)
+        gate.own_tests = tuple(tests) if self._runs_bdd else ()
+        gate.properties = dict(properties) if self._runs_bdd else {}
+        if gate.own_tests or gate.properties:
+            gate.scanner_rule_version = f"{self.scanner_rule_version}:" + commands_digest(
+                own_tests=sorted(gate.own_tests),
+                properties=sorted(gate.properties.items()),
+                language=self.language,
+            )
+        return gate
+
+    def _own_targets(self, workdir: Path) -> tuple[str, ...]:
+        """The test modules of :attr:`own_tests` in ``workdir``, step modules too: the
+        own run deselects their scenario tests (the BDD run judges those), and runs
+        the rest, so a property or plain test in a step module, or an import error
+        in one, is the session's own failure."""
+        root = Path(workdir)
+        found: set[str] = set()
+        for entry in self.own_tests:
+            path = root / entry.rstrip("/")
+            paths = sorted(path.rglob("*.py")) if path.is_dir() else [path]
+            for p in paths:
+                if p.is_file() and not p.is_symlink() and _is_test_module(p.name):
+                    found.add(p.relative_to(root).as_posix())
+        return tuple(sorted(f for f in found if PurePosixPath(f).name != "conftest.py"))
+
+    def _own_run(self, workdir: Path) -> tuple[tuple[str, ...], int, str, str]:
+        """(targets, exit code, stdout, stderr) of the own test modules' run; exit
+        code 5 (nothing collected) when there are none."""
+        targets = self._own_targets(workdir)
+        if not targets:
+            return (), _NO_TESTS_COLLECTED, "", ""
+        cmd = (sys.executable, "-c", _ISOLATED_PYTEST_OWN_BOOTSTRAP, "-q", "--tb=short", "-rfEs")
+        rc, out, err = self._ground(workdir, (*cmd, *targets))
+        return targets, rc, out, err
 
     def _env(self, workdir: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
         # The gate-owned env, added on top of the sandbox's host-env allowlist: tell
@@ -1629,6 +2381,13 @@ class TestGate:
             scenarios, notes = self._cucumber_scenarios(
                 report_path, digest, trusted, workdir, (bdd_rc, bdd_out, bdd_err)
             )
+            weak = (
+                lint_scenarios(
+                    scenarios, cucumber_weak_step_notes(workdir, trusted, self.step_lint)
+                )
+                if self.step_lint
+                else {}
+            )
             structured[BDD_KEY] = scenarios
             structured[BDD_EXIT_KEY] = bdd_rc
             structured["bdd_cmd"] = self.bdd_cmd
@@ -1648,7 +2407,7 @@ class TestGate:
                 )
             findings = (
                 *notes,
-                *bdd_findings(scenarios, _CUCUMBER_WHY),
+                *bdd_findings(scenarios, _CUCUMBER_WHY, why_ref=weak),
                 *bdd_failures,
                 *findings,
                 cucumber.CUCUMBER_RESIDUAL,
@@ -1660,12 +2419,14 @@ class TestGate:
             # run never executed (unbound feature, collection miss) is "missing".
             got = executed or {}
             scenarios = {ref: got.get(ref, "missing") for ref in sorted(trusted)}
+            weak = lint_scenarios(scenarios, weak_step_notes(workdir, trusted))
             structured[BDD_KEY] = scenarios
             missing = [ref for ref, o in scenarios.items() if o == "missing"]
             findings = (
                 *shadowed_scenario_notes(workdir, missing),
                 *bdd_findings(
-                    scenarios, why_ref=uncollected_binding_reasons(out, workdir, missing)
+                    scenarios,
+                    why_ref={**uncollected_binding_reasons(out, workdir, missing), **weak},
                 ),
                 *findings,
             )
@@ -1678,6 +2439,35 @@ class TestGate:
                     "normally (a test exited the process or tampered with the run)",
                     *findings,
                 )
+        ran = f"{out}\n{err}"
+        red = rc != 0
+        if self.scope is not None and (self.own_tests or self.properties):
+            from .pydeps import undeclared_import_hints
+
+            targets, own_rc, own_out, own_err = self._own_run(workdir)
+            structured[OWN_EXIT_KEY] = own_rc
+            if own_rc not in (0, _NO_TESTS_COLLECTED):
+                findings = (
+                    f"this ticket's own tests failed ({', '.join(targets)}; exit {own_rc}) — "
+                    "a scoped check runs them along with its scenarios:",
+                    *undeclared_import_hints(own_out + own_err, workdir),
+                    *shared_state_hints(own_out, workdir),
+                    *(failure_findings(own_out) or (_output_tail(own_err, own_out, own_rc),)),
+                    *findings,
+                )
+            # The scenario run is judged on its scenarios alone: only the own run's
+            # output says which property failed.
+            ran = f"{own_out}\n{own_err}"
+            red = own_rc not in (0, _NO_TESTS_COLLECTED)
+        if self.properties:
+            from .properties import property_findings
+
+            covered, notes = property_findings(
+                workdir, self.properties, self.language, ran if red else "", ran=ran
+            )
+            if covered:
+                structured[PROPERTIES_KEY] = covered
+            findings = (*notes, *findings)
         return observe(
             self.name,
             exit_codes=(rc,),
@@ -1697,9 +2487,17 @@ class TestGate:
         if obs.structured.get(BDD_EXIT_KEY) in MISSING_BINARY_EXIT_CODES:
             return GateStatus.ERROR  # the Cucumber runner's binary is missing
         if self.scope is not None:
-            # A per-wave check: the scoped scenarios alone decide (the rest of the
-            # suite may need tickets not built yet; the final gate runs it all).
+            # A per-wave check: the scoped scenarios decide, and a session's own tests
+            # and properties when it has them (:meth:`owning`); the rest of the suite
+            # may need tickets not built yet, and the final gate runs it all.
+            own_rc = obs.structured.get(OWN_EXIT_KEY)
+            if own_rc is not None and own_rc not in (0, _NO_TESTS_COLLECTED):
+                return GateStatus.FAIL
+            if any(v != "covered" for v in (obs.structured.get(PROPERTIES_KEY) or {}).values()):
+                return GateStatus.FAIL
             scoped = obs.structured.get(BDD_KEY) or {}
+            if not self.scope and own_rc is not None:
+                return GateStatus.PASS
             return (
                 GateStatus.PASS
                 if scoped and all(v == "passed" for v in scoped.values())
@@ -1719,7 +2517,11 @@ class TestGate:
         if rc == _NO_TESTS_COLLECTED:
             # Adequacy floor: an empty suite cannot clear the gate — nor can one
             # that leaves acceptance scenarios unexecuted.
-            if self.min_passed > 0 or obs.structured.get(BDD_KEY):
+            if (
+                self.min_passed > 0
+                or obs.structured.get(BDD_KEY)
+                or obs.structured.get(PROPERTIES_KEY)
+            ):
                 return GateStatus.FAIL
             return GateStatus.PASS
         if rc != 0:
@@ -1740,5 +2542,8 @@ class TestGate:
             return GateStatus.FAIL
         scenarios = obs.structured.get(BDD_KEY)
         if scenarios is not None and any(v != "passed" for v in scenarios.values()):
+            return GateStatus.FAIL
+        # Every planned contract property is proven by a property-based test.
+        if any(v != "covered" for v in (obs.structured.get(PROPERTIES_KEY) or {}).values()):
             return GateStatus.FAIL
         return GateStatus.PASS

@@ -133,3 +133,18 @@ def test_state_dir_unset_is_in_memory_no_file(
     assert isinstance(store.get_body(body_uri), SystemDesign)
     # No files were created under tmp_path by the in-memory path.
     assert not any(tmp_path.iterdir())
+
+
+def test_checkpoint_serde_loads_foundry_schema_types_without_a_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from foundry.durability.checkpointer import FoundryCheckpointer
+    from foundry.schemas.gates import GateStatus
+    from foundry.schemas.implementation import StackDecision
+
+    serde = FoundryCheckpointer().saver.serde
+    values = [GateStatus.PASS, StackDecision(language="python")]
+    with caplog.at_level("WARNING"):
+        for value in values:
+            assert serde.loads_typed(serde.dumps_typed(value)) == value
+    assert not [r for r in caplog.records if "unregistered" in r.getMessage()]

@@ -2,25 +2,41 @@
 
 from __future__ import annotations
 
+import re
 import shlex
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
-from foundry.agents.planner.checks import _goal_of, _goal_rows
+from foundry.agents.planner.checks import (
+    _declaration_only,
+    _goal_of,
+    _goal_rows,
+    _undeclared_type_users,
+    _web_stack,
+)
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.agents.planner.spec_text import with_referenced
+from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
-from foundry.gates.profiles import pytest_bdd_binds
+from foundry.gates.profiles import ONE_TYPE_PER_FILE, SOURCE_SUFFIXES, pytest_bdd_binds
+from foundry.schemas.architecture import PROPERTY_KINDS
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
     Difficulty,
     Specialty,
     StackDecision,
     Ticket,
     scenario_ref,
 )
-from foundry.schemas.product import AcceptanceCriterion, IntentBrief
+from foundry.schemas.product import AcceptanceCriterion, Criticality, IntentBrief, render_scenario
+
+if TYPE_CHECKING:
+    from foundry.schemas.architecture import InterfaceContract
+    from foundry.state.seq import Seq
 
 # Script files a stack command can name as its own repo file (`python3 smoke.py`).
 _SCRIPT_SUFFIXES = (
@@ -119,6 +135,185 @@ def _own_stack_files(
         ],
         (),
     )
+
+
+# Repo-root files that configure some language's build or test harness: the test
+# runner reads them to collect and run every ticket's tests.
+_HARNESS_CONFIG = re.compile(
+    r"pyproject\.toml|setup\.cfg|pytest\.ini|tox\.ini|requirements(?:-dev)?\.txt"
+    r"|package(?:-lock)?\.json|tsconfig(?:\.[\w-]+)?\.json|\.babelrc|\.mocharc\.\w+"
+    r"|(?:jest|vitest|vite|babel|cucumber)\.config\.(?:[cm]?[jt]s|json)"
+    r"|cucumber\.(?:json|[cm]?js)|Cargo\.(?:toml|lock)|go\.(?:mod|sum)|pom\.xml"
+    r"|(?:build|settings)\.gradle(?:\.kts)?"
+)
+
+
+def _writes_tests(t: Ticket) -> bool:
+    return t.specialty is Specialty.TEST or any(
+        PurePosixPath(f).name.startswith("test_")
+        or PurePosixPath(f).stem.endswith(("_test", ".test", ".spec"))
+        or any(p in ("tests", "test", "step_definitions", "__tests__") for p in f.split("/")[:-1])
+        for f in t.files
+    )
+
+
+def _own_harness_files(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]]:
+    """Move the build/test harness config (the harness ticket's files, and any
+    repo-root manifest or runner config: pyproject.toml, package.json, tsconfig.json,
+    jest/vitest config, Cargo.toml, go.mod, ...) off every later ticket onto the
+    first-wave ticket every test-writing ticket depends on: the harness ticket when
+    there is one. Left on a last-wave ticket, its edit (a dice CLI ticket changing
+    ``bdd_features_base_dir``) broke the test collection of every ticket built
+    before it. With no such first-wave ticket it stays where it is."""
+    harness = next((t for t in tickets if t.id == HARNESS_TICKET_ID), None)
+    config = set(harness.files) if harness is not None else set()
+
+    def is_config(path: str) -> bool:
+        return path in config or ("/" not in path and bool(_HARNESS_CONFIG.fullmatch(path)))
+
+    claims = {
+        t.id: files
+        for t in tickets
+        if t.id not in _GENERATED_TICKETS and (files := [f for f in t.files if is_config(f)])
+    }
+    target = harness
+    if target is None and claims:
+        deps = {t.id: t.depends_on for t in tickets}
+        later = [t.id for t in tickets if _writes_tests(t) or t.id in claims]
+        target = next(
+            (
+                t
+                for t in tickets
+                if t.id not in _GENERATED_TICKETS
+                and t.files
+                and set(t.depends_on) <= _GENERATED_TICKETS
+                and all(t.id == w or t.id in _ancestors(deps, w) for w in later)
+            ),
+            None,
+        )
+    if target is None:
+        return list(tickets), []
+    moved = {tid: files for tid, files in claims.items() if tid != target.id}
+    if not moved:
+        return list(tickets), []
+    by_id = {t.id: t for t in tickets}
+    listed = _uniq(f for files in moved.values() for f in files)
+    take = (
+        f" Also write {', '.join(listed)}, the build/test config every later ticket's "
+        "tests run under (listed by "
+        + "; ".join(f"{tid}: {by_id[tid].title}" for tid in moved)
+        + "): declare up front every dependency and setting their work needs, since "
+        "they may not edit it."
+    )
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        if t.id == target.id:
+            t = t.model_copy(
+                update={
+                    "files": (*t.files, *(f for f in listed if f not in t.files)),
+                    "description": t.description + take,
+                }
+            )
+        elif t.id in moved:
+            names = ", ".join(moved[t.id])
+            t = t.model_copy(
+                update={
+                    "files": tuple(f for f in t.files if f not in moved[t.id]),
+                    "description": t.description
+                    + f" {names} (the build/test config every ticket's tests run under) "
+                    f"is written by ticket {target.id} before any test runs: never edit it.",
+                }
+            )
+            concerns.append(
+                f"Ticket {t.id}: moved the harness config {names} to {target.id}, which "
+                "every test-writing ticket follows."
+            )
+        out.append(t)
+    return out, concerns
+
+
+_MANIFEST = re.compile(
+    r"requirements\.txt|pyproject\.toml|package\.json|Cargo\.toml|go\.mod|pom\.xml"
+    r"|build\.gradle(?:\.kts)?|Gemfile|composer\.json"
+)
+DEPENDENCIES_NOTE = "Declare every third-party dependency the plan names"
+
+
+def _declare_dependencies(
+    tickets: Sequence[Ticket], dependencies: Sequence[str]
+) -> tuple[list[Ticket], list[str]]:
+    """Give the plan's ``stack.dependencies`` to the ticket that owns the package
+    manifest (the harness ticket, else the first ticket writing a repo-root
+    manifest; after :func:`_own_harness_files` that is a first-wave one). No later
+    ticket may edit the manifest, so a library only an ADR named (bcrypt) went
+    undeclared and its ticket faked it with pbkdf2."""
+    if not dependencies:
+        return list(tickets), []
+    owner = next((t for t in tickets if t.id == HARNESS_TICKET_ID), None) or next(
+        (t for t in tickets if any("/" not in f and _MANIFEST.fullmatch(f) for f in t.files)),
+        None,
+    )
+    if owner is None:
+        return list(tickets), [
+            f"No ticket writes a package manifest to declare {', '.join(dependencies)}."
+        ]
+    if DEPENDENCIES_NOTE in owner.description:
+        return list(tickets), []
+    manifests = [f for f in owner.files if _MANIFEST.fullmatch(PurePosixPath(f).name)]
+    note = (
+        f" {DEPENDENCIES_NOTE} in {' / '.join(manifests) or 'the package manifest'}, "
+        f"as given: {', '.join(dependencies)}. Later tickets cannot edit it, so each "
+        "must be there before they build."
+    )
+    return [
+        t.model_copy(update={"description": t.description + note}) if t.id == owner.id else t
+        for t in tickets
+    ], [f"Ticket {owner.id}: declares the plan's dependencies {', '.join(dependencies)}."]
+
+
+def _settle_contracts_file(
+    tickets: Sequence[Ticket],
+    contracts_file: str,
+    homes: Collection[str],
+    existing: Collection[str] = (),
+) -> tuple[list[Ticket], list[str]]:
+    """When no ticket writes ``contracts_file`` (no contract is a data type, so
+    there is no contracts ticket; the shared-type fold put the types in their
+    owners' modules), point each ticket's mention of it at where the shared types
+    live (``homes``): a ticket told to import "the data types from contracts.py"
+    codes against a file nothing builds. The file is otherwise only the plan's raw
+    stack field (no StackDecision carries it), so the mentions are all there is to
+    clear."""
+    if (
+        not contracts_file
+        or contracts_file in existing
+        or any(contracts_file in t.files for t in tickets)
+    ):
+        return list(tickets), []
+    unique = _uniq(homes)
+    home = (
+        unique[0]
+        if len(unique) == 1
+        else "the module the shared-type notes name"
+        if unique
+        else "the module that defines them"
+    )
+    name = PurePosixPath(contracts_file).name
+    mention = re.compile(
+        rf"(?<![\w/.-])(?:{re.escape(contracts_file)}|{re.escape(name)})(?![\w/-])"
+    )
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        title, description = mention.sub(home, t.title), mention.sub(home, t.description)
+        if (title, description) != (t.title, t.description):
+            t = t.model_copy(update={"title": title, "description": description})
+            concerns.append(
+                f"Ticket {t.id}: no ticket writes {contracts_file}; its mention now names {home}."
+            )
+        out.append(t)
+    return out, concerns
 
 
 def _is_python_test(path: str) -> bool:
@@ -630,6 +825,147 @@ def _drop_self_consumes(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[s
     return out, concerns
 
 
+def _drop_dangling_refs(
+    tickets: Sequence[Ticket], existing: Collection[str] = ()
+) -> tuple[list[Ticket], list[str]]:
+    """Drop each reads[] entry no ticket writes and the tree will not hold (not a
+    base file, a gate-written feature file, a directory or a glob), and each
+    depends_on naming no ticket: a ticket reading a contracts file no contracts
+    ticket writes codes against types it can only guess."""
+    ids = {t.id for t in tickets}
+    written = {f for t in tickets for f in t.files} | set(existing)
+
+    def kept(path: str) -> bool:
+        return (
+            path in written
+            or path.endswith((".feature", "/"))
+            or any(ch in path for ch in "*?[")
+            or any(f.startswith(path.rstrip("/") + "/") for f in written)
+        )
+
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        reads = tuple(p for p in t.reads if kept(p))
+        deps = tuple(d for d in t.depends_on if d in ids)
+        if reads != t.reads:
+            concerns.append(
+                f"Ticket {t.id}: dropped reads {', '.join(p for p in t.reads if p not in reads)}, "
+                "which no ticket writes."
+            )
+        if deps != t.depends_on:
+            concerns.append(
+                f"Ticket {t.id}: dropped depends_on "
+                f"{', '.join(d for d in t.depends_on if d not in ids)}, which no ticket has."
+            )
+        out.append(
+            t.model_copy(update={"reads": reads, "depends_on": deps})
+            if (reads, deps) != (t.reads, t.depends_on)
+            else t
+        )
+    return out, concerns
+
+
+def _assign_shared_types(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    language: str,
+    types: Mapping[str, str] | None = None,
+) -> tuple[list[Ticket], list[str], dict[str, str]]:
+    """Give each data type several tickets' contracts name, but the contracts file
+    does not declare, one owner: the first such ticket none of the others precede.
+    It defines the type in its first source file (in its own file beside it where
+    the language wants one public type per file); the others depend on it and
+    import it from there. No repair call: a local re-plan for this cost ~30 min,
+    and the build's duplicate-type check still catches a second copy. Returns
+    (tickets, concerns, each owned type's home file).
+
+    ``types`` are the data types the design prose defines with their fields
+    (``spec_text.design_types``): a type found there carries its field list, and
+    the types those fields name, in every note, and a design type only one
+    ticket's contracts use gets its fields on that ticket. Without them the owner
+    invents the fields, and a type only the prose names goes unused."""
+    types = types or {}
+    users = _undeclared_type_users(tickets, interfaces, declared)
+    shared = {n: ids for n, ids in users.items() if len(ids) > 1}
+
+    def fields(name: str, define: bool) -> str:
+        extra = [
+            n
+            for n in with_referenced([name], types)
+            if n == name or (n not in shared and n not in declared)
+        ]
+        if not extra:
+            return ""
+        how = " (define the types they use beside it)" if define and len(extra) > 1 else ""
+        return f" Its fields, from the design{how}: " + "; ".join(types[n] for n in extra) + "."
+
+    suffixes = SOURCE_SUFFIXES.get(language, ())
+    by_id = {t.id: t for t in tickets}
+    deps = {t.id: t.depends_on for t in tickets}
+    notes: dict[str, list[str]] = {}
+    added: dict[str, list[str]] = {}
+    new_files: dict[str, list[str]] = {}
+    concerns: list[str] = []
+    owned: dict[str, str] = {}  # type name -> its home file
+    covered: set[str] = set()  # defined by a shared type's owner beside it
+    for name, ids in shared.items():
+        owner = next(
+            (
+                i
+                for i in ids
+                if not _ancestors(deps, i) & set(ids)
+                and any(is_app_source(f, suffixes) for f in by_id[i].files)
+            ),
+            None,
+        )
+        if owner is None:
+            continue
+        home = next(f for f in by_id[owner].files if is_app_source(f, suffixes))
+        if language in ONE_TYPE_PER_FILE:
+            home = str(PurePosixPath(home).with_name(name + PurePosixPath(home).suffix))
+            if home not in by_id[owner].files:
+                new_files.setdefault(owner, []).append(home)
+        owned[name] = home
+        covered.update(with_referenced([name], types))
+        others = [i for i in ids if i != owner]
+        notes.setdefault(owner, []).append(
+            f"Define the shared data type {name} in {home}; tickets "
+            f"{', '.join(others)} import it from there." + fields(name, define=True)
+        )
+        for i in others:
+            notes.setdefault(i, []).append(
+                f"Import the shared data type {name} from {home} (ticket {owner}); "
+                "never define your own copy." + fields(name, define=False)
+            )
+            if owner not in _ancestors(deps, i):
+                added.setdefault(i, []).append(owner)
+                deps[i] = (*deps[i], owner)
+        concerns.append(
+            f"Shared type {name}: owned by {owner} in {home}, imported by {', '.join(others)}."
+        )
+    for name, ids in users.items():
+        if len(ids) == 1 and name in types and name not in covered:
+            notes.setdefault(ids[0], []).append(
+                f"Define the data type {name}." + fields(name, define=True)
+            )
+            concerns.append(f"Type {name}: ticket {ids[0]} defines it with the design's fields.")
+    out = [
+        t.model_copy(
+            update={
+                "description": "\n".join(filter(None, (t.description, *notes[t.id]))),
+                "depends_on": (*t.depends_on, *added.get(t.id, ())),
+                "files": (*t.files, *new_files.get(t.id, ())),
+            }
+        )
+        if t.id in notes
+        else t
+        for t in tickets
+    ]
+    return out, concerns, owned
+
+
 def _features(tickets: Sequence[Ticket]) -> list[Ticket]:
     return [
         t for t in tickets if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
@@ -667,6 +1003,193 @@ def _wire_entrypoint(tickets: Sequence[Ticket]) -> tuple[list[Ticket], list[str]
         f"Ticket {entry.id}: added dependencies on feature ticket(s) {', '.join(added)} "
         "so the entrypoint wires every feature in."
     ]
+
+
+_ROUTE = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\s+(/[^\s,;`'\"()]*)")
+_PATH_PARAM = re.compile(r"\{[^}/]*\}|<[^>/]*>|\[[^\]/]*\]|:[\w]+")
+_TEMPLATE_SUFFIXES = frozenset(
+    {
+        ".html", ".htm", ".jinja", ".jinja2", ".j2", ".ejs", ".hbs", ".handlebars",
+        ".mustache", ".erb", ".njk", ".pug", ".twig", ".tmpl", ".gohtml", ".liquid",
+        ".cshtml", ".heex", ".eex",
+    }
+)  # fmt: skip
+_CLIENT_SUFFIXES = frozenset({".jsx", ".tsx", ".vue", ".svelte"})
+_CLIENT_DIRS = frozenset({"static", "public", "assets", "client", "frontend", "www"})
+_CLIENT_FRAMEWORK = re.compile(
+    r"(?i)\b(react|preact|vue|svelte|angular|solid|htmx|next(\.js)?|nuxt|ember|lit)\b"
+)
+FORM_METHODS_NOTE = "HTML forms send only GET and POST"
+
+
+def _has_ui(capabilities: Collection[str]) -> bool:
+    return any(c.strip().lower() in ("ui", "frontend", "web-ui") for c in capabilities)
+
+
+def _route_key(path: str) -> str:
+    return _PATH_PARAM.sub("*", path.lower()).rstrip("/") or "/"
+
+
+def _js_client(tickets: Sequence[Ticket], stack: StackDecision) -> bool:
+    """The plan ships browser code that can send PUT/PATCH/DELETE itself."""
+    if _CLIENT_FRAMEWORK.search(stack.framework):
+        return True
+    for t in tickets:
+        for f in t.files:
+            p = PurePosixPath(f)
+            if p.suffix in _CLIENT_SUFFIXES or (
+                p.suffix in {".js", ".mjs", ".ts"} and _CLIENT_DIRS.intersection(p.parts[:-1])
+            ):
+                return True
+    return False
+
+
+_Route = tuple[str, str]  # (method, _route_key(path))
+
+
+def _server_ui_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[dict[_Route, str], dict[_Route, str]] | None:
+    """For a server-rendered web UI (a 'ui' capability or template files, no JS
+    client): every route the stack interface and the http contracts declare, as
+    written, and the ticket owning each (its http contract's implementer). None
+    for any other stack."""
+    if stack is None or not _web_stack(stack):
+        return None
+    templated = any(PurePosixPath(f).suffix in _TEMPLATE_SUFFIXES for t in tickets for f in t.files)
+    if not (ui or templated) or _js_client(tickets, stack):
+        return None
+    owner_of: dict[_Route, str] = {}
+    routes: dict[_Route, str] = {}
+    implementers = {n: t.id for t in tickets for n in t.implements}
+    for text, owner in (
+        *((r, None) for r in stack.interface),
+        *(
+            (f"{c.name}\n{c.signature}", implementers.get(c.name))
+            for c in interfaces
+            if c.kind == "http"
+        ),
+    ):
+        for method, path in _ROUTE.findall(text):
+            key = (method, _route_key(path))
+            routes.setdefault(key, f"{method} {path}")
+            if owner is not None:
+                owner_of.setdefault(key, owner)
+    return routes, owner_of
+
+
+FORM_PAGES_NOTE = "Every form needs a page that renders it"
+# A POST whose last segment names one of these is a form's own page, never the
+# page of the collection above it.
+_FORM_VERBS = frozenset({"new", "edit", "create", "add"})
+# A POST that is a bare button (no fields to fill in) needs no page of its own.
+_BUTTON_ACTIONS = frozenset({"delete", "remove", "logout", "toggle"})
+
+
+def _form_page_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI whose POST form routes (POST /new, POST
+    /notes/{id}/edit) have no GET page rendering the form, or which has no GET /:
+    the user can submit a form no page shows, and the site's root is a 404. Note on
+    the ticket owning each such POST (its http contract's implementer, else the
+    entrypoint) that it also serves the GET page, and on the entrypoint that it
+    serves GET / (the home page or a redirect)."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None or not found[0]:
+        return list(tickets), []
+    routes, owner_of = found
+    gets = {p for m, p in routes if m == "GET"}
+
+    def has_page(path: str) -> bool:
+        parent, _, last = path.rpartition("/")
+        if path in gets or last in _FORM_VERBS:
+            return path in gets
+        return bool({f"{path}/new", f"{path}/edit", parent or "/"} & gets)
+
+    entry = next((t.id for t in _features(tickets) if t.entrypoint), None)
+    needed: dict[str, list[str]] = {}
+    for method, path in routes:
+        last = path.rpartition("/")[2]
+        if (
+            method == "POST"
+            and not path.startswith("/api/")
+            and last not in _BUTTON_ACTIONS
+            and not has_page(path)
+            and (owner := owner_of.get((method, path), entry)) is not None
+        ):
+            form = routes[(method, path)].split(" ", 1)[1]
+            needed.setdefault(owner, []).append(
+                f"GET {form} rendering the form that submits to POST {form}"
+            )
+    if "/" not in gets and entry is not None:
+        needed.setdefault(entry, []).append("GET / (the home page, or a redirect to it)")
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = needed.get(t.id)
+        if not mine or FORM_PAGES_NOTE in t.description:
+            out.append(t)
+            continue
+        note = f"{FORM_PAGES_NOTE} and a browser starts at /: also serve " + "; ".join(mine) + "."
+        out.append(t.model_copy(update={"description": f"{t.description}\n\n{note}".lstrip()}))
+        concerns.append(f"Ticket {t.id}: noted GET page routes: " + "; ".join(mine) + ".")
+    return out, concerns
+
+
+def _form_method_routes(
+    tickets: Sequence[Ticket],
+    stack: StackDecision | None,
+    interfaces: Sequence[InterfaceContract],
+    ui: bool,
+) -> tuple[list[Ticket], list[str]]:
+    """A server-rendered web UI (a 'ui' capability or template files, no JS client)
+    whose interface declares PUT/PATCH/DELETE routes with no POST beside them: its
+    browser edit and delete forms can only POST, so they got 405. Note on the ticket
+    owning each such route (its http contract's implementer, else the entrypoint)
+    that it also serves a POST route the forms submit to."""
+    found = _server_ui_routes(tickets, stack, interfaces, ui)
+    if found is None:
+        return list(tickets), []
+    routes, owner_of = found
+    posts = [p for m, p in routes if m == "POST"]
+    unformed = [
+        k
+        for k in routes
+        if k[0] in ("PUT", "PATCH", "DELETE")
+        and not any(p == k[1] or p.startswith(k[1].rstrip("/") + "/") for p in posts)
+    ]
+    entry = next((t.id for t in _features(tickets) if t.entrypoint), None)
+    by_owner: dict[str, list[str]] = {}
+    for k in unformed:
+        if (owner := owner_of.get(k, entry)) is not None:
+            by_owner.setdefault(owner, []).append(routes[k])
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        mine = by_owner.get(t.id)
+        if not mine or FORM_METHODS_NOTE in t.description:
+            out.append(t)
+            continue
+        aliases = ", ".join(
+            f"POST {r.split(' ', 1)[1].rstrip('/')}{'/delete' if r.startswith('DELETE') else ''}"
+            f" for {r}"
+            for r in mine
+        )
+        note = (
+            f"{FORM_METHODS_NOTE}: the pages' forms cannot call {', '.join(mine)}, so "
+            f"also serve each as a POST route running the same handler ({aliases}) and "
+            "point every edit and delete form at it; keep the declared routes."
+        )
+        out.append(t.model_copy(update={"description": f"{t.description}\n\n{note}".lstrip()}))
+        concerns.append(f"Ticket {t.id}: noted POST form routes for {', '.join(mine)}.")
+    return out, concerns
 
 
 def _drop_orphan_scenarios(
@@ -710,4 +1233,233 @@ def _fix_covers(
             )
         covers = _uniq(kept)
         out.append(c if covers == c.covers else c.model_copy(update={"covers": covers}))
+    return out, concerns
+
+
+# A misuse scenario's When/Then name bad input or access, and its Then refuses it.
+# Words a happy path uses too (empty, missing, unknown, limit, duplicate) are not
+# enough: flagging such a scenario would let it stand in for the Spec gate's abuse case.
+_MISUSE = re.compile(
+    r"\b(invalid|malformed|blank|negative|non-numeric|wrong type|"
+    r"reject(?:s|ed)?|refuse[sd]?|unauthori[sz]ed|unauthenticated|forbidden|denied|"
+    r"not allowed|too (?:long|large|big)|oversized|injection|traversal|4\d\d)\b",
+    re.I,
+)
+_REFUSED = re.compile(
+    r"\b(reject(?:s|ed|ion)?|refuse[sd]?|errors?|denied|forbidden|unauthori[sz]ed|"
+    r"not allowed|4\d\d)\b",
+    re.I,
+)
+
+
+def _is_misuse(c: AcceptanceCriterion) -> bool:
+    acts = " ".join((*c.when, *c.then))
+    outcome = " ".join(c.then)
+    if not acts:
+        acts = outcome = c.text
+    return bool(_MISUSE.search(acts) and _REFUSED.search(outcome))
+
+
+def _ensure_security_scenario(
+    tickets: Sequence[Ticket], criteria: Sequence[AcceptanceCriterion], seq: Seq
+) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
+    """The Spec gate requires a security/abuse criterion. When the plan flags none,
+    flag the first scenario that already exercises misuse (a high-risk one first);
+    with none, add a malformed-input scenario to the entrypoint ticket (else the
+    last feature ticket) and to a test ticket binding its scenarios. No repair
+    call: the plan's abuse clause asks for exactly this case."""
+    if not criteria or any(c.security_abuse for c in criteria):
+        return list(tickets), list(criteria), []
+    misuse = sorted(
+        (c for c in criteria if _is_misuse(c)),
+        key=lambda c: c.criticality is not Criticality.HIGH_RISK,
+    )
+    if misuse:
+        pick = misuse[0]
+        return (
+            list(tickets),
+            [c.model_copy(update={"security_abuse": True}) if c is pick else c for c in criteria],
+            [f"Scenario {pick.id} flagged security_abuse=true: none was, and it covers misuse."],
+        )
+    features = _features(tickets)
+    owner = next((t for t in features if t.entrypoint), features[-1] if features else None)
+    if owner is None:
+        return list(tickets), list(criteria), []
+    taken = {c.id for c in criteria}
+    cid = next(f"AC-ABUSE-{n}" for n in range(1, len(taken) + 2) if f"AC-ABUSE-{n}" not in taken)
+    given, when, then = (
+        ("the app is running",),
+        ("a request sends malformed input",),
+        ("the input is rejected with an error message", "the app keeps serving requests"),
+    )
+    added = AcceptanceCriterion(
+        id=cid,
+        text=render_scenario(given, when, then),
+        criticality=Criticality.HIGH_RISK,
+        oracle_hint=scenario_ref(owner.id, cid),
+        security_abuse=True,
+        given=given,
+        when=when,
+        then=then,
+        ticket_id=owner.id,
+        seq=seq._replace(local=len(criteria)),
+    )
+    own = set(owner.scenario_ids)
+    out = [
+        t.model_copy(update={"scenario_ids": (*t.scenario_ids, cid)})
+        if t.id == owner.id
+        or (t.specialty is Specialty.TEST and own and own <= set(t.scenario_ids))
+        else t
+        for t in tickets
+    ]
+    return (
+        out,
+        [*criteria, added],
+        [f"Added security scenario {cid} to ticket {owner.id}: no scenario covered misuse."],
+    )
+
+
+# "PR3: for any ..." / "- PR3 — ...": a contract property written into prose.
+_PROPERTY_MARK = re.compile(r"(?<![A-Za-z0-9])PR(\d+)\s*(?::|\u2014|\u2013|-)\s*")
+_PROPERTY_LABEL = re.compile(r"(?i)[\s*•-]*(?:contract\s+)?(?:propert(?:y|ies)\b[^:\n]*:)?\s*")
+
+
+def _described_properties(description: str) -> tuple[list[tuple[str, str]], str]:
+    """The ``PRn: text`` properties in ``description`` (each runs to the next one or
+    the end of its line) and the description with them taken out: a line left
+    holding only a bullet or a "Properties:" label is dropped."""
+    found: list[tuple[str, str]] = []
+    lines: list[str] = []
+    for line in description.splitlines():
+        marks = list(_PROPERTY_MARK.finditer(line))
+        if not marks:
+            lines.append(line)
+            continue
+        for m, nxt in zip(marks, [*marks[1:], None], strict=True):
+            text = line[m.end() : nxt.start() if nxt else len(line)].strip().rstrip(";,").strip()
+            if text:
+                found.append((f"PR{m.group(1)}", text))
+        head = line[: marks[0].start()]
+        if not _PROPERTY_LABEL.fullmatch(head):
+            lines.append(head.rstrip())
+    if found:  # a "Properties:" heading line over them goes with them
+        lines = [
+            ln for ln in lines if not ("propert" in ln.lower() and _PROPERTY_LABEL.fullmatch(ln))
+        ]
+    return found, "\n".join(lines).strip()
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def _lift_described_properties(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[list[Ticket], list[InterfaceContract], list[str]]:
+    """Contract properties the planner wrote into a ticket's description (the ticket
+    schema has no field for them) move onto a function/class contract the ticket
+    implements, else one a ticket it depends on implements (a paired test ticket):
+    the one the text names, else the first. Only a contract's properties reach the
+    packet rule and the Test gate. A property a contract already states is just
+    dropped from the prose; a taken id is renumbered past every id in the plan. No
+    repair call."""
+    by_name = {c.name: c for c in interfaces}
+    by_id = {t.id: t for t in tickets}
+
+    def code(names: Sequence[str]) -> list[InterfaceContract]:
+        return [
+            c
+            for n in names
+            if (c := by_name.get(n)) is not None
+            and c.kind in PROPERTY_KINDS
+            and not _declaration_only(c)
+        ]
+
+    carried = {_norm(p.partition(": ")[2]) for c in interfaces for p in c.properties}
+    taken = {p.partition(":")[0] for c in interfaces for p in c.properties}
+    added: dict[str, list[str]] = {}
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        found, rest = _described_properties(t.description)
+        owners = code(t.implements) or code(
+            [n for d in t.depends_on if d in by_id for n in by_id[d].implements]
+        )
+        if not found or not owners:
+            out.append(t)
+            continue
+        for pid, text in found:
+            if _norm(text) in carried:
+                continue
+            named = [
+                c for c in owners if re.search(rf"\b{re.escape(c.name.rsplit('.', 1)[-1])}\b", text)
+            ]
+            owner = (named or owners)[0]
+            if pid in taken:
+                pid = next(f"PR{n}" for n in range(1, len(taken) + 2) if f"PR{n}" not in taken)
+            taken.add(pid)
+            carried.add(_norm(text))
+            added.setdefault(owner.name, []).append(f"{pid}: {text}")
+            concerns.append(
+                f"Ticket {t.id}: property {pid} moved from its description onto "
+                f"contract {owner.name}."
+            )
+        out.append(t.model_copy(update={"description": rest}))
+    if not added:
+        return list(tickets), list(interfaces), []
+    lifted = [
+        c.model_copy(update={"properties": (*c.properties, *added[c.name])})
+        if c.name in added
+        else c
+        for c in interfaces
+    ]
+    return out, lifted, concerns
+
+
+# "for any <string> ... does not contain <it> as a substring": false for a one-char
+# input in any hex / base64 / alphanumeric output, and it once drove a custom hash
+# that leaks which characters a password lacks. Narrow on purpose (a dropped
+# property costs coverage): a universal, a negated containment, and "substring" or
+# "plaintext" naming string containment, with no length floor in the domain.
+_UNIVERSAL = re.compile(r"(?i)\bfor (?:any|all|every|each)\b")
+_NOT_CONTAINS = re.compile(
+    r"(?i)\b(?:does not|doesn't|do not|don't|never|not|cannot|can't|must not)\s+"
+    r"(?:contains?|includes?|appears?|occurs?)\b"
+)
+_STRING_CONTAINMENT = re.compile(r"(?i)\bsub-?strings?\b|\bplain-?text\b")
+_LENGTH_FLOOR = re.compile(
+    r"(?i)\blength\b|\blen\s*\(|\bat least\s+\d|>=\s*\d|≥\s*\d|\blonger than\b"
+    r"|\bmore than\s+\d|\bminimum\b|\b\d+\s+(?:or more\s+)?(?:char|byte)"
+)
+
+
+def unsatisfiable_property(text: str) -> bool:
+    """``text`` is a universal string-containment negation over a domain with no
+    length floor: one a single-character input falsifies."""
+    return bool(
+        _UNIVERSAL.search(text)
+        and _NOT_CONTAINS.search(text)
+        and _STRING_CONTAINMENT.search(text)
+        and not _LENGTH_FLOOR.search(text)
+    )
+
+
+def _drop_unsatisfiable_properties(
+    interfaces: Sequence[InterfaceContract],
+) -> tuple[list[InterfaceContract], list[str]]:
+    """``interfaces`` without a property :func:`unsatisfiable_property` flags: its
+    test could only pass by coding around the invariant. No repair call."""
+    out: list[InterfaceContract] = []
+    concerns: list[str] = []
+    for c in interfaces:
+        bad = [p for p in c.properties if unsatisfiable_property(p.partition(": ")[2])]
+        if bad:
+            c = c.model_copy(update={"properties": tuple(p for p in c.properties if p not in bad)})
+        out.append(c)
+        concerns += [
+            f"Contract {c.name}: property {p.partition(':')[0]} dropped as unsatisfiable: "
+            "a one-character input breaks a 'does not contain ... as a substring' "
+            "universal with no length floor."
+            for p in bad
+        ]
     return out, concerns

@@ -480,7 +480,7 @@ def test_the_prompts_size_tickets_and_name_them_for_their_domain() -> None:
     assert "{MAX_TICKETS}" not in SOP
     assert "Never split off work that only one other ticket uses" in SOP
     assert "never after a ticket number (T3, T3.feature, test_T2.py)" in SOP
-    assert "name each ticket after its domain (catalog, cart-api; never T01)" in EPIC_SOP
+    assert "name each ticket after its domain (scheduler, reports-api; never T01)" in EPIC_SOP
     assert "number tickets T01" not in EPIC_SOP
 
 

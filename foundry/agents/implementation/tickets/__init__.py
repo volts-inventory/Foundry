@@ -32,6 +32,7 @@ exits and the supervisor raises it, after this wave's writes are committed.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -54,6 +55,7 @@ from foundry.agents.implementation.tickets.adapter import (
     EmptyTicketError,
     _require_scope_written,
     _ScopedAdapter,
+    best_attempt,
 )
 from foundry.agents.implementation.tickets.constants import (
     _CRITERION_KIND,
@@ -62,6 +64,7 @@ from foundry.agents.implementation.tickets.constants import (
     _FEATURE_DIFF_KIND,
     _LOCAL_TURN_BUDGET,
     CAP_TRIAGE,
+    CARRY_SCORE_TRIAGE,
     CARRY_TRIAGE,
     CONTRACT_DUP_TRIAGE,
     CONTRACT_KIND,
@@ -81,6 +84,7 @@ from foundry.agents.implementation.tickets.contracts import (
     _flag_contract_duplicates,
     contract_duplicates,
     contract_members,
+    dependency_symbols,
 )
 from foundry.agents.implementation.tickets.escalation import (
     _escalated_packet,
@@ -105,7 +109,10 @@ from foundry.agents.implementation.tickets.packet import (
     _ticket_packet,
     _ticket_scenarios,
     bdd_scaffold_spans,
+    live_contracts,
+    ticket_properties,
     ticket_signature_map,
+    upstream_defect_context,
 )
 from foundry.agents.implementation.tickets.restart import (
     _land_reset,
@@ -187,11 +194,11 @@ from foundry.execution.work_pool import (
 )
 from foundry.fs import apply_overlay
 from foundry.proxy.token_meter import RunCapExceeded
-from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.base import Artifact, BudgetLedger
 from foundry.schemas.gates import GateTriage
 from foundry.schemas.implementation import (
     CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
     SKELETON_TASK_ID,
     FeatureDiff,
     Task,
@@ -254,6 +261,7 @@ __all__ = [
     "trim_to_write_scope",
     "unbuilt_task_ids",
     "unwritten_ticket_files",
+    "upstream_defect_context",
     "verify_commands",
     "verify_rules",
 ]
@@ -343,7 +351,26 @@ def make_engineering_node(
             for rel in reset[1]:
                 overlay.pop(rel, None)
         criteria = _newest_by(state, resolve, _CRITERION_KIND, AcceptanceCriterion, "id")
-        contracts = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+        carry_scores = _ticket_notes(state, CARRY_SCORE_TRIAGE)
+
+        def _best_carry(
+            tid: str, attempts: Sequence[tuple[int | None, dict[str, str]]]
+        ) -> tuple[int | None, str] | None:
+            """(failing lines, snapshot blob) of ``tid``'s best carryable attempt: the
+            best one carried before (while ``tid`` is unbuilt: a built ticket's old
+            attempts are not its work any more), then this pass's, oldest first."""
+            from foundry.graph.gate_wiring import snapshot_blob
+
+            assert rt.cas is not None
+            ranked: list[tuple[int | None, str]] = []
+            if tid not in done and (notes := carry_scores.get(tid)):
+                raw, _, uri = max(notes, key=lambda n: n.seq).explanation.partition(" ")
+                if uri:
+                    ranked.append((int(raw) if raw.isdigit() else None, uri))
+            ranked += [(s, rt.cas.put_blob(snapshot_blob(f))) for s, f in attempts]
+            return best_attempt(ranked)
+
+        contracts = live_contracts(state, resolve)
         prior = _prior_failures(state)
         failures = _ticket_notes(state, FAIL_TRIAGE)
         rejections = signature_rejections(state)
@@ -557,7 +584,7 @@ def make_engineering_node(
             required = {
                 n: m
                 for n in t.implements
-                if (c := contracts.get(n)) is not None and (m := contract_members(c.signature))
+                if (ic := contracts.get(n)) is not None and (m := contract_members(ic.signature))
             }
             if required:
                 tid = task_id_for_ticket(t.id)
@@ -610,6 +637,11 @@ def make_engineering_node(
             checks,
             shared,
             carried,
+            {
+                task_id_for_ticket(t.id): dependency_symbols(t, tickets, contracts)
+                for t in wave
+                if t.entrypoint
+            },
         )
         adapter_name = _adapter_name(rt)
         submitted: dict[str, str] = {}
@@ -642,7 +674,7 @@ def make_engineering_node(
         ):
             for ticket in _round_robin(wave):
                 tid = task_id_for_ticket(ticket.id)
-                spans, features = _ticket_context(rt, ticket, criteria, contracts)
+                spans, features = _ticket_context(rt, ticket, criteria, contracts, tickets)
                 owned = _ticket_scenarios(ticket, criteria)
                 sigmap = ticket_signature_map(ticket, tickets, overlay, contract_files)
                 spans = (
@@ -691,11 +723,24 @@ def make_engineering_node(
                     stack=state.get("stack"),
                     contract_files=contract_files,
                     scenarios=owned,
+                    properties=ticket_properties(ticket, tickets, contracts),
+                    tickets=tickets,
                 )
                 if base is not None:
-                    checks[tid] = _ticket_check(
+                    spec = _ticket_check(
                         base, state, resolve, tasks[tid], ticket, criteria, contract_files, owned
                     )
+                    if (
+                        ticket.id in (CONTRACTS_TICKET_ID, HARNESS_TICKET_ID)
+                        and not state.get("base_dir")
+                        and not (own or requested or restarts or tid in carried or tid in already)
+                    ):
+                        # Only a generated ticket's first build, whose files the planner
+                        # pre-wrote, is done when green there with its files built. A
+                        # planned ticket green on a file an earlier wave (or a change
+                        # build's base) built still has its own change to make.
+                        spec = dataclasses.replace(spec, skip_green=True)
+                    checks[tid] = spec
                 if extra := stub_rules(ticket, skeleton, contracts):
                     packet = packet.model_copy(
                         update={"task": {**packet.task, "rules": [*packet.task["rules"], *extra]}}
@@ -950,22 +995,26 @@ def make_engineering_node(
                                 f"{tid} failed {attempt} attempts; last error: {exc}",
                             )
                         )
-                    if (
-                        (wrote := scoped.carry.get(tid))
-                        and (attempt < MAX_TICKET_ATTEMPTS or split)
-                        and rt.cas is not None
-                    ):
-                        from foundry.graph.gate_wiring import snapshot_blob
-
-                        merged["gate_triage"].append(
-                            GateTriage(
-                                name=CARRY_TRIAGE,
-                                run_against=f"task/{tid}",
-                                explanation=rt.cas.put_blob(snapshot_blob(wrote)),
-                                produced_by=NODE_ID,
-                                seq=rt.seq(config, NODE_ID, f"{CARRY_TRIAGE}:{tid}"),
-                            )
-                        )
+                    if (attempt < MAX_TICKET_ATTEMPTS or split) and rt.cas is not None:
+                        best = _best_carry(tid, scoped.attempts.get(tid, ()))
+                        if best is not None:
+                            score, uri = best
+                            merged["gate_triage"] += [
+                                GateTriage(
+                                    name=CARRY_TRIAGE,
+                                    run_against=f"task/{tid}",
+                                    explanation=uri,
+                                    produced_by=NODE_ID,
+                                    seq=rt.seq(config, NODE_ID, f"{CARRY_TRIAGE}:{tid}"),
+                                ),
+                                GateTriage(
+                                    name=CARRY_SCORE_TRIAGE,
+                                    run_against=f"task/{tid}",
+                                    explanation=f"{'-' if score is None else score} {uri}",
+                                    produced_by=NODE_ID,
+                                    seq=rt.seq(config, NODE_ID, f"{CARRY_SCORE_TRIAGE}:{tid}"),
+                                ),
+                            ]
                     continue
                 built.append(ticket)
                 for channel, records in out.items():

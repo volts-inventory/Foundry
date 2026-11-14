@@ -27,15 +27,21 @@ SPEC_BOUNDARY = "spec"
 BUILD_TEST_BOUNDARY = "build_test"
 # The per-wave integration check (§2b): the build verdict alone.
 BUILD_BOUNDARY = "build"
-# The final boundary: build, test and smoke (a stack without a run command gets
-# an attested "not pinned" smoke PASS), so a missing/FAILed smoke never advances.
+# The last wave's check: the whole app is built, so it is also launched.
+BUILD_LAUNCH_BOUNDARY = "build_launch"
+BUILD_TEST_LAUNCH_BOUNDARY = "build_test_launch"
+# The final boundary: build, test, smoke and launch (a stack without a run command
+# gets an attested "not pinned" smoke PASS, a library a "not pinned" launch PASS),
+# so a missing/FAILed smoke or launch never advances.
 BUILD_TEST_SMOKE_BOUNDARY = "build_test_smoke"
 
 _BOUNDARY_GATES: dict[str, frozenset[str]] = {
     SPEC_BOUNDARY: frozenset({"spec"}),
     BUILD_BOUNDARY: frozenset({"build"}),
     BUILD_TEST_BOUNDARY: frozenset({"build", "test"}),
-    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke"}),
+    BUILD_LAUNCH_BOUNDARY: frozenset({"build", "launch"}),
+    BUILD_TEST_LAUNCH_BOUNDARY: frozenset({"build", "test", "launch"}),
+    BUILD_TEST_SMOKE_BOUNDARY: frozenset({"build", "test", "smoke", "launch"}),
 }
 
 # Routing outcomes.
@@ -217,11 +223,14 @@ _FAILED_TEST = re.compile(r"^(?:FAILED|ERROR) (\S+::\S+)")
 # a SyntaxError): it names the module only, and hides every test in it.
 _COLLECTION_ERROR = re.compile(r"^ERROR ([^\s:]+\.py)(?: - |$)")
 _BDD_SCENARIO = re.compile(r"^BDD criterion \S+: scenario (\S+)")
+# foundry.gates.properties' findings for a contract property the tests do not prove.
+_PROPERTY = re.compile(r"^property (\S+) (?:missing|not covered|not run|failing)\b")
 
 
 def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
-    """The failing pytest node ids, the test modules that failed to collect, and the
-    BDD scenario refs a gate's findings name."""
+    """The failing pytest node ids, the test modules that failed to collect, the
+    BDD scenario refs and the contract properties (``property:<id>``) a gate's
+    findings name."""
     out: list[str] = []
     for line in findings:
         m = (
@@ -229,8 +238,11 @@ def failing_ids(findings: Iterable[str]) -> tuple[str, ...]:
             or _FAILED_TEST.match(line.strip())
             or _COLLECTION_ERROR.match(line.strip())
         )
-        if m is not None and m.group(1) not in out:
-            out.append(m.group(1))
+        ident = m.group(1) if m is not None else None
+        if ident is None and (p := _PROPERTY.match(line)) is not None:
+            ident = f"property:{p.group(1)}"
+        if ident is not None and ident not in out:
+            out.append(ident)
     return tuple(out)
 
 

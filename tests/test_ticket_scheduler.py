@@ -598,7 +598,7 @@ def test_a_retried_ticket_is_told_why_its_last_attempt_failed(tmp_path: Path) ->
     [
         (Difficulty.TRIVIAL, ["low", "medium"]),
         (Difficulty.STANDARD, ["medium", "xhigh"]),
-        (Difficulty.COMPLEX, ["xhigh", "xhigh"]),
+        (Difficulty.COMPLEX, ["medium", "xhigh"]),
     ],
 )
 def test_a_tickets_thinking_level_follows_its_difficulty_and_a_retry_steps_it_up(

@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import builtins
+import collections.abc
 import re
-from collections.abc import Collection, Sequence
+import textwrap
+import typing
+from collections.abc import Collection, Mapping, Sequence
+from pathlib import PurePosixPath
 from typing import Any
 
-from foundry.agents.plan_contracts import CompileResult, check_contracts
+from foundry.agents.plan_contracts import (
+    CompileResult,
+    check_contracts,
+    top_symbols,
+)
 from foundry.agents.planner.readers import _str, _strs
 from foundry.agents.planner.schema import _GENERATED_TICKETS, CODE_CONTRACT_KINDS
 from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.agents.planner.spec_text import with_referenced
 from foundry.base_tree import BaseView
 from foundry.schemas.architecture import InterfaceContract
 from foundry.schemas.implementation import BDD_REPORT_ENV, Specialty, StackDecision, Ticket
@@ -26,9 +35,10 @@ _MEMBER_CALL = re.compile(
 
 
 def _declaration_only(contract: InterfaceContract) -> bool:
-    """A contract the generated contracts ticket writes in full: a type, or a class
-    with no methods (an error hierarchy, a plain record). One with methods still
-    needs a ticket to implement its behaviour."""
+    """A contract the generated contracts ticket writes in full, as shipping code: a
+    type, or a class with no methods besides ``__init__`` (an error, a plain record).
+    A function, or a class with methods, is defined by the one ticket implementing
+    it, at its own path: the contracts file never holds a stub of it."""
     if contract.kind == "type":
         return True
     return contract.kind == "class" and not _MEMBER_CALL.search(contract.signature)
@@ -74,7 +84,11 @@ def _contract_findings(
             if not ids and name in declared:
                 continue
             if not ids:
-                out.append(f"Ticket {t.id} consumes contract {name}, but no ticket implements it.")
+                out.append(
+                    f"Ticket {t.id} consumes contract {name}, but no ticket implements it "
+                    "(the contracts file holds only data types and errors: name the one "
+                    "ticket that defines it in its own files)."
+                )
             elif len(ids) == 1 and ids[0] not in ancestors(t.id):
                 out.append(
                     f"Ticket {t.id} consumes contract {name} but does not depend on "
@@ -228,8 +242,7 @@ def _wiring_findings(
             out.append(
                 f"Contract {name} (entrypoint ticket {t.id}) composes {', '.join(deps)} "
                 "but declares no way to receive them: give its signature an __init__ "
-                "taking them, or add a factory function to the contract that takes "
-                f"them and returns a {name}."
+                "taking them."
             )
     return tuple(out)
 
@@ -388,6 +401,105 @@ def _coverage_findings(
     return tuple(out)
 
 
+# "X or Y" naming alternatives; "one or more", "and/or" and "more or less" do not.
+_BRANCHING_OR = re.compile(
+    r"(?<!and/)(?<!more )\bor\b(?!\s+(?:more|less|fewer|greater|so|later|equal)\b)", re.I
+)
+
+
+def _branch_findings(
+    criteria: Sequence[AcceptanceCriterion], brief: IntentBrief | None
+) -> tuple[str, ...]:
+    """A must-have or success criterion naming alternatives ("by date or author") that
+    a single scenario covers: the other branch is never executed."""
+    goals = _goal_rows(brief)
+    known = {g.lower(): g for _, g, _ in goals}
+    covering: dict[str, list[str]] = {}
+    for c in criteria:
+        for raw in c.covers:
+            if (gid := _goal_of(raw, known)) is not None:
+                covering.setdefault(gid, []).append(c.id)
+    return tuple(
+        f'{kind} {gid} ({text[:80]!r}) names alternatives ("or") but only scenario '
+        f"{covering[gid][0]} covers it: add one scenario per branch, each citing {gid}."
+        for kind, gid, text in goals
+        if _BRANCHING_OR.search(text) and len(covering.get(gid, ())) == 1
+    )
+
+
+_ROLE_WORDS = re.compile(r"\b(admins?|administrators?|roles?|moderators?|superusers?)\b", re.I)
+_ROLE_OWNER = re.compile(r"\b(roles?|admins?|administrators?|seed(?:s|ed|ing)?)\b", re.I)
+
+
+def _role_findings(tickets: Sequence[Ticket], brief: IntentBrief | None) -> tuple[str, ...]:
+    """A request with roles needs ONE ticket owning the roles, the admin account and
+    the seed data: left to every feature, each invents its own, or none does."""
+    if brief is None:
+        return ()
+    goals = " ".join((brief.intent, *brief.must_haves, *brief.success_criteria))
+    if not _ROLE_WORDS.search(goals):
+        return ()
+    if any(
+        _ROLE_OWNER.search(" ".join((t.id, t.title, t.description)))
+        for t in tickets
+        if t.id not in _GENERATED_TICKETS and t.specialty is not Specialty.TEST
+    ):
+        return ()
+    return (
+        "The request has user roles but no ticket owns the roles, the admin account and "
+        "the seed data: give exactly one ticket that work and say so in its description.",
+    )
+
+
+def _entrypoint_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """An entrypoint ticket whose contract signatures declare a function or class a
+    dependency's contract declares: it must import and wire those, never
+    re-implement them (a second copy of the routes ships as dead code). A shared
+    file is no finding: overlapping scopes run in separate waves (a split ticket's
+    children share their parent's files); the post-build check reads the code."""
+    by_name = {i.name: i for i in interfaces}
+    by_id = {t.id: t for t in tickets}
+    deps = {t.id: t.depends_on for t in tickets}
+
+    def ancestors(tid: str) -> set[str]:
+        seen: set[str] = set()
+        todo = list(deps.get(tid, ()))
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo.extend(deps.get(d, ()))
+        return seen
+
+    def declared(t: Ticket) -> set[str]:
+        return {
+            n
+            for name in t.implements
+            if (i := by_name.get(name)) is not None and i.kind in CODE_CONTRACT_KINDS
+            for n in top_symbols(textwrap.dedent(i.signature))
+        }
+
+    out: list[str] = []
+    for e in tickets:
+        if not e.entrypoint or e.id in _GENERATED_TICKETS:
+            continue
+        mine = declared(e)
+        for did in sorted(ancestors(e.id) - _GENERATED_TICKETS):
+            d = by_id.get(did)
+            if d is None:
+                continue
+            if twice := sorted(mine & declared(d)):
+                out.append(
+                    f"Entrypoint ticket {e.id} redefines what ticket {did} owns ("
+                    + ", ".join(twice)
+                    + f"): import and wire {did}'s modules instead of re-implementing "
+                    "them, and drop them from the entrypoint's contracts."
+                )
+    return tuple(out)
+
+
 _INSTALL_ASSERTION = re.compile(
     r"\b(pip3?\s+install|npm\s+(install|ci)|yarn\s+install|pnpm\s+install|"
     r"uv\s+(pip\s+install|sync)|poetry\s+install|cargo\s+fetch|go\s+mod\s+download)\b"
@@ -407,6 +519,42 @@ def _offline_scenario_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple
         for c in criteria
         if any(_INSTALL_ASSERTION.search(s) for s in (*c.when, *c.then))
     )
+
+
+_BARE_KEY = re.compile(r"^[\"']?[A-Za-z_][\w-]*[\"']?\s*:$")
+# "placeholder" in an identifier or as the step's last word; an HTML input's
+# placeholder text ("the box shows the placeholder 'Search'") is a real step.
+_PLACEHOLDER = re.compile(r"(?i)[a-z0-9]_placeholder|placeholder_[a-z0-9]|\bplaceholder\W*$")
+
+
+def _garbled(step: str) -> bool:
+    s = step.strip()
+    return (
+        s.endswith((",", "[", "{"))
+        or s.count("[") != s.count("]")
+        or s.count("{") != s.count("}")
+        or bool(_BARE_KEY.match(s))
+        or bool(_PLACEHOLDER.search(s))
+    )
+
+
+def _garbled_step_findings(criteria: Sequence[AcceptanceCriterion]) -> tuple[str, ...]:
+    """A step that is a fragment of the reply's JSON (ends in a comma or an open
+    bracket, unbalanced brackets, a bare ``key:``) or names a placeholder: a local
+    planner once emitted ``...'Hello world'],`` then
+    ``criticaality_placeholder_ignore_me_note_2:`` as steps, and both shipped to the
+    feature file."""
+    out: list[str] = []
+    for c in criteria:
+        bad = [s for s in (*c.given, *c.when, *c.then) if _garbled(s)]
+        if bad:
+            out.append(
+                f"Scenario {c.id} has step text that is not a step: "
+                + "; ".join(repr(s) for s in bad)
+                + ". Write each step as one plain phrase: no JSON punctuation, keys or "
+                "placeholders."
+            )
+    return tuple(out)
 
 
 def _size_findings(
@@ -473,6 +621,91 @@ def _run_findings(stack: StackDecision) -> tuple[str, ...]:
     )
 
 
+def _web_stack(stack: StackDecision | None) -> bool:
+    return stack is not None and (
+        stack.kind == "http" or bool(_WEB_FRAMEWORK.search(stack.framework))
+    )
+
+
+# ONE database connection, not a pool, engine or factory: sqlite3.Connection,
+# psycopg.Connection, java.sql.Connection, rusqlite::Connection, Go's *sql.Conn.
+_DB_CONN = r"(?:&\s*(?:mut\s+)?|\*)?(?:\w+(?:\.|::))*(?:Connection|Conn)"
+_ANNOTATED_CONN = re.compile(
+    rf"^(?:(?:private|public|protected|readonly)\s+)*[\w$]+\??\s*:\s*(?:Optional\[\s*{_DB_CONN}\s*\]|{_DB_CONN})"
+    r"\s*(?:\|\s*None\s*)?(?:=.*)?,?$"
+)
+# `Connection conn` (Java, C#) or `conn *sql.Conn` (Go).
+_TYPED_CONN = re.compile(rf"^(?:final\s+)?{_DB_CONN}\s+\w+$|^\w+\s+{_DB_CONN}$")
+_CTOR = re.compile(r"\b(?:__init__|constructor|fn\s+new|new)\s*\(")
+_APP_FACTORY = re.compile(r"(?i)^(?:create|make|build|new)_?app$|^app_?factory$")
+_FUNC_NAME = re.compile(r"\b(?:def|function|fn|func)\s+(\w+)\s*\(")
+_FIELD = re.compile(r"^\s+([\w$]+\??\s*:[^(\n]*)$", re.MULTILINE)
+_MODULE_VAR = re.compile(r"^(?:export\s+)?(?:(?:const|let|var|static)\s+)?([\w$]+\s*:[^(\n]*)$")
+
+
+def _is_conn(param: str) -> bool:
+    p = " ".join(param.split())
+    return bool(_ANNOTATED_CONN.match(p) or _TYPED_CONN.match(p))
+
+
+def _param_lists(signature: str, opener: re.Pattern[str]) -> list[list[str]]:
+    """The parameters of each call ``opener`` matches (up to its open paren)."""
+    out: list[list[str]] = []
+    for m in opener.finditer(signature):
+        depth = 0
+        for i in range(m.end(), len(signature)):
+            ch = signature[i]
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>" and depth:
+                depth -= 1
+            elif ch == ")":
+                out.append([p for p in _split_top(signature[m.end() : i]) if p.strip()])
+                break
+    return out
+
+
+def _held_connection_findings(
+    stack: StackDecision | None,
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+) -> tuple[str, ...]:
+    """A web app's contract that keeps ONE database connection for the app's life: a
+    class or record constructed with (or holding) one, the app factory or an
+    entrypoint function taking one, or a module-level one. Concurrent requests then
+    share its one transaction (3 of 30 parallel POSTs failed: InterfaceError, 'no
+    transaction active'). A function taking the connection per call is fine, as is
+    a factory, pool, engine or database path: only a bare connection type counts."""
+    if not _web_stack(stack):
+        return ()
+    entry = {n for t in tickets if t.entrypoint for n in t.implements}
+    out: list[str] = []
+    for c in interfaces:
+        if c.kind not in CODE_CONTRACT_KINDS:
+            continue
+        sig = textwrap.dedent(c.signature)
+        # A Java/C# constructor is named after its class.
+        cls = re.escape(c.name.rpartition(".")[2])
+        ctor = re.compile(rf"{_CTOR.pattern}|\b{cls}\s*\(") if c.kind == "class" else _CTOR
+        candidates = [p for ps in _param_lists(sig, ctor) for p in ps]
+        candidates += [m.group(1) for ln in sig.splitlines() if (m := _MODULE_VAR.match(ln))]
+        if c.kind in ("class", "type"):
+            candidates += _FIELD.findall(sig)
+        names = {c.name, *_FUNC_NAME.findall(sig)}
+        if c.kind == "function" and (c.name in entry or any(map(_APP_FACTORY.match, names))):
+            candidates += _params(sig)
+        if held := [h for h in candidates if _is_conn(h)]:
+            shown = ", ".join(sorted({" ".join(h.split()).rstrip(",") for h in held}))
+            out.append(
+                f"Contract {c.name} holds one database connection for the web app's "
+                f"lifetime (`{shown}`): concurrent requests then share its one "
+                "transaction and fail. Take a connection per call, or a connection "
+                "factory or database path, and open one connection per request (closed "
+                "at request teardown) or per thread."
+            )
+    return tuple(out)
+
+
 _BDD_REPORT_SINGLE_QUOTED = re.compile(
     r"(?<![^\s=:])'([^'\"]*\$\{?" + BDD_REPORT_ENV + r"\}?[^'\"]*)'"
 )
@@ -517,6 +750,180 @@ def _stack_command_findings(stack: StackDecision | None) -> tuple[str, ...]:
     return (*_run_findings(stack), *_bdd_findings(stack))
 
 
+# Capitalised names a signature uses that no plan declares: builtins, the standard
+# library and the usual framework types, across the languages. A name missing here
+# that two tickets both use FAILs the plan, so the list leans long.
+_KNOWN_TYPES = frozenset(
+    {
+        *(n for n in dir(builtins) if n[:1].isupper()),
+        *(n for n in dir(typing) if n[:1].isupper()),
+        *(n for n in dir(collections.abc) if n[:1].isupper()),
+        # Python stdlib and frameworks
+        "Random", "Path", "PurePath", "PurePosixPath", "Decimal", "Fraction", "UUID",
+        "Enum", "IntEnum", "StrEnum", "Flag", "IntFlag", "ABC", "ABCMeta", "TextIO",
+        "BinaryIO", "IO", "StringIO", "BytesIO", "Logger", "Thread", "Lock", "RLock",
+        "Queue", "Counter", "OrderedDict", "ChainMap", "Namespace",
+        "ArgumentParser", "Connection", "Cursor", "Engine", "Session",
+        "BaseModel", "Field", "FastAPI", "APIRouter", "Depends", "HTTPException",
+        "Request", "Response", "JSONResponse", "HTMLResponse", "Flask", "Blueprint",
+        "BaseHTTPRequestHandler", "HTTPServer", "ThreadingHTTPServer", "Template",
+        "Jinja2Templates", "TestClient", "Mock", "MagicMock", "Pattern", "Match",
+        "Executor", "Future", "Popen", "CompletedProcess", "Dialect",
+        "ElementTree", "Cookie", "SimpleCookie", "Headers",
+        # TypeScript / JavaScript globals and frameworks
+        "Promise", "Array", "ReadonlyArray", "Record", "Partial", "Required", "Readonly",
+        "Pick", "Omit", "Exclude", "Extract", "NonNullable", "ReturnType", "Parameters",
+        "InstanceType", "Awaited", "Map", "Set", "WeakMap", "WeakSet", "Date", "Error",
+        "TypeError", "RangeError", "SyntaxError", "RegExp", "Function", "Object",
+        "String", "Number", "Boolean", "Symbol", "BigInt", "JSON", "Math", "Uint8Array",
+        "ArrayBuffer", "Buffer", "Blob", "File", "FormData", "URL", "URLSearchParams",
+        "AbortSignal", "AbortController", "EventEmitter", "ReadableStream", "Readable",
+        "Writable", "Express", "Router", "NextFunction", "RequestHandler", "Application",
+        "Server", "IncomingMessage", "ServerResponse", "Database", "Statement",
+        "HTMLElement", "HTMLInputElement", "Document", "Window",
+        "AsyncIterable", "AsyncIterableIterator", "AsyncGenerator", "Generator",
+        "PropertyKey", "Console", "Storage", "Body",
+        # Java / Kotlin / C# / Rust
+        "Integer", "Long", "Double", "Float", "Short", "Byte", "Character", "Void",
+        "List", "ArrayList", "LinkedList", "HashMap", "TreeMap", "HashSet", "TreeSet",
+        "Optional", "Stream", "Collection", "Iterable", "Iterator", "Comparable",
+        "Exception", "RuntimeException", "IllegalArgumentException", "Throwable",
+        "Vec", "Box", "Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock", "Option",
+        "Result", "Ok", "Err", "Some", "None", "Self", "BTreeMap", "Cow",
+        "Duration", "Instant", "SystemTime", "PathBuf", "Display", "Debug", "Clone",
+        "Default", "Serialize", "Deserialize", "Send", "Sync", "Sized", "Into", "From",
+        "IEnumerable", "IList", "Dictionary", "Guid", "DateTime", "TimeSpan", "Int32",
+        "Int64", "Unit", "Any", "Nothing", "MutableList", "MutableMap", "Sequence",
+    }
+)  # fmt: skip
+_TYPE_NAME = re.compile(r"(?<![\w.$])([A-Z][A-Za-z0-9_]*)\b(?!\s*\.)")
+_STRING = re.compile(r"\"\"\".*?\"\"\"|'''.*?'''|\"[^\"\n]*\"|'[^'\n]*'|`[^`]*`", re.DOTALL)
+_COMMENT = re.compile(r"#[^\n]*|//[^\n]*|/\*.*?\*/", re.DOTALL)
+_LITERAL = re.compile(r"\bLiteral\[[^\]]*\]")
+_FORWARD_REF = re.compile(r"""^["']([A-Za-z_]\w*)["']$""")
+_IMPORTED = re.compile(
+    r"^\s*(?:from\s+\S+\s+import\s+\(?([^)\n]+)|import\s+(?:type\s+)?\{([^}]+)\})",
+    re.MULTILINE,
+)
+_PY_ALIAS = re.compile(r"^([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=", re.MULTILINE)
+
+
+def _type_names(signature: str) -> set[str]:
+    """The capitalised, non-builtin type names ``signature`` uses: never its strings
+    (bar a quoted forward reference), comments, ``Literal`` values, an attribute or
+    module-qualified head, an ALL-CAPS constant or a one-letter type parameter."""
+    imported = {
+        n.split(" as ")[-1].strip()
+        for m in _IMPORTED.finditer(signature)
+        for n in (m.group(1) or m.group(2)).split(",")
+    }
+    text = _COMMENT.sub(" ", _LITERAL.sub(" ", signature))
+    text = _STRING.sub(
+        lambda m: f" {ref.group(1)} " if (ref := _FORWARD_REF.match(m.group())) else " ", text
+    )
+    return {
+        n
+        for n in _TYPE_NAME.findall(text)
+        if len(n) > 1 and not n.isupper() and n not in _KNOWN_TYPES and n not in imported
+    }
+
+
+def _defined_names(signature: str) -> set[str]:
+    return top_symbols(signature) | set(_PY_ALIAS.findall(signature))
+
+
+def _shared_type_users(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+) -> dict[str, list[str]]:
+    return {
+        name: ids
+        for name, ids in _undeclared_type_users(tickets, interfaces, declared).items()
+        if len(ids) > 1
+    }
+
+
+def _undeclared_type_users(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+) -> dict[str, list[str]]:
+    """A data type tickets' contracts name that the contracts file does not
+    declare -> those tickets, in plan order; with two (``_shared_type_users``) each
+    would write its own copy (a parser's and an evaluator's ``Expression``) and the
+    values of one are not the other. A name is accounted for when the contracts
+    file declares it (``declared``) or any contract defines it: by name, or in its
+    signature (a class one ticket implements, imported from there; a
+    declaration-only signature's extra records)."""
+    by_name = {i.name: i for i in interfaces}
+    known = set(declared)
+    for i in interfaces:
+        known |= {i.name.partition(".")[0], *_defined_names(i.signature)}
+    users: dict[str, list[str]] = {}
+    for t in tickets:
+        if t.id in _GENERATED_TICKETS:
+            continue
+        names: set[str] = set()
+        for n in (*t.implements, *t.consumes):
+            c = by_name.get(n)
+            if c is not None and c.kind in CODE_CONTRACT_KINDS and not _declaration_only(c):
+                names |= _type_names(c.signature)
+        for name in sorted(names - known):
+            users.setdefault(name, []).append(t.id)
+    return users
+
+
+def _shared_type_findings(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    owned: Collection[str] = (),
+) -> tuple[str, ...]:
+    """The shared undeclared types not in ``owned``, the ones
+    :func:`folds._assign_shared_types` gave an owner ticket."""
+    return tuple(
+        f"Type {name} is used by the contracts of tickets {', '.join(ids)} but is not "
+        "declared in the contracts file: each ticket would define its own copy. Add a "
+        f"type contract {name} (its fields) so every ticket imports the one definition."
+        for name, ids in _shared_type_users(tickets, interfaces, declared).items()
+        if name not in owned
+    )
+
+
+def _type_contract_findings(
+    tickets: Sequence[Ticket],
+    interfaces: Sequence[InterfaceContract],
+    declared: Collection[str],
+    types: Mapping[str, str],
+    contracts_file: str,
+    design: str,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """(findings, concerns): the design names the contracts file and defines data
+    types for it that tickets' contracts use, yet no contract declares a data type,
+    so no contracts ticket writes them. Blocking when two or more tickets use them
+    (each would invent its own fields); with one, the shared-type fold's field list
+    covers it and this is a concern."""
+    if (
+        not contracts_file
+        or not types
+        or any(i.kind in CODE_CONTRACT_KINDS and _declaration_only(i) for i in interfaces)
+        or (contracts_file not in design and PurePosixPath(contracts_file).name not in design)
+    ):
+        return (), ()
+    users = _undeclared_type_users(tickets, interfaces, declared)
+    names = with_referenced((n for n in types if n in users), types)
+    if not names:
+        return (), ()
+    ids = {i for n in names for i in users.get(n, ())}
+    text = (
+        f"The design defines {', '.join(names)} for {contracts_file}, but no interface "
+        "contract declares them: add a kind=type contract for each, with its fields, so "
+        "the contracts ticket writes them once and every ticket imports them."
+    )
+    return ((text,), ()) if len(ids) > 1 else ((), (text,))
+
+
 def _redeclared_findings(
     interfaces: Sequence[InterfaceContract], base: BaseView
 ) -> tuple[str, ...]:
@@ -559,24 +966,33 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"consumes contract .* but does not depend on", "contract-dep-missing"),
         (r"after a builtin its own annotations use", "contract-builtin-method"),
         (r"already exists in the base tree", "contract-redeclared"),
+        (r"^Type \S+ is used by the contracts of tickets", "type-undeclared"),
+        (r"^The design defines .* but no interface contract declares", "type-contract-missing"),
+        (r"^Scenario \S+ uses .* but pinned constraint", "scenario-constraint-conflict"),
         (r"declares no way to receive them", "contract-unwired"),
         (r"^Contract \S.* does not compile", "contract-compile"),
         (r"more \S+ error\(s\)\.$", "contract-compile"),
         (r"^Scenario \S+ is not owned by a live ticket", "scenario-orphan"),
         (r"^Scenario \S+ covers unknown id", "scenario-unknown-cover"),
         (r"^Scenario \S+ asserts that installing dependencies", "scenario-offline-install"),
+        (r"^Scenario \S+ has step text that is not a step", "scenario-garbled-step"),
         (r"has no covering scenario", "goal-uncovered"),
         (r"^Feature ticket \S+ has no scenarios", "ticket-no-scenarios"),
         (r"^Ticket \S+ is over its size ceiling", "ticket-oversized"),
         (r"^No entrypoint ticket", "entrypoint-missing"),
         (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
+        (r"^Entrypoint ticket \S+ redefines what", "entrypoint-redefines"),
+        (r"names alternatives .* but only scenario", "or-branch"),
+        (r"has user roles but no ticket owns", "roles-unowned"),
         (r"^stack\.run is empty", "run-missing"),
         (r"starts the server, which never exits", "run-server"),
+        (r"holds one database connection for the web app", "db-shared-connection"),
         (r"^stack\.bdd ", "bdd-command"),
         (r"^Stack command file \S+ is written by no ticket", "stack-file-unowned"),
         (r"exceed the (per-epic )?cap of", "overflow"),
         (r"^criterion \S+: missing/empty", "criterion-incomplete"),
         (r"^criterion \S+: scenario has no", "scenario-steps-missing"),
+        (r"but no contract in the plan has properties", "contract-no-properties"),
         (r"security/abuse|security_abuse", "security-gap"),
     )
 )
@@ -587,3 +1003,77 @@ def finding_kind(finding: str) -> str:
     The Spec gate's ``contract fit:`` / ``coverage:`` prefixes are looked through."""
     text = re.sub(r"^(contract fit|coverage): ", "", finding.strip())
     return next((kind for pattern, kind in _FINDING_KINDS if pattern.search(text)), "other")
+
+
+# A parameter of a parsed or computed-on kind: text, bytes, a number, a collection.
+_DOMAIN_TYPE = re.compile(
+    r"(?i)(?<![\w.])(?:&?str|string|bytes|bytearray|int|float|decimal|number|double|long"
+    r"|bigint|[iu](?:8|16|32|64|128|size)|f32|f64|list|tuple|set|frozenset|dict|sequence"
+    r"|iterable|mapping|vec|array|map|slice)\b|\[\]"
+)
+_SELF_PARAM = re.compile(r"^\s*(?:&\s*(?:mut\s+)?)?(?:self|cls|this)\b")
+
+
+def _params(signature: str) -> list[str]:
+    """Every parameter of every call signature in ``signature``: the depth-0
+    comma-separated parts of a parenthesis opened right after a name (a return
+    tuple, ``-> (A, B)``, is no parameter list)."""
+    out: list[str] = []
+    for m in re.finditer(r"\w\s*\(", signature):
+        depth, start = 0, m.end()
+        for i in range(start, len(signature)):
+            ch = signature[i]
+            if ch in "([{<":
+                depth += 1
+            elif ch in ")]}>" and depth:
+                depth -= 1
+            elif ch == ")":
+                out += [p for p in _split_top(signature[start:i]) if p.strip()]
+                break
+    return out
+
+
+def _split_top(text: str) -> list[str]:
+    parts, depth, cur = [], 0, ""
+    for ch in text:
+        if ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth = max(depth - 1, 0)
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [*parts, cur]
+
+
+def _property_findings(
+    tickets: Sequence[Ticket], interfaces: Sequence[InterfaceContract]
+) -> tuple[str, ...]:
+    """A plan with no contract property at all while a free function some feature
+    ticket implements takes text, bytes, a number or a collection (what a parser or
+    calculator computes on): one finding per such function. Conservative on purpose,
+    since it costs a repair call: a method (a store's CRUD), a class and the
+    entrypoint's functions (main(argv), create_app(config)) are never judged, and
+    any property in the plan silences it, so a repair adding one never loops."""
+    if any(c.properties for c in interfaces):
+        return ()
+    implemented = {n for t in tickets if not t.entrypoint for n in t.implements}
+    entry = {n for t in tickets if t.entrypoint for n in t.implements}
+    out: list[str] = []
+    for c in interfaces:
+        if c.kind != "function" or "." in c.name or c.name not in implemented - entry:
+            continue
+        params = _params(c.signature)
+        if any(_SELF_PARAM.match(p) for p in params):
+            continue
+        if args := sorted({p.strip() for p in params if _DOMAIN_TYPE.search(p)}):
+            out.append(
+                f"Contract {c.name} takes {', '.join(args)} but no contract in the plan "
+                "has properties[]: give it 1-4 properties (PR1, ...) that hold for every "
+                "valid generated input, over combinations of its input's features (several "
+                "options, fields or operators together), not one case; its implementing ticket "
+                "proves each with a property-based test."
+            )
+    return tuple(out)

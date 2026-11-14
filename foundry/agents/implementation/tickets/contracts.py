@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Mapping, Sequence
+import textwrap
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,17 +13,25 @@ from foundry.agents.implementation.stubs import signature_findings
 from foundry.agents.implementation.tickets.constants import (
     CONTRACT_DRIFT_TRIAGE,
     CONTRACT_DUP_TRIAGE,
+    ENTRYPOINT_DUP_TRIAGE,
     NODE_ID,
     SIGNATURE_CHANGE_TRIAGE,
 )
 from foundry.agents.implementation.tickets.tasks import task_id_for_ticket
+from foundry.agents.plan_contracts import SOURCE_SUFFIXES, top_symbols
 from foundry.execution.adapter_contract import AdapterResult
 from foundry.schemas.gates import GateTriage
-from foundry.schemas.implementation import CONTRACTS_TICKET_ID, FeatureDiff
+from foundry.schemas.implementation import (
+    CONTRACTS_TICKET_ID,
+    HARNESS_TICKET_ID,
+    FeatureDiff,
+    Ticket,
+)
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
     from foundry.execution.sandbox import Sandbox
+    from foundry.schemas.architecture import InterfaceContract
 
 
 class ContractDriftError(RuntimeError):
@@ -218,10 +228,7 @@ def contract_duplicates(
             out.append(
                 f"{path} redeclares contract type(s) {', '.join(dup)} already defined in "
                 f"{', '.join(contract_files)}: delete the copy and import the contract's "
-                "type instead (a class implementing a contract interface takes its own "
-                "name and subclasses or implements the interface, e.g. "
-                "`class SqlStore(Store)`, so the type checker holds it to the contract's "
-                "methods)"
+                "type instead"
             )
     return tuple(out)
 
@@ -265,6 +272,128 @@ def _flag_contract_duplicates(
         return result
     note = GateTriage(
         name=CONTRACT_DUP_TRIAGE,
+        run_against=f"task/{task_id}",
+        explanation="; ".join(findings)[:2000],
+        produced_by=NODE_ID,
+        seq=Seq("scope", 0, 0, NODE_ID, len(result.triage)),
+    )
+    return result.model_copy(update={"triage": (*result.triage, note)})
+
+
+# Directories that hold no project source: dependencies, build output, caches.
+_NOT_SOURCE_DIRS = frozenset(
+    {"node_modules", "venv", "vendor", "target", "dist", "build", "__pycache__", "features"}
+)
+
+
+def _is_test_source(path: str) -> bool:
+    parts = path.split("/")
+    name = parts[-1]
+    return (
+        name.startswith("test_")
+        or name.rsplit(".", 1)[0].endswith(("_test", ".test", ".spec"))
+        or name == "conftest.py"
+        or any(p in ("tests", "test", "step_definitions", "__tests__") for p in parts[:-1])
+    )
+
+
+# Names every entry module and blueprint defines for itself: a shared one is no copy.
+_ENTRY_NAMES = frozenset(
+    {"app", "application", "cli", "create_app", "index", "main", "make_app", "run", "serve"}
+    | {"server", "setup", "start"}
+)
+
+
+def dependency_symbols(
+    entry: Ticket, tickets: Sequence[Ticket], contracts: Mapping[str, InterfaceContract]
+) -> frozenset[str]:
+    """The top-level names the contracts of ``entry``'s (transitive, planned)
+    dependencies declare, less the common entry names: what the entrypoint must
+    import rather than define again."""
+    deps = {t.id: t.depends_on for t in tickets}
+    by_id = {t.id: t for t in tickets}
+    seen: set[str] = set()
+    todo = list(entry.depends_on)
+    while todo:
+        if (tid := todo.pop()) not in seen:
+            seen.add(tid)
+            todo.extend(deps.get(tid, ()))
+    return frozenset(
+        n
+        for did in seen - {CONTRACTS_TICKET_ID, HARNESS_TICKET_ID}
+        if (dep := by_id.get(did)) is not None
+        for name in dep.implements
+        if (c := contracts.get(name)) is not None and c.kind in ("function", "class", "type")
+        for n in top_symbols(textwrap.dedent(c.signature))
+        if n not in _ENTRY_NAMES
+    )
+
+
+def entrypoint_redefinitions(
+    own: Mapping[str, str | None], others: Mapping[str, str | None], guarded: Collection[str]
+) -> tuple[str, ...]:
+    """One finding per source file of the entrypoint ticket (``own``) that defines a
+    ``guarded`` name (:func:`dependency_symbols`) another source file of the tree
+    (``others``, tests excluded) already defines: the entrypoint must import and
+    wire that module, and a second copy ships while the tested one is dead code."""
+    defined: dict[str, str] = {}
+    for path, text in sorted(others.items()):
+        if path in own or not text or not path.endswith(SOURCE_SUFFIXES) or _is_test_source(path):
+            continue
+        for name in top_symbols(text) & set(guarded):
+            defined.setdefault(name, path)
+    out: list[str] = []
+    for path, text in sorted(own.items()):
+        if not text or not path.endswith(SOURCE_SUFFIXES) or _is_test_source(path):
+            continue
+        dup = sorted(n for n in top_symbols(text) if n in defined)
+        if dup:
+            out.append(
+                f"{path} redefines "
+                + ", ".join(f"{n} (defined in {defined[n]})" for n in dup)
+                + ": the entrypoint wires the other tickets' modules in; delete the copies "
+                "and import them from where they are defined"
+            )
+    return tuple(out)
+
+
+def _tree_sources(root: Path, skip: Sequence[str]) -> dict[str, str | None]:
+    """The source files under ``root`` outside ``skip``, by repo-relative path."""
+    out: dict[str, str | None] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _NOT_SOURCE_DIRS and not d.startswith(".")]
+        for name in filenames:
+            if not name.endswith(SOURCE_SUFFIXES):
+                continue
+            path = Path(dirpath) / name
+            rel = path.relative_to(root).as_posix()
+            if rel in skip:
+                continue
+            try:
+                out[rel] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
+def _flag_entrypoint_redefinitions(
+    result: AdapterResult,
+    sandbox: Sandbox,
+    files: Sequence[str],
+    task_id: str,
+    guarded: Collection[str],
+) -> AdapterResult:
+    """The post-build half of the planner's entrypoint check: a note (handed to the
+    fix loop) when the entrypoint ticket's files redefine what a dependency built."""
+    if not guarded:
+        return result
+    written = _written_sources(result, sandbox, task_id)
+    own = {p: t for p, t in written.items() if p in files}
+    findings = entrypoint_redefinitions(own, _tree_sources(Path(sandbox.worktree), files), guarded)
+    if not findings:
+        return result
+    note = GateTriage(
+        name=ENTRYPOINT_DUP_TRIAGE,
         run_against=f"task/{task_id}",
         explanation="; ".join(findings)[:2000],
         produced_by=NODE_ID,

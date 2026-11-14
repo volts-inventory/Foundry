@@ -251,15 +251,16 @@ def test_signed_pass_path_advances(tmp_path, rt, runner, records, verifier):
     )
 
     spec = spec_out["gates"][0]
-    build, test, smoke = bt_out["gates"]
+    build, test, smoke, launch = bt_out["gates"]
     assert spec.name == "spec" and spec.status is GateStatus.PASS
     assert build.name == "build" and build.status is GateStatus.PASS
     assert test.name == "test" and test.status is GateStatus.PASS
     assert smoke.name == "smoke" and smoke.status is GateStatus.PASS  # not pinned
+    assert launch.name == "launch" and launch.status is GateStatus.PASS  # not pinned
 
-    # Every verdict is runner-attested -> the REAL merge_gates admits all four.
+    # Every verdict is runner-attested -> the REAL merge_gates admits all five.
     folded = merge_gates(spec_out["gates"] + bt_out["gates"], None)
-    assert set(folded) == {spec, build, test, smoke}
+    assert set(folded) == {spec, build, test, smoke, launch}
 
     # Fold onto state and route: all relevant gates PASS, nothing latched.
     state_with = {**state, "gates": folded}
@@ -437,10 +438,78 @@ def test_adequacy_floor_zero_tests_is_fail(tmp_path, rt, runner, records, verifi
         workdir=tmp_path / "bt",
         min_passed=1,
     )
-    build, test, _smoke = bt_out["gates"]
+    build, test, _smoke, _launch = bt_out["gates"]
     assert build.status is GateStatus.PASS  # it compiles
     assert test.status is GateStatus.FAIL  # vacuous suite cannot clear the floor
     assert merge_gates(bt_out["gates"], None)  # both attested + admitted
+
+
+# A first wave that built only the BDD harness: feature files and step code, no app.
+_HARNESS_ONLY = {
+    "features/roll.feature": "Feature: roll\n  Scenario: one die\n    Given a d6\n",
+    "features/steps/test_roll_steps.py": "from dice.roll import roll\n",
+}
+_PLANNED = [*_HARNESS_ONLY, "dice/__init__.py", "dice/roll.py"]
+
+
+def _wave_check(tmp_path, rt, runner, monkeypatch, files: dict[str, str]):
+    import foundry.graph.gate_wiring.runs as runs
+    from foundry.graph.gate_wiring import run_build_gate
+    from foundry.schemas.implementation import StackDecision
+
+    monkeypatch.setattr(runs, "planned_files", lambda state, resolve: list(_PLANNED))
+    diff, uri, blob = _feature_diff(files)
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), ((diff, uri, blob),))
+    # A build that, like a type checker given no files, exits non-zero on no source.
+    state["stack"] = StackDecision(
+        language="python", build="python3 -m compileall -q . && ls dice/*.py"
+    )
+    return run_build_gate(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "wave",
+        launch=True,
+    )["gates"]
+
+
+def test_a_harness_only_wave_check_does_not_fail_build_or_launch(
+    tmp_path, rt, runner, records, verifier, monkeypatch
+):
+    # The build's import check would fail the step file's unbuilt `dice` import.
+    build, launch = _wave_check(tmp_path, rt, runner, monkeypatch, _HARNESS_ONLY)
+    for gate in (build, launch):
+        assert gate.status is GateStatus.PASS
+        assert any("not applicable yet: no python source" in f for f in gate.findings)
+    assert merge_gates([build, launch], None)  # attested + admitted
+
+
+def test_a_wave_check_with_built_source_still_runs_the_build(
+    tmp_path, rt, runner, records, verifier, monkeypatch
+):
+    files = {**_HARNESS_ONLY, "dice/__init__.py": "", "dice/roll.py": "def roll(:\n"}
+    build, _launch = _wave_check(tmp_path, rt, runner, monkeypatch, files)
+    assert build.status is GateStatus.FAIL
+    assert not any("not applicable" in f for f in build.findings)
+
+
+def test_final_gates_still_fail_a_tree_with_no_source(tmp_path, rt, runner, records, verifier):
+    diff, uri, blob = _feature_diff(_HARNESS_ONLY)
+    state, resolve, resolve_blob = _seed((_criterion("c1"),), ((diff, uri, blob),))
+    gates = run_build_test_gates(
+        state,
+        _config(),
+        rt=rt,
+        runner=runner,
+        resolve=resolve,
+        resolve_blob=resolve_blob,
+        workdir=tmp_path / "bt",
+    )["gates"]
+    assert any(g.status is GateStatus.FAIL for g in gates)
+    assert not any("not applicable" in f for g in gates for f in g.findings)
 
 
 # ---- 6. flake quarantine (N=2 split) does not fail the boundary -------------
@@ -588,7 +657,7 @@ def test_manifest_scaffold_grounds_pure_python_tree(tmp_path, verifier):
 
     assert recognized_manifests(dest) == ["requirements.txt"]
     manifest = (dest / "requirements.txt").read_text()
-    assert "pytest" in manifest  # the test runner is pinned as a dev dependency
+    assert "pytest" not in manifest  # only runtime imports: the gates bring the dev tools
 
 
 def test_manifest_scaffold_leaves_engineer_manifest_untouched(tmp_path, verifier):
@@ -798,10 +867,15 @@ def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records
         return out["gates"], counts.snapshot()
 
     first, fired = gates(rt, state, resolve, resolve_blob, "bt1")
-    assert [g.status for g in first] == [GateStatus.PASS] * 3 and fired == {}
+    assert [g.status for g in first] == [GateStatus.PASS] * 4 and fired == {}
 
     again, fired = gates(rt, state, resolve, resolve_blob, "bt2")
-    assert fired == {"gate.reuse.build": 1, "gate.reuse.test": 1, "gate.reuse.smoke": 1}
+    assert fired == {
+        "gate.reuse.build": 1,
+        "gate.reuse.test": 1,
+        "gate.reuse.smoke": 1,
+        "gate.reuse.launch": 1,
+    }
     assert [g.runner_attestation for g in again] == [g.runner_attestation for g in first]
     assert all(b.seq > a.seq for a, b in zip(first, again, strict=True))
     assert set(merge_gates(first, again)) == set(again)
@@ -810,7 +884,7 @@ def test_identical_boundary_rerun_reuses_attested_verdicts(tmp_path, rt, records
     resumed = AgentRuntime(proxy=rt.proxy, epochs=EpochCounter())
     resumed.epochs.raise_floor(RUN_ID, max(g.seq.emission_epoch for g in again))
     after, fired = gates(resumed, state, resolve, resolve_blob, "bt3")
-    assert len(fired) == 3
+    assert len(fired) == 4
     assert all(c.seq > b.seq for b, c in zip(again, after, strict=True))
 
     # One changed byte in the tree re-runs every gate.

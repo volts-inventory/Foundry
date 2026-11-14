@@ -160,6 +160,7 @@ _INFRA_NODE: dict[str, tuple[str, str, str | None]] = {
     "build_gate": ("gate", "running the BUILD gate", None),
     "test_gate": ("gate", "running the TEST gate", None),
     "smoke_gate": ("gate", "running the SMOKE gate", None),
+    "launch_gate": ("gate", "running the LAUNCH gate", None),
     "build_test_gate": ("gate", "running the BUILD / TEST gates", None),
     "review": ("gate", "running the REVIEW gate", None),
     # fix-forward retries: the longest silences in a real build — each is a full

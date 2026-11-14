@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langgraph.checkpoint.memory import MemorySaver
 
 from foundry.agents import AgentRuntime
@@ -51,6 +52,14 @@ from tests.test_supervisor import (
     _runner,
     _synthetic_resolve,
 )
+
+
+@pytest.fixture(autouse=True)
+def _plan_blind_diff(monkeypatch: Any) -> None:
+    # _BDD_PASSING_DIFF writes test_app.py and test_steps.py whatever files the plan
+    # lists, so the file-ownership check would FAIL every tree.
+    monkeypatch.setattr("foundry.graph.gate_wiring.runs.owned_paths", lambda *_: None)
+
 
 _REVISER_KEY = INTERFACE_SOP.split(".")[0]
 _PLANNED = "POST /todos {title} -> Todo"

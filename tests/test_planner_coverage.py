@@ -629,23 +629,69 @@ def test_the_python_deps_rule_forbids_standard_library_modules() -> None:
 def test_the_sop_adds_bdd_harness_only_for_a_bdd_stack_and_reserves_its_id() -> None:
     assert "only when stack.bdd is set" in SOP
     assert "reserved: never plan a ticket with either" in SOP
-    assert "never that installing succeeds" in SOP
+    assert "never assert that installing dependencies succeeds" in SOP
+
+
+def _contract(signature: str) -> dict[str, Any]:
+    return {"interfaces": [{"name": "Store", "kind": "class", "signature": signature}]}
 
 
 def test_a_python_sqlite_plan_pins_the_memory_connection_constraint() -> None:
     python = StackDecision(language="python")
-    [pc] = _stack_constraints(python, {"design": {"body": "Store notes in SQLite"}})
+    [pc] = _stack_constraints(python, _contract("def open_db(path: str) -> sqlite3.Connection"))
     assert ":memory:" in pc["text"] and "ONE connection" in pc["text"]
     # That one database outlives each test: two modules inserting one username collided.
     assert "autouse fixture must give each test an empty database" in pc["text"]
-    assert _stack_constraints(python, {"design": {"body": "Store notes in Postgres"}}) == []
-    assert _stack_constraints(StackDecision(language="javascript"), {"x": "sqlite"}) == []
+    assert _stack_constraints(python, _contract("def open_db(dsn: str) -> PgConn")) == []
+    assert _stack_constraints(StackDecision(language="javascript"), _contract("sqlite")) == []
+
+
+def test_stack_constraints_ignore_what_the_plan_rejected_or_only_wrote_about() -> None:
+    # The notes bench: an ADR's "Rejected: SQLAlchemy ORM" pinned three SQLAlchemy
+    # constraints on a sqlite3 app, and an agent added SQLAlchemy to requirements.
+    payload: dict[str, Any] = {
+        "adrs": [
+            {
+                "id": "ADR-1",
+                "title": "Raw sqlite3",
+                "decision": "Use sqlite3 directly. Rejected: SQLAlchemy ORM (too heavy).",
+                "rejected_alternatives": ["SQLAlchemy ORM"],
+            }
+        ],
+        "design": {"body": "We considered SQLAlchemy but chose sqlite3."},
+        "prd": {"body": "No SQLAlchemy."},
+        "interfaces": [
+            {
+                "name": "NoteStore",
+                "kind": "class",
+                "signature": "class NoteStore:\n"
+                "    def get(self, conn: sqlite3.Connection, note_id: int) -> str: ...",
+                "description": "Not SQLAlchemy: plain sqlite3.",
+            }
+        ],
+    }
+    stack = StackDecision(language="python", framework="flask", notes="no SQLAlchemy")
+    ticket = _t("store", Specialty.BACKEND, files=("notes/store.py",)).model_copy(
+        update={"description": "Never use SQLAlchemy."}
+    )
+    pcs = _stack_constraints(stack, payload, [ticket])
+    assert [pc["id"] for pc in pcs] == ["PC-python-sqlite-memory"]
+
+
+def test_the_sqlite_constraint_gives_a_web_app_a_connection_per_request() -> None:
+    # The notes bench: one check_same_thread=False connection shared by every request
+    # failed 3 of 30 concurrent POSTs (InterfaceError, 'no transaction active').
+    [pc] = _stack_constraints(StackDecision(language="python"), _contract("sqlite3"))
+    assert "its own connection" in pc["text"] and "closed at request teardown" in pc["text"]
+    assert "not even with check_same_thread=False" in pc["text"]
+    assert "pass check_same_thread=False to a shared one" not in pc["text"]
 
 
 def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
     # Column(Integer) attributes typed as Column[int] failed 12 mypy checks in a run.
-    python = StackDecision(language="python")
-    pcs = _stack_constraints(python, {"design": {"body": "SQLAlchemy models over SQLite"}})
+    python = StackDecision(language="python", framework="Flask + SQLAlchemy")
+    db = _t("db", Specialty.DATA, files=("app/sqlite_db.py",))
+    pcs = _stack_constraints(python, {}, [db])
     assert [pc["id"] for pc in pcs] == [
         "PC-python-sqlite-memory",
         "PC-python-sqlalchemy-typed",
@@ -656,14 +702,14 @@ def test_a_python_sqlalchemy_plan_pins_the_typed_model_constraint() -> None:
     # The local shop bench: the memory-connection constraint led auth.py to a raw
     # sqlite3.connect(':memory:') handed to Base.metadata.create_all.
     assert "StaticPool" in pcs[3]["text"] and "never through sqlite3.connect()" in pcs[3]["text"]
-    assert _stack_constraints(python, {"design": {"body": "SQLAlchemy on Postgres"}}) == pcs[1:3]
-    assert _stack_constraints(StackDecision(language="go"), {"x": "sqlalchemy"}) == []
+    assert _stack_constraints(python, {}) == pcs[1:3]
+    assert _stack_constraints(StackDecision(language="go", framework="sqlalchemy"), {}) == []
 
 
 def test_a_python_sqlalchemy_plan_pins_one_sided_relationships_across_tickets() -> None:
     # cart.py wrote relationship("User", back_populates="cart_items") but user.py was
     # another ticket's: no User.cart_items, so no mapper configured and every test failed.
-    pcs = _stack_constraints(StackDecision(language="python"), {"x": "sqlalchemy"})
+    pcs = _stack_constraints(StackDecision(language="python", framework="sqlalchemy"), {})
     [rel] = [pc for pc in pcs if pc["id"] == "PC-python-sqlalchemy-relationships"]
     assert "`back_populates=` or `backref=` only" in rel["text"]
     assert "BOTH mapped classes are in this ticket's files" in rel["text"]

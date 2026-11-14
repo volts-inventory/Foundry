@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents.planner.prompt import _forced_standard
@@ -42,12 +43,28 @@ def _build_constraints(raw: Any, seq: Seq) -> list[PinnedConstraint]:
 _SQLITE_MEMORY_CONSTRAINT = {
     "id": "PC-python-sqlite-memory",
     "text": (
-        "Python SQLite: every sqlite3.connect(':memory:') opens a NEW, empty database, "
-        "so an in-memory store must open ONE connection and reuse it for its whole "
-        "life (schema, writes and reads), never connect per call. That database then "
-        "outlives each test, and pytest runs every test module in one process: a "
+        "Python SQLite: the app's default database is a FILE whose path comes from an "
+        "environment variable (e.g. DATABASE_URL or DB_PATH, default app.db), never "
+        "':memory:' outside tests (the BUILD gate FAILs it: the data is lost on "
+        "restart). A web (http) app serves requests on several threads at once: give "
+        "each request its own connection, opened on first use in the request (e.g. a "
+        "get_db() keeping it on the request context) and closed at request teardown, "
+        "or one per thread. Never share one connection object across requests for the "
+        "app's lifetime (a module-level connection, or a store built once with a "
+        "connection in the app factory), not even with check_same_thread=False: "
+        "concurrent requests then interleave on its one transaction and fail with "
+        "InterfaceError or 'no transaction active'. So a web app's store takes the "
+        "request's connection per call, or a connection factory or database path, "
+        "never a long-lived connection. Only tests pass an in-memory database, and "
+        "every sqlite3.connect(':memory:') opens a NEW, empty one, so a test store with "
+        "no web layer opens ONE connection and reuses it for its whole life (schema, "
+        "writes and reads), never connecting per call; a web app's tests point the "
+        "path variable at a temporary FILE (pytest's tmp_path) instead, so every "
+        "request's connection sees the same data. A test database shared across tests "
+        "outlives each one, and pytest runs every test module in one process: a "
         "conftest.py autouse fixture must give each test an empty database (drop and "
-        "re-create the schema, or delete every row), or one test's rows break the next."
+        "re-create the schema, or delete every row), or one test's rows "
+        "break the next."
     ),
     "scope": "global",
     "source": NODE_ID,
@@ -89,25 +106,57 @@ _SQLALCHEMY_SQLITE_CONSTRAINT = {
     "id": "PC-python-sqlalchemy-sqlite",
     "text": (
         "Python SQLAlchemy over SQLite: every module reaches the database through "
-        "SQLAlchemy, never through sqlite3.connect(). An in-memory database is ONE "
-        "shared engine, `create_engine('sqlite://', poolclass=StaticPool, "
-        "connect_args={'check_same_thread': False})`; `Base.metadata.create_all`, "
-        "`drop_all` and `Session` take that engine, never a sqlite3 connection, which "
-        "has none of the methods they call (AttributeError: 'sqlite3.Connection' "
-        "object has no attribute '_run_ddl_visitor')."
+        "SQLAlchemy, never through sqlite3.connect(). The app's engine opens a FILE "
+        "database whose URL comes from an environment variable (DATABASE_URL, default "
+        "`sqlite:///app.db`), with `connect_args={'check_same_thread': False}` on a "
+        "web stack, where each request opens its own Session and closes it at request "
+        "teardown, never one Session or connection shared by the app; never "
+        "'sqlite://' (in-memory) outside tests (the BUILD gate FAILs it). Only tests "
+        "use an in-memory database: ONE shared engine, "
+        "`create_engine('sqlite://', poolclass=StaticPool, "
+        "connect_args={'check_same_thread': False})`, reset per test by a conftest.py "
+        "autouse fixture. `Base.metadata.create_all`, `drop_all` and `Session` take "
+        "an engine, never a sqlite3 connection, which has none of the methods they "
+        "call (AttributeError: 'sqlite3.Connection' object has no attribute "
+        "'_run_ddl_visitor')."
     ),
     "scope": "global",
     "source": NODE_ID,
 }
 
 
+def _chosen_text(stack: StackDecision, payload: dict[str, Any], tickets: Sequence[Ticket]) -> str:
+    """What the plan actually chose: the stack's framework and commands, the
+    contracts' signatures and types, and the tickets' files. Never ADRs, rejected
+    alternatives, notes or descriptions: a keyword there may name what the plan
+    turned down ("Rejected: SQLAlchemy ORM")."""
+    parts = [
+        stack.language,
+        stack.framework,
+        stack.package_manager,
+        stack.install,
+        stack.build,
+        stack.typecheck,
+        stack.test,
+        stack.bdd,
+        stack.run,
+        stack.launch,
+    ]
+    for c in _objs(payload.get("interfaces")):
+        parts += [_str(c.get("name")), _str(c.get("signature"))]
+        parts += [*_strs(c.get("inputs")), *_strs(c.get("outputs")), *_strs(c.get("errors"))]
+    parts += [f for t in tickets for f in t.files]
+    return "\n".join(parts).lower()
+
+
 def _stack_constraints(
-    stack: StackDecision | None, payload: dict[str, Any]
+    stack: StackDecision | None, payload: dict[str, Any], tickets: Sequence[Ticket] = ()
 ) -> list[dict[str, Any]]:
-    """Pinned constraints the planner adds itself for a known stack footgun."""
+    """Pinned constraints the planner adds itself for a known stack footgun, keyed
+    on what the plan chose (``_chosen_text``)."""
     if stack is None or stack.language != "python":
         return []
-    text = str(payload).lower()
+    text = _chosen_text(stack, payload, tickets)
     added = [
         c
         for c, words in (

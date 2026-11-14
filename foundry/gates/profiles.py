@@ -28,13 +28,18 @@ import re
 import shlex
 import sys
 from dataclasses import dataclass, field
+from importlib import metadata as _im
 
 from foundry.schemas.implementation import StackDecision
 
 __all__ = [
     "BDD_RUNNERS",
     "DEFAULT_INSTALL",
+    "ONE_TYPE_PER_FILE",
     "PROFILES",
+    "PROPERTY_TESTING",
+    "SOURCE_SUFFIXES",
+    "PropertyTesting",
     "VerificationProfile",
     "bdd_runner_hint",
     "installed_profiles",
@@ -42,6 +47,8 @@ __all__ = [
     "pinned_stack",
     "profile_examples",
     "profile_for_request",
+    "profile_language",
+    "property_testing",
     "pytest_bdd_binds",
     "stack_install",
     "stack_profile",
@@ -72,6 +79,17 @@ class VerificationProfile:
     # Why the TEST gate cannot run (a non-Python stack with no test and no bdd
     # command): that gate alone is an ERROR, never the pytest harness.
     test_unavailable: str = ""
+    # The language whose static app checks (``foundry.gates.app_checks``) BUILD runs:
+    # None = the language this profile builds, "" = none.
+    app_checks: str | None = None
+    # The launch gate (``foundry.gates.launch``): the shell line that starts the app
+    # and how it is driven ("cli" | "http"; "" = nothing to launch). None = the gate
+    # derives it from the plan's entrypoint ticket.
+    launch_cmd: str | None = None
+    launch_kind: str = ""
+    # The language whose step-definition lint the Test gate runs over a Cucumber
+    # stack's step files (``javascript`` | ``typescript`` | ``go``; "" = none).
+    step_lint: str = ""
 
 
 def _sh(script: str) -> tuple[str, ...]:
@@ -284,6 +302,96 @@ def bdd_runner_hint(language: str) -> str:
     """How ``language``'s standard Cucumber runner writes $FOUNDRY_BDD_REPORT ("" for
     a language with no Cucumber runner the gate reads: Python uses pytest-bdd)."""
     return BDD_RUNNERS.get(language, "")
+
+
+@dataclass(frozen=True, slots=True)
+class PropertyTesting:
+    """A language's property-based testing library: what a contract property's test
+    uses, the pinned dev dependency that provides it ("" = the gate environment or
+    the standard library already does), how to write one, ``marker``: a regex a
+    test file matches when it uses the library (the Test gate's evidence), and
+    ``guard``: a regex a file matches when it imports the library only optionally
+    (a skip when it is missing), so its tests prove nothing ("" = never)."""
+
+    library: str
+    dependency: str
+    usage: str
+    marker: str
+    guard: str = ""
+
+
+_FAST_CHECK = PropertyTesting(
+    library="fast-check",
+    dependency='"fast-check": "3.23.2" in package.json devDependencies',
+    usage=(
+        "`fc.assert(fc.property(<arbitraries>, (...args) => { ... }))` from "
+        "`import fc from 'fast-check'`, inside a test named after the id "
+        "(`test('PR1: ...', ...)`), run by the stack's test command"
+    ),
+    marker=r"""['"]fast-check['"]""",
+)
+
+_HYPOTHESIS = _im.version("hypothesis")  # Foundry's own, pinned by uv.lock
+
+PROPERTY_TESTING: dict[str, PropertyTesting] = {
+    "python": PropertyTesting(
+        library="hypothesis",
+        # The gate harness runs Foundry's own uv.lock-pinned hypothesis, but the
+        # shipped project must declare it too, at that same pin, to run its tests.
+        dependency=f"hypothesis=={_HYPOTHESIS} in the project's dependency manifest",
+        usage=(
+            "a pytest test function decorated with hypothesis `@given(...)` (strategies "
+            "from `hypothesis.strategies`: st.integers(), st.text(), st.from_regex(...), "
+            "st.builds(...), composed with @st.composite for structured input), named "
+            "test_<id>_<what> (e.g. test_pr1_round_trip) in a tests/test_*.py "
+            "module"
+        ),
+        marker=r"^\s*(from|import)\s+hypothesis\b",
+        guard=(
+            r"\bexcept\b[^:\n]*\b(ImportError|ModuleNotFoundError)\b"
+            r"|importorskip\(\s*['\"]hypothesis"
+        ),
+    ),
+    "javascript": _FAST_CHECK,
+    "typescript": _FAST_CHECK,
+    "go": PropertyTesting(
+        library="testing/quick",
+        dependency="",
+        usage=(
+            "`quick.Check(func(<generated args>) bool { ... }, nil)` from the standard "
+            'library\'s "testing/quick" (a custom input type implements quick.Generator), '
+            "in a `func TestPR1<What>(t *testing.T)` of a _test.go file, failing with "
+            "t.Error(err)"
+        ),
+        marker=r'"testing/quick"|"github\.com/leanovate/gopter',
+    ),
+    "rust": PropertyTesting(
+        library="proptest",
+        dependency='proptest = "1.5.0" under [dev-dependencies] in Cargo.toml',
+        usage=(
+            "`proptest! { #[test] fn pr1_<what>(x in <strategy>) { prop_assert!(...); } }` "
+            "under tests/ or a #[cfg(test)] module"
+        ),
+        marker=r"\bproptest\b",
+    ),
+    "java": PropertyTesting(
+        library="jqwik",
+        dependency="net.jqwik:jqwik:1.9.0 as a test-scoped dependency in pom.xml",
+        usage="a jqwik `@Property void pr1<What>(@ForAll ... )` method under src/test/java",
+        marker=r"\bnet\.jqwik\b",
+    ),
+    "csharp": PropertyTesting(
+        library="FsCheck",
+        dependency="the FsCheck 2.16.6 package in the test project",
+        usage="an FsCheck `Prop.ForAll(...)` property in a test method named PR1_<What>",
+        marker=r"\bFsCheck\b",
+    ),
+}
+
+
+def property_testing(language: str) -> PropertyTesting | None:
+    """``language``'s property-testing library (None: no library is defined)."""
+    return PROPERTY_TESTING.get(language)
 
 
 def pytest_bdd_binds(stack: StackDecision | None) -> bool:
@@ -606,6 +714,32 @@ _PROFILE_LANGUAGE: dict[str, str] = {
     "iac-terraform": "terraform",
 }
 
+_JS_SUFFIXES = (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".jsx", ".tsx")
+# The files each language's build and typecheck compile: a tree with none of them
+# (only a harness: manifests, feature files) has nothing for those steps to judge.
+SOURCE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "python": (".py",),
+    "javascript": _JS_SUFFIXES,
+    "typescript": _JS_SUFFIXES,
+    "go": (".go",),
+    "rust": (".rs",),
+    "csharp": (".cs",),
+    "java": (".java",),
+    "lua": (".lua",),
+    "terraform": (".tf",),
+}
+
+# A public top-level type must sit in its own file named after it.
+ONE_TYPE_PER_FILE: frozenset[str] = frozenset({"java"})
+
+
+def profile_language(profile: VerificationProfile | None) -> str:
+    """The language ``profile`` builds ("" = unknown); no profile builds Python."""
+    if profile is None:
+        return "python"
+    name = profile.name
+    return name.split(":", 1)[1] if name.startswith("stack:") else _PROFILE_LANGUAGE.get(name, "")
+
 
 def _script(cmd: tuple[str, ...] | None) -> str:
     if cmd is None:
@@ -633,13 +767,109 @@ def pinned_stack(name: str) -> StackDecision:
 # A third-party library without stubs (flask_login) is not the project's type error.
 # The CLI flag beats a model-written global `ignore_missing_imports = false` or
 # `strict`, but a per-module override beats the flag, so the error codes go too.
+# The source is checked --strict; test code (step definitions, conftest, tests/) is
+# excluded: --exclude prunes the directories mypy walks, and a test path named on the
+# command line is dropped (mypy checks a named file whatever --exclude says).
 _MYPY = re.compile(
     r"((?:^|&&|;|\|\|)\s*(?:uv\s+run\s+)?(?:(?:\S*/)?python[\d.]*\s+-m\s+)?)mypy(?=\s|$)"
 )
+_MYPY_CALL = re.compile(_MYPY.pattern + r"([^;&|]*)")
+_TEST_PATH = re.compile(
+    r"(^|/)(tests?|features|step_defs)(/|$)|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$"
+)
+_TEST_EXCLUDE = r"(^|/)(tests?|features|step_defs)/|(^|/)(test_[^/]*|[^/]*_test|conftest)\.py$"
 _MYPY_LENIENT = (
     "mypy --ignore-missing-imports --disable-error-code import-not-found "
     "--disable-error-code import-untyped"
 )
+_MYPY_STRICT = f"{_MYPY_LENIENT} --strict --exclude {shlex.quote(_TEST_EXCLUDE)}"
+
+
+# mypy's options that take a value (the next argv word, unless given --flag=value),
+# with how many words follow; -p/-m/-c name a target the way a positional does.
+_MYPY_VALUE_FLAGS = {
+    **dict.fromkeys(
+        (
+            "--exclude", "--config-file", "--python-version", "--cache-dir", "-p",
+            "--package", "-m", "--module", "-c", "--command", "--platform",
+            "--custom-typeshed-dir", "--python-executable", "--always-true",
+            "--always-false", "--enable-error-code", "--disable-error-code",
+            "--enable-incomplete-feature", "--follow-imports", "--package-root",
+            "--junit-xml", "--junit-format", "--find-occurrences", "--custom-typing-module",
+            "--untyped-calls-exclude", "--deprecated-calls-exclude", "--soft-error-limit",
+            "--any-exprs-report", "--cobertura-xml-report", "--html-report",
+            "--linecount-report", "--linecoverage-report", "--lineprecision-report",
+            "--memory-xml-report", "--txt-report", "--xml-report", "--xslt-html-report",
+            "--xslt-txt-report",
+        ),
+        1,
+    ),
+    "--shadow-file": 2,
+}  # fmt: skip
+_MYPY_TARGET_FLAGS = frozenset({"-p", "--package", "-m", "--module", "-c", "--command"})
+
+
+def _strict_mypy(m: re.Match[str]) -> str:
+    if m.group(2).startswith(_MYPY_LENIENT.removeprefix("mypy") + " --strict --exclude "):
+        return m.group(0)  # already rewritten: a manifest's command read back by a change
+    try:
+        args = shlex.split(m.group(2))
+    except ValueError:
+        return m.group(1) + _MYPY_STRICT + m.group(2)
+    kept: list[str] = []
+    targets = 0
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag = a.split("=", 1)[0]
+        if a.startswith("-") and flag in _MYPY_VALUE_FLAGS:
+            n = 0 if "=" in a else _MYPY_VALUE_FLAGS[flag]
+            kept.extend(args[i : i + 1 + n])
+            targets += flag in _MYPY_TARGET_FLAGS
+            i += 1 + n
+            continue
+        i += 1
+        if a.startswith("-"):
+            kept.append(a)
+        elif not _TEST_PATH.search(a.removeprefix("./")):
+            kept.append(a)
+            targets += 1
+    if args and not targets:
+        kept.append(".")
+    tail = m.group(2)[len(m.group(2).rstrip()) :]
+    return m.group(1) + " ".join([_MYPY_STRICT, *map(shlex.quote, kept)]) + tail
+
+
+def python_typecheck(cmd: str) -> str:
+    """A Python stack's typecheck as the gate runs it: each mypy call --strict on the
+    source, with stubless third-party imports tolerated and test code left out."""
+    return _MYPY_CALL.sub(_strict_mypy, cmd)
+
+
+_TSC = re.compile(r"(?<![\w-])tsc(?=\s|$)")
+
+
+def typescript_typecheck(cmd: str) -> str:
+    """``tsc`` --strict, whatever the tsconfig says."""
+    return cmd if "--strict" in cmd else _TSC.sub("tsc --strict", cmd)
+
+
+def stack_typecheck(stack: StackDecision) -> str:
+    """The stack's typecheck command as the build gate runs it (what a shipped
+    BUILD-MANIFEST must name: the declared one may fail where the gate's passed)."""
+    if stack.language == "python":
+        return python_typecheck(stack.typecheck)
+    if stack.language == "typescript":
+        return typescript_typecheck(stack.typecheck)
+    return stack.typecheck
+
+
+_LAUNCH_CONTRACT = (
+    "launch = Foundry itself starts {cmd} as a user would (an http app on $PORT/$HOST, "
+    "then GET / and the entrypoint scenarios' paths; a CLI with its scenario command "
+    "or --help) and FAILs on a 5xx, a refused connection, an early exit or a traceback"
+)
+_STEP_LINTS = frozenset({"javascript", "typescript", "go"})
 
 
 def stack_profile(stack: StackDecision) -> VerificationProfile:
@@ -655,11 +885,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
     build = stack.build or (
         f"{shlex.quote(sys.executable)} -m compileall -q ." if python and stack.typecheck else ""
     )
-    typecheck = (
-        _MYPY.sub(lambda m: m.group(1) + _MYPY_LENIENT, stack.typecheck)
-        if python
-        else stack.typecheck
-    )
+    typecheck = stack_typecheck(stack)
     steps = [s for s in (build, typecheck) if s]
     build_cmd = _sh(" && ".join(steps)) if steps else None
     install_line = stack_install(stack)
@@ -681,6 +907,7 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         f"test = `{_script(test_cmd) or 'pytest'}`",
         *([f"bdd = `{stack.bdd}`"] if stack.bdd else []),
         f"smoke = `{stack.run}`" if stack.run else "smoke = not pinned",
+        _LAUNCH_CONTRACT.format(cmd=f"`{stack.launch}`" if stack.launch else "the app's entry"),
     ]
     return VerificationProfile(
         name=f"stack:{stack.language}",
@@ -701,6 +928,9 @@ def stack_profile(stack: StackDecision) -> VerificationProfile:
         python=python,
         bdd_cmd=stack.bdd or None,
         test_unavailable=test_unavailable,
+        launch_cmd=stack.launch or None,
+        launch_kind=stack.kind,
+        step_lint=stack.language if stack.bdd and stack.language in _STEP_LINTS else "",
     )
 
 

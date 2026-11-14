@@ -84,6 +84,10 @@ class ADR(FrozenModel):
     seq: Seq
 
 
+# Contract kinds a property-based test calls directly.
+PROPERTY_KINDS = frozenset({"function", "class"})
+
+
 class InterfaceContract(FrozenModel):
     """A stable interface seam definition (agents.md Layer 2): the API/interface
     contract downstream implementation branches code against. The signature/spec
@@ -95,6 +99,9 @@ class InterfaceContract(FrozenModel):
     kind: str = ""  # function|class|type|http|cli|event
     signature: str = ""  # written in the chosen language; compiled into wave-0 stubs
     consumers: tuple[str, ...] = ()  # component/interface ids that depend on this seam
+    # "PR1: <invariant over generated inputs>": each is proven by a property-based
+    # test carrying its id (the Test gate checks one exists). Function/class only.
+    properties: tuple[str, ...] = ()
     version: int = 1
     supersedes: str | None = None
     seq: Seq

@@ -5,19 +5,24 @@ from __future__ import annotations
 
 import contextlib
 import shlex
+import sys
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from foundry.agents._runtime import AgentRuntime
+from foundry.gates.app_checks import app_check_language, has_app_source, is_app_source
 from foundry.gates.build import BuildGate
+from foundry.gates.profiles import SOURCE_SUFFIXES, profile_language
 from foundry.gates.pydeps import PythonBuildEnv, python_build_env
 from foundry.gates.sandbox import toolchain_scope
 from foundry.gates.spec import SpecGate
 from foundry.gates.test import TestGate
 from foundry.graph.gate_wiring.materialize import (
     _current_criteria,
+    _of_kind,
     _toolchain_digest,
+    contract_paths,
     materialize_workdir,
     planned_files,
 )
@@ -46,6 +51,7 @@ _SPEC_NODE = "spec_gate"
 _BUILD_NODE = "build_gate"
 _TEST_NODE = "test_gate"
 _SMOKE_NODE = "smoke_gate"
+_LAUNCH_NODE = "launch_gate"
 
 
 def _run_gates(
@@ -149,7 +155,69 @@ class UnpinnedSmokeGate:
         return GateStatus.PASS if obs.structured.get("pinned") is False else GateStatus.ERROR
 
 
+class NotApplicableGate:
+    """A wave check's step with nothing to judge on this tree (:func:`unbuilt_source`):
+    an attested PASS whose finding says why, so no fixer is sent to build what later
+    tickets own."""
+
+    verdict_class = VerdictClass.CONFIG_EVALUABLE
+    decision_deterministic = True
+    execution_deterministic = False
+
+    def __init__(self, name: str, reason: str, *, seal_key: bytes | None = None) -> None:
+        self.name = name
+        self._reason = reason
+        self._seal_key = seal_key
+
+    def execute(self, workdir: Path) -> ZoneAObservation:
+        from foundry.gates.runner import observe
+
+        return observe(
+            self.name,
+            structured={"applicable": False},
+            findings=(f"{self.name} {self._reason}",),
+            seal_key=self._seal_key,
+        )
+
+    def decide(self, obs: ZoneAObservation) -> GateStatus:
+        return GateStatus.PASS if obs.structured.get("applicable") is False else GateStatus.ERROR
+
+
 _GATE_TIMEOUT_S = 600.0
+
+
+def launch_gate(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    profile: VerificationProfile | None,
+    seal_key: bytes | None = None,
+    pyenv: PythonBuildEnv | None = None,
+) -> GateImpl:
+    """The launch gate for this tree: the app the stack (or pinned profile) names,
+    else the entrypoint ticket's entry, with the entrypoint scenarios' probes."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.gates.launch import LaunchGate, LaunchTarget, launch_target
+    from foundry.schemas.product import IntentBrief
+
+    if profile is not None and profile.unavailable:
+        return UnavailableGate("launch", profile.unavailable)
+    stack = state.get("stack")
+    if (stack is None or stack.profile) and not (profile is not None and profile.launch_kind):
+        return LaunchGate(LaunchTarget(), seal_key=seal_key)  # nothing pinned to launch
+    briefs = [
+        b
+        for a in sorted(_of_kind(state, "intent_brief"), key=lambda a: a.seq)
+        if isinstance(b := resolve(a), IntentBrief)
+    ]
+    target = launch_target(
+        stack,
+        profile,
+        tickets=read_tickets(state, resolve),
+        criteria=_current_criteria(state, resolve).values(),
+        deliverable=briefs[-1].deliverable if briefs else "",
+        python=pyenv.python if pyenv is not None else sys.executable,
+    )
+    return LaunchGate(target, seal_key=seal_key, pyenv=pyenv)
 
 
 def _build_gate(
@@ -158,11 +226,13 @@ def _build_gate(
     pyenv: PythonBuildEnv | None = None,
     planned: Iterable[str] = (),
     timeout_s: float = _GATE_TIMEOUT_S,
+    owned: frozenset[str] | None = None,
 ) -> GateImpl:
     """``planned``: the ticket files a wave check's tree may not hold yet, whose
     modules the build's import check counts as the project's own. No ``runner``:
     an unsealed gate for an unattested run (an agent's in-session check).
-    ``timeout_s`` bounds the build step; the install keeps the gate's own bound."""
+    ``timeout_s`` bounds the build step; the install keeps the gate's own bound.
+    ``owned``: :func:`owned_paths`, the files a code file must be one of."""
     first_party = frozenset(PurePosixPath(p).name.split(".", 1)[0] for p in planned_paths(planned))
     seal_key = runner.seal_key if runner is not None else None
     if profile is None:
@@ -171,6 +241,8 @@ def _build_gate(
             pyenv=pyenv,
             python=True,
             first_party=first_party,
+            app_checks="python",
+            owned=owned,
             timeout_s=timeout_s,
             install_timeout_s=_GATE_TIMEOUT_S,
         )
@@ -184,6 +256,8 @@ def _build_gate(
         pyenv=pyenv,
         python=profile.python,
         first_party=first_party if profile.python else frozenset(),
+        app_checks=app_check_language(profile),
+        owned=owned,
         timeout_s=timeout_s,
         install_timeout_s=_GATE_TIMEOUT_S,
     )
@@ -288,7 +362,44 @@ def run_build_test_gates(
             discriminator_factory=discriminator_factory,
             profile=profile,
             pyenv=pyenv,
+            launch=launch_gate(state, resolve, profile, runner.seal_key, pyenv),
+            owned=owned_paths(state, resolve),
+            properties=planned_properties(state, resolve),
         )
+
+
+def owned_paths(state: FactoryState, resolve: ArtifactResolver) -> frozenset[str] | None:
+    """Every file the plan owns: the live tickets' files (the contracts ticket's
+    among them) and a change build's base tree. ``None`` = no file plan (no ticket
+    lists a file), so nothing to judge a stray file against."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.base_tree import base_files
+
+    owned = {f.removeprefix("./") for t in read_tickets(state, resolve) for f in t.files}
+    if not owned:
+        return None
+    owned.update(contract_paths(state, resolve))
+    if base := state.get("base_dir"):
+        owned.update(base_files(base))
+    return frozenset(owned)
+
+
+def planned_properties(state: FactoryState, resolve: ArtifactResolver) -> dict[str, str]:
+    """property id -> "<contract>: <statement>" for the properties of every newest
+    contract a live ticket implements (a dropped ticket's contract proves nothing)."""
+    from foundry.agents.implementation.tickets import read_tickets
+    from foundry.agents.implementation.tickets.packet import live_contracts
+
+    implemented = {name for t in read_tickets(state, resolve) for name in t.implements}
+    # A property its owning ticket reported as contradicting the spec is waived.
+    newest = live_contracts(state, resolve)
+    out: dict[str, str] = {}
+    for c in newest.values():
+        if c.name in implemented:
+            for p in c.properties:
+                pid, _, text = p.partition(": ")
+                out[pid] = f"{c.name}: {text}"
+    return out
 
 
 def _build_test_smoke(
@@ -303,6 +414,9 @@ def _build_test_smoke(
     discriminator_factory: DiscriminatorFactory | None,
     profile: VerificationProfile | None,
     pyenv: PythonBuildEnv | None,
+    launch: GateImpl,
+    owned: frozenset[str] | None = None,
+    properties: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     test_cmd = profile.test_cmd if profile is not None else None
     # Wire the held-out-mutant + behavioral-invariance discriminator into the
@@ -330,6 +444,9 @@ def _build_test_smoke(
             stack_harness=test_cmd is not None,
             profile_name=profile.name if profile is not None else "",
             pyenv=pyenv,
+            step_lint=profile.step_lint if profile is not None else "",
+            properties=properties,
+            language=profile_language(profile),
         )
     # Every run carries a smoke verdict: the stack's own run command, else an
     # attested "not pinned" PASS (the boundary is always build/test/smoke).
@@ -344,9 +461,10 @@ def _build_test_smoke(
         smoke = UnpinnedSmokeGate(seal_key=runner.seal_key)
     gates = _run_gates(
         [
-            (_build_gate(profile, runner, pyenv), _BUILD_NODE),
+            (_build_gate(profile, runner, pyenv, owned=owned), _BUILD_NODE),
             (test_gate, _TEST_NODE),
             (smoke, _SMOKE_NODE),
+            (launch, _LAUNCH_NODE),
         ],
         rt=rt,
         runner=runner,
@@ -401,6 +519,52 @@ def wave_scenarios(
     )
 
 
+def wave_owned_tests(
+    state: FactoryState, resolve: ArtifactResolver, carry: Iterable[str] = ()
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """(test files, properties) a wave check's scoped Test gate also judges
+    (``TestGate.owning``): every built ticket's files and its contracts' properties
+    (id -> "<contract>: <statement>"), as its own session's check judged them
+    (``packet._ticket_check``) — a ticket whose scenarios are not all in the wave's
+    scope too: only scenarios wait for their carriers, and a check that skipped the
+    ticket's tests passed on failures it never ran. ``carry`` (ledger items,
+    ``gate:ident``: the fix window's initial failures) adds the module of every
+    failing pytest id and every failing property, so a re-check judges each failure
+    its window opened on and cannot close green while one still fails."""
+    from foundry.agents.implementation.tickets import (
+        built_task_ids,
+        read_tickets,
+        task_id_for_ticket,
+    )
+    from foundry.agents.implementation.tickets.packet import live_contracts, ticket_properties
+
+    tickets = read_tickets(state, resolve)
+    built = built_task_ids(state)
+    contracts = live_contracts(state, resolve)
+    files: list[str] = []
+    properties: dict[str, str] = {}
+    for t in tickets:
+        if task_id_for_ticket(t.id) not in built:
+            continue
+        files.extend(t.files)
+        for line in ticket_properties(t, tickets, contracts):
+            name, _, rest = line.partition(": ")
+            pid, _, text = rest.partition(": ")
+            properties[pid] = f"{name}: {text}"
+    carried = [i.partition(":")[2] for i in carry if i.startswith("test:")]
+    pids = [i.removeprefix("property:") for i in carried if i.startswith("property:")]
+    if pids:
+        planned = planned_properties(state, resolve)
+        for pid in pids:
+            properties.setdefault(pid, planned.get(pid, f"contract property {pid}"))
+    files.extend(
+        module
+        for i in carried
+        if not i.startswith("property:") and (module := i.split("::", 1)[0]).endswith(".py")
+    )
+    return tuple(dict.fromkeys(files)), properties
+
+
 def _wave_test_gate(
     profile: VerificationProfile | None,
     runner: TwoZoneGateRunner | None,
@@ -425,6 +589,7 @@ def _wave_test_gate(
         scope=scope,
         pyenv=pyenv,
         timeout_s=timeout_s,
+        step_lint=profile.step_lint if profile is not None else "",
     )
 
 
@@ -489,14 +654,18 @@ def run_build_gate(
     workdir: Path,
     profile: VerificationProfile | None = None,
     scenarios: frozenset[str] = frozenset(),
+    launch: bool = False,
+    carry: Iterable[str] = (),
 ) -> dict[str, Any]:
     """Run the Build gate on the integrated tree (the per-wave check, §2b), plus,
     when ``scenarios`` is non-empty, the Test gate scoped to those scenarios, so an
-    unbound or failing scenario is caught in the wave that built it.
+    unbound or failing scenario is caught in the wave that built it, and with
+    ``launch`` (the last wave: the whole app is built) the Launch gate.
 
     The full Test gate is left out on purpose: scenarios of tickets not yet built
-    would fail it. Keyed under the same nodes as the final gates, so the final
-    verdicts (a later epoch) supersede every intermediate one."""
+    would fail it. ``carry``: the fix window's initial failures, judged again
+    (:func:`wave_owned_tests`). Keyed under the same nodes as the final gates, so
+    the final verdicts (a later epoch) supersede every intermediate one."""
     run_against = materialize_workdir(state, workdir, resolve=resolve, resolve_blob=resolve_blob)
     out: dict[str, Any] = {}
     files = planned_files(state, resolve)
@@ -516,16 +685,34 @@ def run_build_gate(
             for name, text in notes
         ]
     profile = gate_profile(state, profile)
+    unbuilt = unbuilt_source(profile, files, workdir)
     with _build_env(profile, workdir, rt) as pyenv:
         gates: list[tuple[GateImpl, str]] = [
-            (_build_gate(profile, runner, pyenv, planned=files), _BUILD_NODE)
+            (
+                NotApplicableGate("build", unbuilt, seal_key=runner.seal_key)
+                if unbuilt
+                else _build_gate(
+                    profile, runner, pyenv, planned=files, owned=owned_paths(state, resolve)
+                ),
+                _BUILD_NODE,
+            )
         ]
         test = _wave_test_gate(profile, runner, scenarios, pyenv) if scenarios else None
         if test is not None:
+            test = test.owning(*wave_owned_tests(state, resolve, carry))
             # Same tree digest as the build, so the fixer reads both verdicts as this
             # pass's. A scoped FAIL latching the tree is safe: the final Test gate only
             # ever runs on a later tree (a failing wave check is fixed or halts).
             gates.append((test, _TEST_NODE))
+        if launch:
+            gates.append(
+                (
+                    NotApplicableGate("launch", unbuilt, seal_key=runner.seal_key)
+                    if unbuilt
+                    else launch_gate(state, resolve, profile, runner.seal_key, pyenv),
+                    _LAUNCH_NODE,
+                )
+            )
         out["gates"] = _run_gates(
             gates,
             rt=rt,
@@ -535,6 +722,28 @@ def run_build_gate(
             workdir=workdir,
         )
     return out
+
+
+def unbuilt_source(profile: VerificationProfile | None, files: Iterable[str], workdir: Path) -> str:
+    """Why a wave check's build and launch do not apply to ``workdir`` yet ("" =
+    they do): the plan has source files in the profile's language but no ticket
+    has written any (an early wave holds only the harness). A plan with no such
+    files, or a language without known suffixes, is checked as usual; the final
+    gates always run every step."""
+    language = profile_language(profile)
+    suffixes = SOURCE_SUFFIXES.get(language, ())
+    if (
+        not suffixes
+        or (profile is not None and profile.unavailable)
+        or not any(is_app_source(f, suffixes) for f in files)
+        or has_app_source(workdir, suffixes)
+    ):
+        return ""
+    return (
+        f"not applicable yet: no {language} source file ({', '.join(suffixes)}) is built "
+        "in this wave's tree (only the harness, manifests or feature files); the next "
+        "wave's check and the final gate run every step"
+    )
 
 
 WAVE_TYPECHECK_TRIAGE = "wave-typecheck-scope"

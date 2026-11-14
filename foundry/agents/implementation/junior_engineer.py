@@ -98,6 +98,8 @@ _FIXER_CHECK_RULES = (
     "cannot run here (missing tool, no network), say so in a TRIAGE line.",
 )
 
+# Gates that run the app: a fixer sent for one re-runs it in its own check.
+_RUN_GATES = frozenset({"smoke", "launch"})
 # Claude Code needs several turns to read, write and verify; 8 left contract stubs empty.
 _DEFAULT_TURN_BUDGET = 25
 # A local model spends ~10 of a fix pass's turns re-reading files before its first edit.
@@ -203,19 +205,41 @@ def fix_target(
 ) -> tuple[FailureCluster | None, int]:
     """The failure cluster the fix loop's newest check aimed the next pass at
     (``FixPass.target``), among ``failed``'s clusters, and how many failures the
-    other clusters hold. ``(None, 0)`` before a plan, or when the plan's cluster is
-    no longer failing."""
+    other clusters hold. ``(None, 0)`` (the pass owns every failure) before a plan,
+    when the plan's cluster is no longer failing, when it is the only one, or when
+    all of them together are :data:`_MERGE_TOTAL` failures or fewer: one pass on a
+    handful of failures costs less than one per cluster, and sees how they interact."""
+    clusters = target_clusters(state, resolve, failed)
+    if not clusters:
+        return None, 0
+    aimed, *others = clusters
+    return aimed, sum(len(c.items) for c in others)
+
+
+_MERGE_TOTAL = 4
+_OTHERS_SHOWN = 8
+
+
+def target_clusters(
+    state: FactoryState,
+    resolve: ArtifactResolver,
+    failed: Sequence[GateResult],
+) -> tuple[FailureCluster, ...]:
+    """The aimed cluster (:func:`fix_target`) first, then the others; ``()`` when the
+    pass owns every failure."""
     from foundry.agents.implementation.tickets import read_tickets
     from foundry.graph.gate_wiring import cluster_owners, failure_clusters, window_passes
 
     passes = window_passes(state, resolve)
     if not passes or passes[-1].target is None:
-        return None, 0
+        return ()
     clusters = failure_clusters(failed, read_tickets(state, resolve), cluster_owners(state))
     aimed = next((c for c in clusters if c.key == passes[-1].target), None)
     if aimed is None or len(clusters) < 2:
-        return None, 0
-    return aimed, sum(len(c.items) for c in clusters if c is not aimed)
+        return ()
+    if sum(len(c.items) for c in clusters) <= _MERGE_TOTAL:
+        return ()
+    return (aimed, *(c for c in clusters if c is not aimed))
 
 
 def scope_gates(
@@ -271,13 +295,20 @@ def _cluster_gates(
     failed = _failed_gates(state)
     if not scoped:
         return failed, ()
-    cluster, others = fix_target(state, resolve, failed)
-    if cluster is None:
+    clusters = target_clusters(state, resolve, failed)
+    if not clusters:
         return failed, ()
+    cluster, *rest = clusters
+    others = [i.partition(":")[2] or i for c in rest for i in c.items]
+    shown = ", ".join(others[:_OTHERS_SHOWN]) + (
+        f" and {len(others) - _OTHERS_SHOWN} more" if len(others) > _OTHERS_SHOWN else ""
+    )
     return scope_gates(failed, cluster), (
         f"this pass fixes ONE failure cluster: {cluster.key} ({len(cluster.items)} "
-        "failure(s), listed below)",
-        f"{others} other failure(s) are handled separately — don't touch them",
+        "failure(s), listed below); every one of them is yours",
+        f"other failures, each the target of a later pass of this fix loop ({shown}): "
+        "the re-check after your pass still judges them and the next passes go after "
+        "them; not yours and not pre-existing; don't touch them",
     )
 
 
@@ -657,6 +688,7 @@ def _build_packet(
     rules: tuple[str, ...] = (),
     verify: Mapping[str, str] | None = None,
     fix_files: tuple[str, ...] = (),
+    owned_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
     effort: Effort | None = None,
 ) -> TaskPacket:
@@ -681,6 +713,8 @@ def _build_packet(
         body["verify"] = dict(verify)
     if fix_files:
         body["fix_files"] = list(fix_files)
+    if owned_files:
+        body["owned_files"] = list(owned_files)
     if diagnosis:
         body["diagnosis"] = dict(diagnosis)
     return TaskPacket(
@@ -742,6 +776,7 @@ def _run_one_task(
     review: Callable[[AdapterResult, Sandbox], AdapterResult] | None = None,
     check: CheckSpec | None = None,
     fix_files: tuple[str, ...] = (),
+    owned_files: tuple[str, ...] = (),
     diagnosis: Mapping[str, Any] | None = None,
     effort: Effort | None = None,
 ) -> dict[str, Any]:
@@ -775,6 +810,7 @@ def _run_one_task(
             rules=rules,
             verify=verify,
             fix_files=fix_files,
+            owned_files=owned_files,
             diagnosis=diagnosis,
             effort=effort,
         )
@@ -906,6 +942,16 @@ _FENCE_RULE = (
 )
 
 
+_OWNERSHIP_RULE = (
+    "Every source and test file belongs to a ticket (`owned_files`): edit those files "
+    "or a file a failure names, and never create a new module or test file — put new "
+    "code in the owning ticket's file (a new code file outside `owned_files` is "
+    "refused, and the build gate fails on one). A file the build reports as not owned "
+    "by any ticket is dead code: move anything the owned files need from it into the "
+    "owning ticket's file, then delete it."
+)
+
+
 def _feature_binders(feature: str, tree: Mapping[str, str | None]) -> list[str]:
     """The tree's ``.py`` files naming ``feature`` by file name: its step modules
     (as :func:`foundry.gates.test.binding_modules` finds them on disk)."""
@@ -1005,38 +1051,53 @@ def _binding_rule(
 
 
 def _fix_check(base: CheckBase, state: FactoryState, resolve: ArtifactResolver) -> CheckSpec:
-    """A fixer session's gate check: the scenarios a wave check judges plus every
-    scenario the failed Test gate names, its own the planned failure cluster's items
-    (every failure when no cluster is planned)."""
+    """A fixer session's gate check, red on its start tree while the failures it is
+    sent to fix still reproduce. It runs the scenarios a wave check judges (they
+    guard against regressions) plus the failing Test-gate ids the pass owns —
+    scenarios, the modules of its pytest ids and its contract properties alike
+    (``TestGate.owning`` runs the latter two) — and the smoke/launch run when the
+    pass owns a failure there.
+    Every failure of the planned cluster is the session's own (every failure when
+    the pass owns them all, :func:`fix_target`). Another cluster's failures are left
+    out of the check altogether: the session's summary names them as handled by
+    another pass, where the check would have called them pre-existing."""
     from foundry.gates.self_check import CheckSpec
     from foundry.graph.gate_wiring import failing_ids, wave_scenarios
+    from foundry.graph.gate_wiring.runs import planned_properties
 
     failed = _failed_gates(state)
-    cluster, _ = fix_target(state, resolve, failed)
-    items = cluster.items if cluster is not None else ()
+    clusters = target_clusters(state, resolve, failed)
+    cluster = clusters[0] if clusters else None
     # The final gate runs every scenario, an unbuilt ticket's too: a check scoped to
     # the built tickets' alone opened green on the very scenarios the fixer was sent
     # to make run.
-    red = {
-        ref
-        for g in failed
-        if g.name == "test"
-        for ref in failing_ids(g.findings)
-        if ".feature::" in ref
-    }
+    red = {ref for g in failed if g.name == "test" for ref in failing_ids(g.findings)}
+    if cluster is None:
+        own = red
+        others: set[str] = set()
+        run_gates = any(g.name in _RUN_GATES and g.status is GateStatus.FAIL for g in failed)
+    else:
+        own = {i.partition(":")[2] for i in cluster.items if i.startswith("test:")}
+        others = {i.partition(":")[2] for c in clusters[1:] for i in c.items} - own
+        run_gates = any(i.startswith(("smoke:", "launch:")) for i in cluster.items)
+    scenarios = {r for r in own if ".feature::" in r}
+    pids = {r.removeprefix("property:") for r in own if r.startswith("property:")}
+    planned = planned_properties(state, resolve) if pids else {}
     return CheckSpec(
         base=base,
-        scope=wave_scenarios(state, resolve) | red,
-        own_refs=(
-            frozenset(i.partition(":")[2] for i in items if i.startswith("test:"))
-            if cluster is not None
-            else None
+        scope=frozenset((wave_scenarios(state, resolve) - others) | scenarios),
+        own_refs=frozenset(own) if cluster is not None else None,
+        # TestGate.owning runs these: the modules of the failing pytest ids (a step
+        # module among them is judged through its scenarios) and the properties.
+        own_tests=tuple(
+            sorted({r.split("::", 1)[0] for r in own - scenarios if not r.startswith("property:")})
         ),
-        own_build=cluster is None or any(i.startswith("build:") for i in items),
+        properties={pid: planned.get(pid, f"contract property {pid}") for pid in sorted(pids)},
+        own_build=cluster is None or any(i.startswith("build:") for i in cluster.items),
         # The fixer's check runs only build + scenarios: a red smoke (smoke.py never
         # written) stayed invisible to it, and it called done on a tree that failed.
-        smoke=any(g.name == "smoke" and g.status is GateStatus.FAIL for g in failed),
-        own_smoke=cluster is None or any(i.startswith("smoke:") for i in items),
+        smoke=run_gates,
+        own_smoke=run_gates,
         rules=dict(zip(_FIXER_RULES, _FIXER_CHECK_RULES, strict=False)),
     )
 
@@ -1117,11 +1178,44 @@ def make_fixer_node(
         )
         if duplicates:
             failures = (*failures, f"[{CONTRACT_DUP_TRIAGE}]", *duplicates)
+        from foundry.agents.implementation.tickets.constants import (
+            CONTRACT_KIND,
+            ENTRYPOINT_DUP_TRIAGE,
+        )
+        from foundry.agents.implementation.tickets.contracts import (
+            dependency_symbols,
+            entrypoint_redefinitions,
+        )
+        from foundry.agents.implementation.tickets.packet import _newest_by
+        from foundry.schemas.architecture import InterfaceContract
+
+        tickets = read_tickets(state, resolve)
+        planned = _newest_by(state, resolve, CONTRACT_KIND, InterfaceContract, "name")
+        redefined = tuple(
+            finding
+            for t in tickets
+            if t.entrypoint
+            for finding in entrypoint_redefinitions(
+                {f: overlay.get(f) for f in t.files},
+                {f: text for f, text in overlay.items() if f not in t.files},
+                dependency_symbols(t, tickets, planned),
+            )
+        )
+        if redefined:
+            failures = (*failures, f"[{ENTRYPOINT_DUP_TRIAGE}]", *redefined)
+        from foundry.agents.implementation.tickets import upstream_defect_context
+
+        defects, defect_files = upstream_defect_context(state, tickets)
+        failures = (*failures, *defects)
         from foundry.agents.implementation.tickets import note_fix_writes, pending_wave
 
         focus = _fix_focus(state, resolve)
         contracts = contract_paths(state, resolve)
         fix_files = _fix_files(state, resolve, overlay)
+        if fix_files and defect_files:
+            # A defect's owning files join the fence: the session that found it could
+            # not write them, and this pass is where it gets fixed.
+            fix_files = tuple(dict.fromkeys((*fix_files, *defect_files)))
         # Numbered by the fixes so far, not the attempt counter: that resets per wave
         # and on a resume, and a reused id would collide with the earlier fix's notes.
         fixes = {
@@ -1143,10 +1237,12 @@ def make_fixer_node(
                 tree=overlay,
                 allowed=fix_files,
             )
+        owned_files = tuple(sorted({f for t in tickets for f in t.files} | set(contracts)))
         rules = (
             *_FIXER_RULES[:2],
             _binding_rule(_cluster_gates(state, resolve)[0], _failed_gates(state), contracts),
             *((_FENCE_RULE,) if fix_files else ()),
+            *((_OWNERSHIP_RULE,) if owned_files else ()),
         )
         persona = _FIXER_PERSONA
         if focus and pending_wave(state, resolve):
@@ -1203,6 +1299,7 @@ def make_fixer_node(
                 ),
                 check=_fix_check(base, state, resolve) if base is not None else None,
                 fix_files=fix_files,
+                owned_files=owned_files,
                 diagnosis=diagnosis.packet_field(fix_files) if diagnosis is not None else None,
                 effort=fix_effort(attempt),
             )

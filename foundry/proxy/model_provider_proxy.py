@@ -139,9 +139,12 @@ Purpose = Literal["ideation", "gate", "judgment"]
 _PURPOSES = ("ideation", "gate", "judgment")
 
 # A finding's evidence: the failing gate/test it cites, or a reproducible command
-# with its expected and actual result. "" means absent (strict grammars need every
-# field present).
-_EVIDENCE_FIELDS = ("failing_check", "command", "expected", "actual")
+# with what a correct app does and what this one did. "" means absent (strict
+# grammars need every field present). Not "expected"/"actual": reviewers read
+# "expected" as "what I predict" and filled both with the observed crash.
+_EVIDENCE_FIELDS = ("failing_check", "command", "correct_result", "observed_result")
+# Cached calls and stored verdicts predating the rename.
+_LEGACY_RESULT_FIELDS = {"correct_result": "expected", "observed_result": "actual"}
 _FINDING_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -166,7 +169,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
 
 ADVISORY_PREFIX = "[advisory: no failing check or differing reproduction] "
 # Strict grammars make the model fill every field, so "no evidence" often arrives
-# as a placeholder rather than "". Only for the citing fields: an expected/actual of
+# as a placeholder rather than "". Only for the citing fields: a result of
 # "None" or "null" is a real observed value.
 _PLACEHOLDERS = frozenset(
     {
@@ -225,6 +228,34 @@ def _norm(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
+def _result(item: dict[str, Any], field: str) -> str:
+    value = item.get(field)
+    if value is None:
+        value = item.get(_LEGACY_RESULT_FIELDS[field], "")
+    return str(value).strip()
+
+
+# An observed crash: a correct app never answers with one, whatever the reviewer
+# wrote as the correct result (reviewers have echoed the crash into both fields).
+_CRASH = re.compile(
+    r"traceback|(?-i:\b[A-Z]\w*(?:Error|Exception)\b)|\b(?:raised|threw|thrown)\b"
+    r"|\bpanic:|segmentation fault|core dumped"
+    r"|\bcrash(?:ed|es)?\b|\buncaught\b|\bunhandled\b|internal server error"
+    r"|\b(?:http|status|code)\W{0,3}5\d\d\b|\b5\d\d (?:bad gateway|service unavailable)"
+    r"|\bexit(?:ed)?(?: with)?(?: code| status)?\W{0,3}(?:[1-9]\d*|-\d+)\b"
+    r"|killed by signal|\bsig(?:segv|abrt|kill)\b",
+    re.IGNORECASE,
+)
+
+
+def _backed_reproduction(command: str, correct: str, observed: str) -> bool:
+    if not (command and observed):
+        return False
+    if _CRASH.search(observed) and not _CRASH.search(correct):
+        return True
+    return bool(correct) and _norm(correct) != _norm(observed)
+
+
 def _verdict_findings(
     raw: object, failing_gates: Iterable[str] = (), failing_tests: Iterable[str] = ()
 ) -> tuple[tuple[str, ...], bool]:
@@ -234,7 +265,8 @@ def _verdict_findings(
     passing scenario as its "failing check". So a finding blocks only if it names
     one of ``failing_gates`` / ``failing_tests`` (what failed on the reviewed tree,
     per the caller's attested ``gates`` channel; see :func:`_failing_match`), or it
-    gives a command whose expected and actual results differ. The rest are kept,
+    gives a command whose observed result differs from the correct one, or shows
+    a crash (exception, 5xx, crash exit) a correct result does not. The rest are kept,
     prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
     backend) cites nothing."""
     gates, tests = tuple(failing_gates), tuple(failing_tests)
@@ -246,11 +278,11 @@ def _verdict_findings(
             continue
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
-        expected, actual = (str(item.get(f, "")).strip() for f in ("expected", "actual"))
+        correct, observed = _result(item, "correct_result"), _result(item, "observed_result")
         if (matched := _failing_match(check, command, gates, tests)) is not None:
             out.append(f"{text} [evidence: failing {matched}]")
-        elif command and expected and actual and _norm(expected) != _norm(actual):
-            out.append(f"{text} [evidence: `{command}` expected {expected!r}, got {actual!r}]")
+        elif _backed_reproduction(command, correct, observed):
+            out.append(f"{text} [evidence: `{command}` expected {correct!r}, got {observed!r}]")
         else:
             note = f" [cites {check}: not failing in this build's gates]" if check else ""
             out.append(ADVISORY_PREFIX + text + note)
@@ -411,11 +443,43 @@ LOCAL_THINKING_ENV = "FOUNDRY_LOCAL_THINKING"
 LocalThinking = Literal["off", "on", "agent"]
 _LOCAL_THINKING_MODES: tuple[LocalThinking, ...] = ("off", "on", "agent")
 _AGENT_NODE_IDS = frozenset({"junior_engineer"})
+_PLANNER_NODE_IDS = frozenset({"planner"})
 # The output-token floor per thinking level: a thinking turn spends its reasoning
 # out of the answer's budget, and at xhigh a hard ticket or the planner's plan JSON
 # can think for 20K+ tokens first, so xhigh gets what a 128K context leaves after
 # the prompt. Low keeps medium's floor: the answer (a whole file) still needs room.
 _LOCAL_THINKING_MAX_TOKENS: dict[Effort, int] = {"low": 40960, "medium": 40960, "xhigh": 98304}
+# A planner call's floor below xhigh: medium's 32K of reasoning plus a plan's JSON
+# (6K-12.5K tokens; 44K chars at most in four local rounds). At 40960 both round-4
+# first plans reasoned near their budget and were cut 6K-9K tokens into the answer.
+_LOCAL_PLAN_MAX_TOKENS = 57344
+# Reasoning a local call may stream before its answer starts; past it the call is
+# aborted and retried a level lower (``ThinkingBudgetExceeded``), and a retry never
+# gets more than the budget the aborted attempt ran past. Sized from the cached
+# calls of three local bench rounds (qwen3.8 27B, ~22 tok/s, ~4.5 reasoning chars
+# a token):
+# - Agent turns (501): reasoning p95 ~2.2K tokens, p98 ~3.8K, p99 ~4.9K, but a
+#   good whole-file write turn reasons 4K-4.4K. At 5K medium such turns aborted,
+#   and sessions that then ran without thinking hit the 40-turn cap unconverged
+#   (26-34 turns, against 5-16 for sessions that kept thinking): 8K clears them.
+# - Verdicts (12): 4.7K-13.5K tokens. At 8K low a review aborted and its retry
+#   without thinking wrote ~250 tokens of invented evidence: 12K low.
+# - Plans (10): the seven full plans reasoned ~20K-27K tokens (71K-104K chars), so
+#   medium's 32K cuts none; repairs and deltas under 3K. A 93-minute planner repair
+#   ran unbounded before this table had a planner row.
+# Every other call is bounded only once its answer could no longer fit.
+_LOCAL_REASONING_BUDGETS: dict[str, dict[Effort, int]] = {
+    "agent": {"low": 5120, "medium": 8192, "xhigh": 16384},
+    "judgment": {"low": 12288, "medium": 16384, "xhigh": 24576},
+    "planner": {"low": 16384, "medium": 32768, "xhigh": 24576},
+}
+# The least output an answer needs: reasoning that leaves less room than this under
+# ``max_tokens`` can only end in a length stop. A plan's JSON runs 6K-12.5K tokens,
+# so its reserve also caps a delta (32K output) at ~16K of reasoning.
+_ANSWER_RESERVE_TOKENS = 4096
+_PLAN_ANSWER_RESERVE_TOKENS = 16384
+# The request fields that set a local call's thinking level and its budget.
+_EFFORT_FIELDS = ("local_thinking", "local_effort", "local_reasoning_budget")
 # Run fire count of each local attempt sent (not replayed), by the thinking level it
 # was sent at (a retry may lower it) or "off".
 EFFORT_COUNT_PREFIX = "effort."
@@ -444,6 +508,16 @@ def local_thinking_for(model_id: str, setting: LocalThinking | None, *, agent: b
         name = model_id.lower()
         return fnmatchcase(name, "*qwen3*") and "coder" not in name
     return setting == "on" or (setting == "agent" and agent)
+
+
+def _reasoning_budgets(kind: str | None, max_tokens: int) -> dict[Effort, int]:
+    """Each thinking level's reasoning budget for a call of ``kind`` ("agent",
+    "judgment", "planner", or None for any other) whose output is capped at
+    ``max_tokens``."""
+    reserve = _PLAN_ANSWER_RESERVE_TOKENS if kind == "planner" else _ANSWER_RESERVE_TOKENS
+    doomed = max(max_tokens - reserve, max_tokens // 2)
+    table = _LOCAL_REASONING_BUDGETS.get(kind or "", {})
+    return {level: min(table.get(level, doomed), doomed) for level in _LOCAL_THINKING_MAX_TOKENS}
 
 
 def _estimated_prompt_tokens(request: Mapping[str, Any]) -> int:
@@ -518,6 +592,29 @@ class ProxyUnavailable(RuntimeError):
     def __init__(self, message: str, *, replayable: bool = True) -> None:
         super().__init__(message)
         self.replayable = replayable
+
+
+class OutputLimitReached(ProxyUnavailable):
+    """A structured reply cut at the caller's ``max_tokens`` cap: re-rolling the same
+    request would spend the same budget and stop at the same place, so the caller
+    shrinks its request instead (the reviewer trims its diff)."""
+
+
+_LENGTH_STOPS = frozenset({"length", "max_tokens"})
+
+
+class ThinkingBudgetExceeded(RuntimeError):
+    """A local thinking call's reasoning passed its budget before any answer began,
+    and the transport aborted it. ``response`` is the partial observation (no text,
+    the reasoning so far, estimated usage); the proxy retries a level lower."""
+
+    def __init__(self, response: ProviderResponse, budget: int) -> None:
+        super().__init__(
+            f"reasoning passed its {budget}-token budget before the answer began: "
+            "think briefly, then answer"
+        )
+        self.response = response
+        self.budget = budget
 
 
 class PinnedIdDriftError(RuntimeError):
@@ -607,19 +704,36 @@ def is_transient_failure(exc: BaseException) -> bool:
 _MISS_TAIL_CHARS = 2000
 
 
+_ONE_LEVEL_LOWER: dict[str, Effort] = {"xhigh": "medium", "medium": "low"}
+
+
 def _lower_effort(request: dict[str, Any]) -> dict[str, Any]:
-    """``request`` one local thinking level lower (xhigh -> medium -> off; low ->
-    off) when it thinks, its local seed re-derived from the new request."""
+    """``request`` one local thinking level lower (xhigh -> medium -> low -> off)
+    when it thinks, its local seed re-derived from the new request."""
     lowered = dict(request)
     if lowered.get("local_thinking") is True:
-        if lowered.get("local_effort") == "xhigh":
-            lowered["local_effort"] = "medium"
+        lower = _ONE_LEVEL_LOWER.get(str(lowered.get("local_effort")))
+        if lower is not None:
+            lowered["local_effort"] = lower
         else:
             lowered["local_thinking"] = False
-    if "local_sampling" in lowered:
-        profile = {k: v for k, v in lowered["local_sampling"].items() if k != "seed"}
-        lowered["local_sampling"] = _seeded(lowered, profile)
-    return lowered
+    return _reseeded(lowered)
+
+
+def _reseeded(request: dict[str, Any]) -> dict[str, Any]:
+    """``request`` with its local sampling seed re-derived from it."""
+    if "local_sampling" in request:
+        profile = {k: v for k, v in request["local_sampling"].items() if k != "seed"}
+        request = {**request, "local_sampling": _seeded(request, profile)}
+    return request
+
+
+def _capped_budgets(request: dict[str, Any], cap: int) -> dict[str, Any]:
+    """``request`` with no thinking level's reasoning budget above ``cap``."""
+    budgets = request.get("local_reasoning_budget")
+    if not isinstance(budgets, dict):
+        return request
+    return {**request, "local_reasoning_budget": {k: min(v, cap) for k, v in budgets.items()}}
 
 
 def _with_parse_correction(
@@ -628,22 +742,38 @@ def _with_parse_correction(
     attempt: int,
     error: str = "",
     previous: dict[str, Any] | None = None,
+    *,
+    lower: bool | None = None,
 ) -> dict[str, Any]:
     """``request`` with the previous unparseable reply's error and tail in its last
-    user turn, one thinking level below ``previous`` (the attempt that missed;
+    user turn, at the thinking level of ``previous`` (the attempt that missed;
     default ``request``): a temperature-0 (or seeded) call resent unchanged
-    returns the same reply (and the call cache would replay it), and a model that
-    rambled past a parseable answer at one effort will again."""
+    returns the same reply (and the call cache would replay it).
+
+    ``lower`` steps that level down one; by default it does unless the reply was
+    an answer cut at the output cap. That reply's reasoning was not the problem:
+    its retry keeps the level and is told to be markedly shorter, where a retry
+    without thinking would answer with no plan behind it."""
     text = miss.text or ""
+    cut = miss.stop_reason in _LENGTH_STOPS and bool(text.strip())
+    if lower is None:
+        lower = not cut
     tail = text[-_MISS_TAIL_CHARS:]
     shown = f" It ended with:\n<<<\n{tail}\n>>>\n" if tail.strip() else " It was empty. "
+    concise = (
+        "It was cut off at the output limit, so this reply must be markedly shorter: "
+        "the same content, every string as short as it can be, no repeated or "
+        "near-duplicate entries, and less reasoning before it."
+        if cut
+        else "If it was cut off it ran past the output limit: be concise, with short "
+        "strings and no repeated or near-duplicate entries."
+    )
     note = (
         f"\n\n[Retry {attempt}: your previous reply ({len(text)} chars, stop reason "
         f"{miss.stop_reason!r}) was not one complete JSON object"
         f"{f' ({error})' if error else ''}.{shown}"
         "Reply with ONLY that JSON object, complete, with no prose before or after it. "
-        "If it was cut off it ran past the output limit: be concise, with short strings "
-        "and no repeated or near-duplicate entries.]"
+        f"{concise}]"
     )
     messages = [dict(m) for m in request.get("messages") or ()]
     last = messages[-1] if messages else None
@@ -654,8 +784,9 @@ def _with_parse_correction(
     else:
         messages.append({"role": "user", "content": note.strip()})
     base = previous if previous is not None else request
-    effort = {k: base[k] for k in ("local_thinking", "local_effort") if k in base}
-    return _lower_effort({**request, **effort, "messages": messages})
+    effort = {k: base[k] for k in _EFFORT_FIELDS if k in base}
+    retry = {**request, **effort, "messages": messages}
+    return _lower_effort(retry) if lower else _reseeded(retry)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1189,6 +1320,7 @@ class ModelProviderProxy:
         schema: dict[str, Any] | None = None,
         tools: Sequence[dict[str, Any]] | None = None,
         effort: Effort | None = None,
+        max_tokens: int | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
@@ -1198,7 +1330,9 @@ class ModelProviderProxy:
         a tool channel raises :class:`ToolsUnsupported`. ``effort`` overrides the
         local thinking level (agent turns and verdicts medium, other one-shot calls
         xhigh): a ticket's session thinks at its difficulty's level, a plan repair
-        (an edit, not an invention) at medium."""
+        (an edit, not an invention) at medium. ``max_tokens`` caps the output budget
+        after that sizing; a structured reply cut at length under it is not
+        re-rolled but raises :class:`OutputLimitReached` at once."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1215,20 +1349,35 @@ class ModelProviderProxy:
         )
         if local:
             request["local_thinking"] = thinking
+        agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
+        kind = (
+            "agent"
+            if agent_turn
+            else "judgment"
+            if purpose == "judgment"
+            else "planner"
+            if node_id in _PLANNER_NODE_IDS
+            else None
+        )
         if thinking:
             # Qwen3.8 guidance: xhigh for planning and hard one-shot calls, medium in
             # agent loops (one turn of many). A verdict is advisory: at xhigh a local
             # review took 9-10 minutes a case instead of 2.5 with no better findings.
-            agent_turn = node_id in _AGENT_NODE_IDS or bool(tools)
             level: Effort = effort or ("medium" if agent_turn or purpose == "judgment" else "xhigh")
             request["local_effort"] = level
             request["max_tokens"] = max(
-                int(request["max_tokens"]), _LOCAL_THINKING_MAX_TOKENS[level]
+                int(request["max_tokens"]),
+                _LOCAL_THINKING_MAX_TOKENS[level],
+                _LOCAL_PLAN_MAX_TOKENS if kind == "planner" else 0,
             )
         elif purpose == "judgment" and local:
             # A verdict is ~1k tokens; a local model stuck repeating findings runs to
             # the cap at ~12 tok/s, so each such attempt would cost ~20 minutes.
             request["max_tokens"] = min(int(request["max_tokens"]), _LOCAL_JUDGMENT_MAX_TOKENS)
+        if max_tokens is not None:
+            request["max_tokens"] = min(int(request["max_tokens"]), max_tokens)
+        if thinking:
+            request["local_reasoning_budget"] = _reasoning_budgets(kind, int(request["max_tokens"]))
         if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
             if profile is not None:
@@ -1254,7 +1403,14 @@ class ModelProviderProxy:
         else:
             progress.log(f"start {label}")
             started = time.monotonic()
-            response, parsed = self._send_with_retry(request, schema=schema, tier=tier, label=label)
+            response, parsed = self._send_with_retry(
+                request,
+                schema=schema,
+                tier=tier,
+                label=label,
+                capped=max_tokens is not None,
+                retry_at_floor=purpose == "judgment",
+            )
             progress.finished(label, started, response.usage, self.token_meter)
             self._cache_put(request, schema, response)
             if local:
@@ -1348,6 +1504,7 @@ class ModelProviderProxy:
         failing_gates: Iterable[str] = (),
         failing_tests: Iterable[str] = (),
         effort: Effort | None = None,
+        max_tokens: int | None = None,
     ) -> JudgmentResult:
         """Run a judgment call and return a proxy-stamped ``GateResult``.
 
@@ -1360,7 +1517,7 @@ class ModelProviderProxy:
         ``failing_gates`` / ``failing_tests`` are the gate names and test/scenario
         ids that failed on the reviewed tree in the caller's attested gate results;
         a finding citing anything else blocks only with a differing reproduction
-        (:func:`_verdict_findings`). ``effort`` is :meth:`complete`'s.
+        (:func:`_verdict_findings`). ``effort`` and ``max_tokens`` are :meth:`complete`'s.
         """
         if self._signer is None:
             raise RuntimeError(
@@ -1380,6 +1537,7 @@ class ModelProviderProxy:
             purpose="judgment",
             schema=VERDICT_SCHEMA,
             effort=effort,
+            max_tokens=max_tokens,
         )
         verdict = completion.parsed
         if not isinstance(verdict, dict) or verdict.get("status") not in _STATUS_BY_VERDICT:
@@ -1387,11 +1545,10 @@ class ModelProviderProxy:
                 f"constrained verdict channel returned out-of-grammar payload: {verdict!r}"
             )
         findings, backed = _verdict_findings(verdict.get("findings"), failing_gates, failing_tests)
-        status = _STATUS_BY_VERDICT[verdict["status"]]
-        if not backed:
-            # Decided here, before the binding is stamped: a downgrade after signing
-            # would void the verdict.
-            status = GateStatus.PASS
+        # Decided here, before the binding is stamped: a change after signing would
+        # void the verdict. A backed finding blocks even under an "approve": models
+        # approve while listing a reproduced defect.
+        status = GateStatus.FAIL if backed else GateStatus.PASS
         unstamped = GateResult(
             name=gate_name,
             status=status,
@@ -1546,8 +1703,17 @@ class ModelProviderProxy:
         schema: dict[str, Any] | None = None,
         tier: str | None = None,
         label: str | None = None,
+        capped: bool = False,
+        retry_at_floor: bool = False,
     ) -> tuple[ProviderResponse, dict[str, Any] | None]:
         """Bounded retry/backoff, then fail closed; returns (response, parsed).
+
+        A local call whose reasoning ran past its budget is retried one thinking
+        level lower, that call only: the next call starts at its own level again
+        (a session kept without thinking after one abort ran to its turn cap).
+        With ``retry_at_floor`` a structured call aborted at the lowest level first
+        retries there once, told to think briefly, before it answers without
+        thinking (a verdict written with no reasoning invents its evidence).
 
         When a ``schema`` is set the structured-output PARSE is part of the
         retried unit: a CLI backend that returns prose / a fence / empty for a
@@ -1578,6 +1744,7 @@ class ModelProviderProxy:
             progress.log(f"{what} — {reason} [{n}/{budget + 1}], waiting {wait:.0f}s")
 
         sent = request
+        floor_retried = False
         while True:
             # Every attempt, not only the first: a local call can run many minutes,
             # and its retries must not carry a run far past its caps.
@@ -1591,20 +1758,63 @@ class ModelProviderProxy:
                     response = transport.send(sent)
                 if meter is not None and not local:
                     meter.charge(response.usage)
+                elif meter is not None:
+                    meter.note_local(response.usage)
                 parsed = None
                 if schema is not None:
                     try:
                         parsed = _extract_json_object(response.text)
                     except StructuredOutputError as miss:
+                        if capped and response.stop_reason in _LENGTH_STOPS:
+                            raise OutputLimitReached(
+                                f"{miss}: the reply stopped at the {sent.get('max_tokens')}"
+                                "-token output cap"
+                            ) from None
+                        # Only a first cut answer keeps its level: a second cut at
+                        # it would be one more attempt run to the same cap.
                         sent = _with_parse_correction(
-                            request, response, attempt + 1, str(miss), previous=sent
+                            request,
+                            response,
+                            attempt + 1,
+                            str(miss),
+                            previous=sent,
+                            lower=None if attempt == 0 else True,
                         )
                         raise StructuredOutputError(
                             f"{miss} (stop reason {response.stop_reason!r})"
                         ) from None
                 return response, parsed
-            except ToolsUnsupported:
+            except (ToolsUnsupported, OutputLimitReached):
                 raise
+            except ThinkingBudgetExceeded as over:
+                # Not a failed attempt: each abort steps the effort down, and a call
+                # that does not think carries no budget, so this ends. Never cached:
+                # only the answer of the level that finishes is.
+                if meter is not None:
+                    meter.note_local(over.response.usage)
+                progress.log(f"{what} — {over}; retrying")
+                if schema is not None:
+                    stay = (
+                        retry_at_floor
+                        and not floor_retried
+                        and sent.get("local_effort") not in _ONE_LEVEL_LOWER
+                    )
+                    floor_retried = floor_retried or stay
+                    sent = _with_parse_correction(
+                        request,
+                        over.response,
+                        attempt + 1,
+                        str(over),
+                        previous=sent,
+                        lower=not stay,
+                    )
+                else:
+                    effort = {k: sent[k] for k in _EFFORT_FIELDS if k in sent}
+                    sent = _lower_effort({**request, **effort})
+                # A lower level's own budget can be the larger (a planner repair
+                # thinks at xhigh under medium's budget): never retry into more.
+                sent = _capped_budgets(sent, over.budget)
+                continue
             except Exception as exc:
                 if _is_wall_clock_kill(exc) or (local and _is_local_timeout(exc)):
                     if kill_attempt >= _WALL_CLOCK_KILL_RETRIES:

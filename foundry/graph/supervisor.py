@@ -22,8 +22,12 @@ Topology (the SOP phase order — agents.md, governance §1 gate boundaries)::
       -> quality             # Layer 4 subgraph (TestPlan/Report/E2E + review)
       -> build_test_gate     # [BUILD + TEST gates] on the integrated tree
          --(advance)--> END
+         --(advance, a review finding backed by a reproduction)--> review_check
          --(fix)-----> build_test_fix -> implementation   (bounded re-verification)
          --(halt)----> END
+      review_check           # [REPRO gate] re-runs those findings on the final tree
+         --(nothing reproduced)--> END
+         --(reproduced)--> build_test_fix   (max_review_fixes passes, then halt)
 
 Resume after a HALT: a halted run ends (``emit`` marks it ``halted``) with no
 pending node, so a rerun must start a new LangGraph run. A seed carrying
@@ -90,6 +94,13 @@ from foundry.graph.gate_wiring import (
     settle_fix_attempts,
 )
 from foundry.graph.gate_wiring.best import keep_splits_if_fixing
+from foundry.graph.gate_wiring.review_repro import (
+    REVIEW_CHECK_NODE,
+    bump_review_fixes,
+    review_check_pending,
+    route_review_check,
+    run_review_check,
+)
 from foundry.graph.subgraphs.implementation import build_implementation_subgraph
 from foundry.graph.subgraphs.planner import build_planner_subgraph
 from foundry.graph.subgraphs.quality import build_quality_subgraph
@@ -136,6 +147,8 @@ _SPEC_GATE = "spec_gate"
 _IMPLEMENTATION = "implementation"
 _QUALITY = "quality"
 _BUILD_TEST_GATE = "build_test_gate"
+# Re-runs the review's backed findings on the final tree (gate_wiring.review_repro).
+_REVIEW_CHECK = REVIEW_CHECK_NODE
 # The bounded re-verification nodes: bump the convergence counter, then edge
 # back to the responsible layer (the layer that must regenerate the tree).
 _SPEC_FIX = "spec_fix"
@@ -262,6 +275,7 @@ def build_supervisor_graph(
     on_task: TaskEventHook | None = None,
     fix_policy: FixPolicy | None = None,
     self_check_mode: str | None = None,
+    max_review_fixes: int = 1,
 ) -> StateGraph[FactoryState]:
     """Build the UNCOMPILED supervisor graph over :class:`FactoryState`.
 
@@ -307,6 +321,9 @@ def build_supervisor_graph(
         bounded: :class:`~foundry.graph.gate_wiring.FixPolicy`. The default is the
         ``max_fix_attempts`` bound; ``until_cap`` fixes until a dead-end rule or the
         run's time cap stops it. The Spec boundary always keeps the attempts bound.
+    max_review_fixes:
+        How many fix passes the review check (``review_check``) may send a
+        reproduced review finding to; past it the run halts on the attested FAIL.
     Returns the ``StateGraph`` UNCOMPILED — ``factory_graph`` (T-M1-14) compiles
     it, attaches the shared checkpointer, and appends the emit node.
     """
@@ -444,8 +461,8 @@ def build_supervisor_graph(
         return out
 
     # The gates read the stack off state at gate time, so the boundary cannot
-    # depend on it: it is always {build, test, smoke}, and a stack without a run
-    # command records an attested "not pinned" smoke PASS.
+    # depend on it: it is always {build, test, smoke, launch}; a stack without a run
+    # command records an attested "not pinned" smoke PASS, a library a launch one.
     bt_boundary = BUILD_TEST_SMOKE_BOUNDARY
 
     def _final_gates(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
@@ -492,6 +509,26 @@ def build_supervisor_graph(
             ),
         )
         return out
+
+    # -- review check: attest the review's backed findings by re-running them ---
+    def review_check(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        _stop_if_cancelled()
+        out = run_review_check(
+            state,
+            config,
+            rt=rt,
+            runner=runner,
+            resolve=resolve,
+            resolve_blob=resolve_blob,
+            workdir=_gate_workdir("review_check"),
+            profile=profile,
+        )
+        out["phase"] = _REVIEW_CHECK
+        bump_review_fixes(state, out, max_review_fixes=max_review_fixes)
+        return out
+
+    def _route_review_check(state: FactoryState) -> str:
+        return route_review_check(state, max_review_fixes=max_review_fixes)
 
     # -- bounded re-verification (fix) nodes ----------------------------------
     # The counter is already bumped by the gate node; the fix node just marks the
@@ -569,6 +606,10 @@ def build_supervisor_graph(
         # (_route_implementation): review it now, once.
         if decision == ADVANCE and policy.until_cap and _review_skipped(state):
             return _QUALITY
+        # The gates passed: a review finding backed by a reproduction is re-run on
+        # this tree before the run ends.
+        if decision == ADVANCE and review_check_pending(state, rt.cas):
+            return _REVIEW_CHECK
         return decision
 
     def _review_skipped(state: FactoryState) -> bool:
@@ -588,7 +629,7 @@ def build_supervisor_graph(
             )
             == ADVANCE
         ):
-            return END
+            return _REVIEW_CHECK if review_check_pending(state, rt.cas) else END
         return _BUILD_TEST_GATE
 
     # -- register nodes (concrete defs; SG2/IM5 mypy seam) --------------------
@@ -600,6 +641,7 @@ def build_supervisor_graph(
     g.add_node(_BUILD_TEST_GATE, build_test_gate)
     g.add_node(_SPEC_FIX, spec_fix)
     g.add_node(_BUILD_TEST_FIX, build_test_fix)
+    g.add_node(_REVIEW_CHECK, review_check)
     g.add_node(_TOKEN_CAP, token_cap)
 
     # -- wire the phase sequence ----------------------------------------------
@@ -633,14 +675,28 @@ def build_supervisor_graph(
     )
     g.add_edge(_TOKEN_CAP, _IMPLEMENTATION)
     g.add_conditional_edges(
-        _QUALITY, _route_quality, {_BUILD_TEST_GATE: _BUILD_TEST_GATE, END: END}
+        _QUALITY,
+        _route_quality,
+        {_BUILD_TEST_GATE: _BUILD_TEST_GATE, _REVIEW_CHECK: _REVIEW_CHECK, END: END},
     )
 
     # BUILD+TEST boundary: advance -> END; fix -> back to implementation; halt -> END.
     g.add_conditional_edges(
         _BUILD_TEST_GATE,
         _route_build_test,
-        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END, _QUALITY: _QUALITY},
+        {
+            "advance": END,
+            "fix": _BUILD_TEST_FIX,
+            "halt": END,
+            _QUALITY: _QUALITY,
+            _REVIEW_CHECK: _REVIEW_CHECK,
+        },
+    )
+    # A reproduced review finding: one bounded fix pass (max_review_fixes), then halt.
+    g.add_conditional_edges(
+        _REVIEW_CHECK,
+        _route_review_check,
+        {"advance": END, "fix": _BUILD_TEST_FIX, "halt": END},
     )
     g.add_edge(_BUILD_TEST_FIX, _IMPLEMENTATION)  # re-verify the responsible layer
 

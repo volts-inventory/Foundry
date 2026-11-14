@@ -46,7 +46,7 @@ import json
 import math
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import EllipsisType
 from typing import Any, Literal
@@ -273,6 +273,15 @@ def _usage(
     }
 
 
+def cost_usage(envelope: Mapping[str, Any]) -> dict[str, int]:
+    """The claude CLI's own ``total_cost_usd`` as a usage entry (microdollars); 0 on
+    subscription auth, absent when the envelope carries none."""
+    cost = envelope.get("total_cost_usd")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return {}
+    return {"cost_microusd": round(cost * 1_000_000)}
+
+
 def _as_int(value: Any) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
@@ -491,7 +500,8 @@ class ClaudeCliTransport:
                 output_tokens=_as_int(u.get("output_tokens")),
                 cache_read=_as_int(u.get("cache_read_input_tokens")),
                 cache_creation=_as_int(u.get("cache_creation_input_tokens")),
-            ),
+            )
+            | cost_usage(parsed),
             stop_reason="end_turn" if subtype in (None, "success") else str(subtype),
         )
 

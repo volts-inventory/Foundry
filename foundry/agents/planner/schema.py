@@ -102,7 +102,10 @@ _TICKET_RULES = (
     "separate agent session and gate run, and every hand-off between tickets is a "
     "chance to mismatch. A ticket is one coherent slice of the product: its closely "
     "related behaviours and their files; tickets meet at interface contracts. State "
-    "what each ticket must do and why, not how to implement it. NAMES: name every "
+    "what each ticket must do and why, not how to implement it, and never restate "
+    "what its own fields carry (the signatures of the contracts it implements or "
+    "consumes, its scenarios, its files): its build session gets those verbatim. "
+    "NAMES: name every "
     "ticket id, module and test file after its domain (ticket stats -> stats.py, "
     "ticket cli -> features/cli.feature and tests/test_cli.py), never after a "
     "ticket number (T3, T3.feature, test_T2.py): the gate names a ticket's feature "
@@ -134,7 +137,12 @@ _TICKET_RULES = (
     "(test_x_routes.py + test_x_service.py): only one binds the scenarios and the "
     "rest are dropped (checked). Never list a .feature file in files[]: "
     "feature files are gate-owned. Every repo file a stack command names (e.g. "
-    "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. "
+    "smoke.py in `python3 smoke.py`) must be in some ticket's files[]. The package "
+    "manifest and the build/test config (pyproject.toml, package.json, tsconfig.json, "
+    "a jest/vitest config, Cargo.toml, go.mod, ...) belong to the first-wave ticket "
+    "every test depends on (the harness ticket when there is one), never to a later "
+    "feature ticket: an edit there changes how every earlier ticket's tests run "
+    "(checked and repaired). "
     "Where a scope cap speaks of ownership units, it means the files across your "
     "tickets.\n"
     "SCENARIOS (the acceptance criteria): each feature ticket carries its executable "
@@ -153,17 +161,47 @@ _TICKET_RULES = (
     "can be MISUSED or ABUSED (malformed/wrong-type input, invalid operations on an "
     "empty or boundary state, resource exhaustion, authn/authz for anything exposed) "
     "and author at least one scenario covering the applicable case with "
-    "security_abuse=true. ALWAYS author one scenario requiring a pinned dependency "
-    "manifest for the stack at the repo root (requirements.txt / uv.lock / "
-    "package-lock.json / go.sum / Cargo.lock; pin dev/test deps if there are no "
-    "runtime deps), on the ticket that writes that manifest; it checks the manifest "
-    "itself (present, every entry pinned), never that installing succeeds: the gates "
-    "run offline (checked).\n"
+    "security_abuse=true. BRANCHES (checked): a must-have or success criterion that "
+    'names alternatives ("X or Y", "by date or author", "rejects blank or '
+    'duplicate") gets one scenario per branch, each citing it in covers[]. HARD '
+    "INPUTS: cover the inputs that break real apps, not only the happy path: invalid, "
+    "blank and malformed values, wrong types, non-ASCII text, size limits and the "
+    "boundaries either side of them. CONVENTIONS: when the input is a well-known "
+    "notation or format, accept the variants its users routinely type, not only the "
+    "spec's example (an omitted optional part, either letter case, optional "
+    "whitespace), with a scenario for each; a numeric option rejects values outside "
+    "its meaningful range (zero or negative counts, limits, sizes) with an error. "
+    "FEATURE PAIRS: when the spec lists independent "
+    "features of one input (operators, flags, options, input kinds), add at least one "
+    "scenario combining each pair the spec allows together (a unit conversion with "
+    "a rounding option, a filter with a sort): a scenario per feature alone passes while "
+    "their combination is broken. ROLES (checked): when the request has users "
+    "with different roles (admin, staff, owner, ...), exactly ONE ticket owns the "
+    "roles, the admin account and the seed data, and says so in its description; "
+    "every other ticket consumes them. Scenarios never assert that installing "
+    "dependencies succeeds: the gates run offline (checked). CONSISTENCY: every "
+    "literal example in a scenario (an input, a size, an expected output) must "
+    "satisfy every pinned constraint and every other scenario, unless the scenario "
+    "proves that value is rejected: a constraint 'width >= 2' beside a scenario "
+    "resizing to width 1 leaves the engineer no correct implementation, so fix the "
+    "constraint or the scenario before you return the plan. Work out every expected "
+    "count or value from the scenario's own input (removing 2 of 3 attendees leaves "
+    "1, not 2). EXPRESSIBLE: every scenario must be expressible through the "
+    "contracts' types: every operator, term and combination the grammar allows "
+    "(a compound of several clauses, a negated part) has a representation in the "
+    "contract's data types, so a scenario never routes a multi-part input through a "
+    "type that holds one part. BOUNDS: every parser or CLI input that sizes work (a "
+    "count, a length, a depth or a number of repetitions) gets a stated upper bound in "
+    "a pinned constraint and a scenario rejecting a value just over it: an "
+    "unbounded count lets one input exhaust memory.\n"
     "CRITERIA REVIEW: then review your own scenarios against the request. Under "
     "criteria_review list only REAL, in-scope gaps you could not close: missing / "
     "under-specified scenarios, and applicable security/abuse cases no scenario "
     "covers. Prefer closing a gap by adding a scenario; a listed security/abuse "
-    "omission FAILS the Spec gate. Return empty arrays when coverage is complete.\n"
+    "omission FAILS the Spec gate, and a listed missing gap costs a revision. What "
+    "the spec does not ask for, or you would defer to a later iteration, is no gap: "
+    "note it under out_of_scope (never blocking), never under missing. Return empty "
+    "arrays when coverage is complete.\n"
 )
 
 
@@ -182,7 +220,8 @@ SOP = (
     "SC-2, ... (keep an id once given); scenarios cite them in covers[]. Declare "
     "deliverable: 'library' (only code other programs import), 'cli', 'service' or "
     "'app'.\n"
-    "PRD: the problem, user stories and prioritization; declare "
+    "PRD: the problem, user stories and prioritization (cite the must-haves by id, "
+    "never restate them); declare "
     "required_capabilities (e.g. 'ui', 'ml') — they drive specialist routing.\n"
     "EPICS: group the work into epics (ids E1, E2, ... in delivery order; at most "
     f"{MAX_EPICS}). A SMALL build (one epic, at most {MAX_TICKETS} tickets) returns "
@@ -201,23 +240,69 @@ SOP = (
     "SPRINT PLAN: ordered milestones; usd_cap_microusd as an integer number of "
     "micro-USD (never a float); a short risk register; done-for-this-iteration.\n"
     "ARCHITECTURE: choose the component decomposition; write ADRs WITH rejected "
-    "alternatives; define interface/API contracts FIRST (tickets reference them): "
+    "alternatives. ONCE: each fact goes in exactly one field, and anywhere else is "
+    "cited by its id or name (ADR-2, PR1, a contract name), never restated: every "
+    "decision ONLY in adrs[] (decision: one line; body: the why, not the decision "
+    "again), never in design.body; design.body is the overview the other fields do "
+    "not carry (components, data flow, the design of anything no contract declares) "
+    "and never repeats an ADR, a contract's signature or a scenario. Define "
+    "interface/API contracts FIRST (tickets reference them): "
     "every seam between tickets is a contract with a name, a kind (function | class "
     "| type for code seams; http | cli | event for the rest), its signature written "
-    "in the chosen language, its inputs, outputs and errors, and a description. "
-    "Every data type, interface and error that crosses a ticket boundary is a contract "
-    "(kind type or class): the contracts file is its ONLY definition, every ticket "
-    "imports it from there, and no ticket redeclares it (never plan a models module "
-    "that copies contract types). Never name a method after a builtin (list, dict, "
+    "in the chosen language, its inputs, outputs and errors, its properties[] (below) "
+    "and a description of what it does that does not repeat any of them. "
+    "Declare only what crosses a ticket boundary: the data types and errors tickets "
+    "pass between them, and the functions or classes one ticket calls in another. "
+    "Prefer plain functions; never a Protocol, ABC, interface or factory unless two "
+    "implementations of it exist in this plan. A data type or error (a record with "
+    "fields, an enum, an error class; kind type, or class with no methods besides "
+    "__init__) is written as real code in the contracts file, its ONLY definition: "
+    "every ticket imports it from there and no ticket redeclares it (never plan a "
+    "models module that copies contract types). A function or class with behaviour "
+    "is NOT in the contracts file: the one ticket that implements[] it defines it in "
+    "its own files, and its consumers import it from there. A contract whose "
+    "operation writes more than one row, record or file states in its errors that it "
+    "runs as ONE transaction: all or nothing, rolled back on any error. Never name a "
+    "method after a builtin (list, dict, "
     "set, type, id, filter, map, ...): inside the class it shadows the builtin used "
     "in annotations (`def list(self) -> list[Book]` fails the type checker); prefer "
     "list_books, get_by_id, find_all (checked for Python; a violation FAILS the Spec "
     "gate). A class contract the entrypoint ticket implements that composes other "
-    "tickets' class contracts (the app / composition root) declares how it receives "
-    "them: an __init__ (constructor) taking them, or a factory function in the "
-    "contract that takes them and returns it (checked; a violation FAILS the Spec "
-    "gate). Emit cross-cutting concerns as pinned constraints, which are injected "
-    "verbatim into every build task.\n"
+    "tickets' class contracts (the app / composition root) takes them in its "
+    "__init__ (checked; a violation FAILS the Spec gate). PROPERTIES: give each "
+    "function or class contract with a non-trivial input domain (parsing, "
+    "arithmetic, formatting, state transitions) 1-4 properties[]: invariants that "
+    "hold for EVERY valid generated input, never a worked example, each with an id "
+    "PR1, PR2, ... unique across the plan. properties[] IS the one field a property "
+    "lives in: 'never restated' keeps it out of the description, it never leaves "
+    "properties[] of such a contract empty. E.g. 'PR1: for any valid list the sorted "
+    "output is a permutation of the input', 'the same seed gives "
+    "the same result', a round-trip (parse(format(x)) == x), idempotence (f(f(x)) "
+    "== f(x)), 'any input outside the grammar raises the documented error'. State "
+    "each over the input domain the spec allows, including combinations of its "
+    "features: at least one property per contract ranges over inputs mixing several "
+    "features at once (an input mixing every operator, option or field together), "
+    "never only one feature or a single-part case. EDGES: a "
+    "'for any' property must hold for the trivial and edge inputs of its domain too "
+    "(empty, a single character or element, zero, one); write the domain into the "
+    "property ('for any message of at least 8 characters'), or it is unsatisfiable "
+    "('for any message the ciphertext does not contain it as a substring' fails for "
+    "a one-character message in hex) and is dropped. END TO END: "
+    "for each operator, sign or mode the spec names (a negation, an exclusion, a "
+    "descending order, an option), at least one property checks the RESULT the spec "
+    "defines for it (e.g. 'for any query excluding x, no result matches x'), not "
+    "only bounds on its parts: a property that only bounds each part passes an "
+    "implementation that ignores the negation. A contract the result is computed "
+    "through carries what that needs (a part's sign, operator or flag), or that "
+    "mode cannot be implemented. Write them "
+    "in the contract's properties[], never in its description or a ticket's. Leave "
+    "properties[] empty for "
+    "data types, trivial accessors and http/cli/event seams. The implementing "
+    "ticket, or its paired test ticket, writes one property-based test per "
+    "property (checked by the Test gate), so it lists a test file in files[]. "
+    "Emit cross-cutting "
+    "concerns as pinned constraints, which are injected verbatim into every build "
+    "task.\n"
     "STACK: choose the stack yourself from the request: stack.language MUST be one "
     "of the LANGUAGES AVAILABLE HERE; pick the framework and package manager. Give "
     "the shell commands the gates run from the repo root, in a sandbox that can "
@@ -240,22 +325,47 @@ SOP = (
     "that starts the app on port 0, makes one request, stops it and exits 0 — never "
     "the bare server entry such as `node app.js`, `npm start`, `flask run` or "
     "`uvicorn ...`, which never exits; checked). "
-    "contracts_file is the source file the code-kind contracts are written to (e.g. "
-    "src/contracts.ts, contracts.py); harness_files are the package manifest and "
+    "kind is what the user runs: 'cli', 'http' (a server) or '' (a library); launch "
+    "is the exact command a user starts it with from the repo root (e.g. `python3 -m "
+    "myapp`, `node server.js`, `go run ./cmd/app`); an http app reads its port from "
+    "$PORT and host from $HOST. The gates start launch themselves and drive it, so "
+    "the app MUST have that real entry point (a __main__ / main / server start), "
+    "not only functions the tests call. "
+    "interface lists the external interface the request names, one entry each, "
+    "exactly as the spec writes it: a cli app's options and subcommands (`--verbose`, "
+    "`-n`, `export`, `export --format` for a subcommand's option), an http app's routes "
+    "(`GET /projects`, `POST /projects`); the gates check the running app has each one. "
+    "List only what the request asks for (never invent options or routes) and "
+    "leave it empty for a library or when the request names none. "
+    "HTML forms send only GET and POST: a server-rendered UI with no JS client "
+    "serves each edit and delete action its pages offer as a POST route the forms "
+    "submit to (e.g. POST /projects/{id} to update, POST /projects/{id}/delete), beside "
+    "any PUT/PATCH/DELETE route the request names (checked and repaired). Each "
+    "form a POST route handles (POST /projects/new, POST /projects/{id}/edit) has a GET "
+    "route rendering it, and the app serves GET / (checked and repaired). "
+    "contracts_file is the source file the contract data types and errors are "
+    "written to (e.g. src/contracts.ts, contracts.py); harness_files are the package manifest and "
     "build/runner config (e.g. package.json, tsconfig.json, cucumber.json); "
+    "dependencies lists every third-party library the project's code and tests "
+    "use, each as its manifest entry (pinned where the ecosystem pins, e.g. "
+    'requests==2.32.3, express@4.19.2, serde = "1"): above all every library an ADR, a '
+    "contract or the framework names. The first-wave ticket owning the manifest "
+    "declares them all, and no later ticket may edit it, so a library left out "
+    "here cannot be used (an ADR naming a library left out here got a hand-rolled "
+    "imitation of it). "
     "cucumber-js step files go under features/step_definitions/. The ids "
     f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are reserved: never plan a "
-    f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes "
-    "contracts_file first; only when stack.bdd is set, "
+    f"ticket with either. '{CONTRACTS_TICKET_ID}' is added for you and writes the "
+    "data types and errors to contracts_file first; only when stack.bdd is set, "
     f"'{HARNESS_TICKET_ID}' is added too and wires the Cucumber runner into "
     "harness_files. Every ticket you write depends on them, and none may list "
     "contracts_file in files. "
     "Default contracts_file per language: "
     + ", ".join(f"{lang} {path}" for lang, path in _DEFAULT_CONTRACTS_FILE.items())
-    + ". The code-kind contract signatures are compiled together as that file at plan "
-    "time (Python with mypy, TypeScript with tsc), so write each as complete, valid "
-    "declarations of the chosen language that reference only each other and the "
-    "standard library.\n"
+    + ". Every code-kind contract signature is compiled together in a throwaway "
+    "file at plan time (Python with mypy, TypeScript with tsc), so write each as "
+    "complete, valid declarations of the chosen language that reference only each "
+    "other and the standard library.\n"
     "PACKAGE MARKERS: every Python package directory (one holding imported .py "
     "files, e.g. finance/ for finance/store.py) needs an __init__.py that exactly one "
     "ticket lists in files[] — the ticket that first writes into that directory, or "
@@ -272,7 +382,7 @@ EPIC_SOP = (
     "epics. In ONE reply, decompose YOUR epic into Jira-style tickets (at "
     f"most {MAX_EPIC_TICKETS}). "
     + _TICKET_RULES
-    + "IDS: name each ticket after its domain (catalog, cart-api; never T01) and "
+    + "IDS: name each ticket after its domain (scheduler, reports-api; never T01) and "
     "number scenarios AC01, AC02, ...; both are prefixed with your epic id for you. "
     "depends_on names only tickets of YOUR "
     "epic: work in other epics is ordered for you through the epic dependencies "
@@ -299,8 +409,8 @@ _GENERATED_TICKETS = frozenset({CONTRACTS_TICKET_ID, HARNESS_TICKET_ID, SKELETON
 
 # What the harness ticket always writes, on top of the plan's harness_files: the
 # manifest and lockfile it adds the runner to, and the runner's entry file, so its
-# description never asks for a file outside its scope. A feature ticket may list
-# them too (to add its own deps): overlapping scopes run in separate waves.
+# description never asks for a file outside its scope. A feature ticket listing
+# one loses it to this ticket (``folds._own_harness_files``).
 _DEFAULT_HARNESS_FILES: dict[str, tuple[str, ...]] = {
     "python": ("pyproject.toml",),
     "typescript": ("package.json", "package-lock.json", "tsconfig.json", "cucumber.json"),
@@ -369,8 +479,27 @@ _INTERFACE_SCHEMA: dict[str, Any] = {
         "errors": _STR_ARRAY,
         "description": {"type": "string"},
         "consumers": _STR_ARRAY,
+        "properties": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["id", "text"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["name", "kind", "signature", "inputs", "outputs", "errors", "description"],
+    # properties is required (it may be empty) so a contract never drops it unseen.
+    "required": [
+        "name",
+        "kind",
+        "signature",
+        "inputs",
+        "outputs",
+        "errors",
+        "description",
+        "properties",
+    ],
     "additionalProperties": False,
 }
 
@@ -387,9 +516,13 @@ _STACK_SCHEMA: dict[str, Any] = {
         "test": {"type": "string"},
         "bdd": {"type": "string"},
         "run": {"type": "string"},
+        "kind": {"type": "string", "enum": ["cli", "http", ""]},
+        "launch": {"type": "string"},
+        "interface": _STR_ARRAY,
         "notes": {"type": "string"},
         "contracts_file": {"type": "string"},
         "harness_files": _STR_ARRAY,
+        "dependencies": _STR_ARRAY,
     },
     "required": [
         "language",
@@ -401,8 +534,12 @@ _STACK_SCHEMA: dict[str, Any] = {
         "test",
         "bdd",
         "run",
+        "kind",
+        "launch",
+        "interface",
         "contracts_file",
         "harness_files",
+        "dependencies",
     ],
     "additionalProperties": False,
 }
@@ -413,8 +550,9 @@ _REVIEW_SCHEMA: dict[str, Any] = {
     "properties": {
         "missing": _STR_ARRAY,
         "security_abuse_omissions": _STR_ARRAY,
+        "out_of_scope": _STR_ARRAY,
     },
-    "required": ["missing", "security_abuse_omissions"],
+    "required": ["missing", "security_abuse_omissions", "out_of_scope"],
     "additionalProperties": False,
 }
 
@@ -589,8 +727,11 @@ DELTA_SOP = (
     "- remove_tickets: ids of tickets to delete (move any work they carry first).\n"
     "- remove_scenarios: ids of scenarios to delete.\n"
     "- criteria_review: gaps that remain after your delta (empty arrays when none).\n"
-    "The interface contracts are fixed: close a contract-fit finding through the "
-    "tickets' implements[], consumes[] and depends_on. The planner's own tickets "
+    "- contract_properties: for a finding that a contract has no properties, that "
+    "contract's name and the 1-4 properties[] it lacks (empty otherwise).\n"
+    "The interface contracts are otherwise fixed: close every other contract-fit "
+    "finding through the tickets' implements[], consumes[] and depends_on. The "
+    "planner's own tickets "
     f"'{CONTRACTS_TICKET_ID}' and '{HARNESS_TICKET_ID}' are added for you: never name "
     "them.\nThe plan's rules: " + _TICKET_RULES
 )
@@ -602,8 +743,26 @@ DELTA_SCHEMA: dict[str, Any] = {
         "tickets": {"type": "array", "items": _TICKET_SCHEMA},
         "remove_tickets": _STR_ARRAY,
         "remove_scenarios": _STR_ARRAY,
+        "contract_properties": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "contract": {"type": "string"},
+                    "properties": _INTERFACE_SCHEMA["properties"]["properties"],
+                },
+                "required": ["contract", "properties"],
+                "additionalProperties": False,
+            },
+        },
         "criteria_review": _REVIEW_SCHEMA,
     },
-    "required": ["tickets", "remove_tickets", "remove_scenarios", "criteria_review"],
+    "required": [
+        "tickets",
+        "remove_tickets",
+        "remove_scenarios",
+        "contract_properties",
+        "criteria_review",
+    ],
     "additionalProperties": False,
 }

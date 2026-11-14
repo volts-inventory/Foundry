@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from foundry.schemas.base import FrozenModel
+from foundry.schemas.gates import GateStatus
 
 if TYPE_CHECKING:
     from foundry.agents._runtime import AgentRuntime
@@ -106,16 +107,23 @@ class BuildManifest(FrozenModel):
     passed: bool
     phase: str
     tree_sha: str = ""
+    # Whether a passing gate verdict ran against exactly the shipped tree (None:
+    # nothing shipped). False means the bytes in out/ are not the ones the gates judged.
+    tree_attested: bool | None = None
     artifacts: tuple[ArtifactRef, ...] = ()
     gates: tuple[GateRef, ...] = ()
     model_usage: ModelUsageSummary = ModelUsageSummary()
     estimated_cost_microusd: int = 0
     # What a later change build on this one needs: the stack it must keep and
     # the contracts it extends rather than redefines.
-    stack: dict[str, str] = {}  # noqa: RUF012 - pydantic deep-copies defaults
+    stack: dict[str, Any] = {}  # noqa: RUF012 - pydantic deep-copies defaults
     contracts: tuple[ContractRef, ...] = ()
     contracts_files: tuple[str, ...] = ()
     base: BaseRef | None = None  # set when this build is a change on a base
+    # Contradictions in the spec a coding session reported instead of coding around.
+    spec_conflicts: tuple[str, ...] = ()
+    # Bugs a coding session found in a dependency ticket's file it may not write.
+    upstream_defects: tuple[str, ...] = ()
 
 
 def _artifact_refs(artifacts: Sequence[Artifact]) -> tuple[ArtifactRef, ...]:
@@ -215,10 +223,23 @@ def build_manifest(
     proxy_manifest: Sequence[Mapping[str, Any]] = (),
     drift_events: int = 0,
     agent_usage: Sequence[Mapping[str, int]] = (),
+    agent_models: Sequence[str] = (),
     tree_sha: str = "",
     estimated_cost_microusd: int = 0,
 ) -> BuildManifest:
-    """Consolidate a finished run's outputs into a :class:`BuildManifest`."""
+    """Consolidate a finished run's outputs into a :class:`BuildManifest`. Cost is
+    the budget ledger's spend, else what the backends reported per call/session."""
+    reported = sum(int(r.get("usage", {}).get("cost_microusd", 0)) for r in proxy_manifest)
+    reported += sum(int(a.get("cost_microusd", 0)) for a in agent_usage)
+    usage = _usage_summary(proxy_manifest, drift_events, agent_usage)
+    if agent_models:
+        models = tuple(sorted({*usage.served_models, *agent_models}))
+        usage = usage.model_copy(update={"served_models": models})
+    attested = (
+        any(g.run_against == tree_sha and g.status is GateStatus.PASS for g in gates)
+        if tree_sha
+        else None
+    )
     return BuildManifest(
         request=request,
         thread_id=thread_id,
@@ -226,10 +247,11 @@ def build_manifest(
         passed=passed,
         phase=phase,
         tree_sha=tree_sha,
+        tree_attested=attested,
         artifacts=_artifact_refs(artifacts),
         gates=_gate_refs(gates),
-        model_usage=_usage_summary(proxy_manifest, drift_events, agent_usage),
-        estimated_cost_microusd=estimated_cost_microusd,
+        model_usage=usage,
+        estimated_cost_microusd=estimated_cost_microusd or reported,
     )
 
 
@@ -243,7 +265,10 @@ def render_manifest_md(m: BuildManifest) -> str:
         f"- **Run:** `{m.thread_id}`",
         f"- **Generated:** {m.generated_at}",
         f"- **Result:** {'PASS' if m.passed else 'HALTED'} (phase: {m.phase})",
-        f"- **Tree:** `{m.tree_sha or 'n/a'}`",
+        f"- **Tree:** `{m.tree_sha or 'n/a'}`"
+        + {True: " (gated)", False: " (**NOT the tree the gates passed**)", None: ""}[
+            m.tree_attested
+        ],
         f"- **Estimated cost:** ${m.estimated_cost_microusd / 1_000_000:.4f}",
         *(
             [
@@ -251,6 +276,18 @@ def render_manifest_md(m: BuildManifest) -> str:
                 f"({m.base.request!r}), {m.base.files} files, digest `{m.base.digest}`"
             ]
             if m.base is not None
+            else []
+        ),
+        *(
+            ["", "## Spec conflicts (reported, not coded around)", ""]
+            + [f"- {c}" for c in m.spec_conflicts]
+            if m.spec_conflicts
+            else []
+        ),
+        *(
+            ["", "## Upstream defects (reported by a dependent ticket)", ""]
+            + [f"- {d}" for d in m.upstream_defects]
+            if m.upstream_defects
             else []
         ),
         "",
@@ -310,7 +347,11 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
     update: dict[str, Any] = {}
     stack = state.get("stack")
     if stack is not None:
-        update["stack"] = {k: str(v) for k, v in stack.model_dump(mode="json").items() if v}
+        from foundry.gates.profiles import stack_typecheck
+
+        update["stack"] = {k: v for k, v in stack.model_dump(mode="json").items() if v}
+        if stack.typecheck:
+            update["stack"]["typecheck"] = stack_typecheck(stack)
     if resolve is None:
         return update
     from foundry.graph.gate_wiring import contract_paths
@@ -339,6 +380,28 @@ def plan_fields(state: FactoryState, resolve: ArtifactResolver | None) -> dict[s
     return update
 
 
+def spec_conflicts(state: FactoryState) -> tuple[str, ...]:
+    """Each ticket's reported spec contradiction, as ``task/<id>: <note>``."""
+    from foundry.execution.adapters.tiered import SPEC_CONFLICT_TRIAGE
+
+    return tuple(
+        f"{t.run_against}: {t.explanation}"
+        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+        if t.name == SPEC_CONFLICT_TRIAGE
+    )
+
+
+def upstream_defects(state: FactoryState) -> tuple[str, ...]:
+    """Each reported defect in a dependency ticket's file, as ``task/<id>: <note>``."""
+    from foundry.execution.adapters.tiered import UPSTREAM_DEFECT_TRIAGE
+
+    return tuple(
+        f"{t.run_against}: {t.explanation}"
+        for t in sorted(state.get("gate_triage") or (), key=lambda t: t.seq)
+        if t.name == UPSTREAM_DEFECT_TRIAGE
+    )
+
+
 def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -> BuildManifest:
     """Record the stack, the contracts and, for a change build, its base."""
     from foundry.base_tree import base_digest, read_base
@@ -346,6 +409,8 @@ def _with_plan(manifest: BuildManifest, state: FactoryState, rt: AgentRuntime) -
     update = plan_fields(state, rt.cas.resolve if rt.cas is not None else None)
     base_dir = state.get("base_dir")
     prior = read_base(base_dir) if base_dir else None
+    update["spec_conflicts"] = spec_conflicts(state)
+    update["upstream_defects"] = upstream_defects(state)
     if prior is not None and base_dir:
         update["base"] = BaseRef(
             thread_id=prior.thread_id,
@@ -364,6 +429,7 @@ def write_manifest(
     state: FactoryState,
     rt: AgentRuntime,
     passed: bool,
+    tree_sha: str = "",
 ) -> BuildManifest:
     """Build the manifest for a finished run and write BUILD-MANIFEST.{json,md}."""
     manifest = _with_plan(
@@ -378,6 +444,8 @@ def write_manifest(
             proxy_manifest=rt.proxy.manifest,
             drift_events=len(rt.proxy.drift_events),
             agent_usage=getattr(rt.adapter, "usage", ()),
+            agent_models=tuple(getattr(rt.adapter, "served_models", ())),
+            tree_sha=tree_sha,
             estimated_cost_microusd=_budget_spend(state),
         ),
         state,

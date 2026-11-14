@@ -255,3 +255,4 @@ Housekeeping: `rm -rf .pytest_cache .mypy_cache .ruff_cache ./.run spec.md`
 - `scripts/bench.py` defaults to `--cases dice,todo,csv --scope demo`: a real bench round needs `--cases dice,todo,csv,notes,shop --scope standard`.
 - `rt.seq(config, NODE_ID, key)` mints equal Seqs for different keys within one node pass (same superstep, `local=0`): ordering two notes written in the same pass needs `<=`, not `<`.
 - With `tests/test_supervisor`'s synthetic `_BDD_PASSING_DIFF`, a wave check's scenario-scoped Test gate reports a built ticket's scenario "not executed" while the final gates pass it: a multi-wave supervisor e2e test patches `WaveBuildCheck._scenarios` to build-only (see `tests/test_ticket_split.py`).
+- `uv run mypy … | tail -1 && git commit …` commits on a type error: a pipeline exits with `tail`'s status. Gate a commit on the check itself (`uv run mypy foundry webapp && git commit …`) and read the output separately.

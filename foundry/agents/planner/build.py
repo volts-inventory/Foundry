@@ -23,7 +23,7 @@ from foundry.agents.planner.schema import (
     MAX_EPICS,
     MAX_TICKETS,
 )
-from foundry.schemas.architecture import ADR, InterfaceContract
+from foundry.schemas.architecture import ADR, PROPERTY_KINDS, InterfaceContract
 from foundry.schemas.implementation import FEATURE_DIR, Difficulty, Specialty, Ticket, scenario_ref
 from foundry.schemas.product import AcceptanceCriterion, Criticality, IntentBrief, render_scenario
 
@@ -398,11 +398,21 @@ def _tagged(epic_id: str, gaps: Iterable[str]) -> tuple[str, ...]:
     return tuple(f"[{epic_id}] {g}" for g in gaps)
 
 
-def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> str:
-    """What every epic call needs of call 1's plan besides the epics and contracts."""
+def _plan_brief(
+    payload: dict[str, Any], intent: IntentBrief | None = None, *, contracts: bool = True
+) -> str:
+    """What every epic call needs of call 1's plan besides the epics and contracts.
+    ``contracts``: some contract is a data type, so a contracts ticket writes the
+    contracts file; without one no ticket does, and naming it sends tickets to
+    import from a file nothing builds."""
     prd, design = _section(payload, "prd"), _section(payload, "design")
     constraints = [f"- {_str(c.get('text'))}" for c in _objs(payload.get("pinned_constraints"))]
     stack = _section(payload, "stack")
+    # The design body no longer restates the ADRs, so their decisions come from adrs[].
+    decisions = [
+        f"- {_str(a.get('id'))} {_str(a.get('title'))}: {_str(a.get('decision'))}"
+        for a in _objs(payload.get("adrs"))
+    ]
     return (
         "PLAN (from the lead planner):\n"
         f"Stack: {_str(stack.get('language')) or '(unset)'}"
@@ -410,7 +420,7 @@ def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> s
         + (
             f"; contracts file (written for you, never list it in files): "
             f"{_str(stack.get('contracts_file'))}"
-            if stack.get("contracts_file")
+            if contracts and stack.get("contracts_file")
             else ""
         )
         + "\n"
@@ -418,6 +428,7 @@ def _plan_brief(payload: dict[str, Any], intent: IntentBrief | None = None) -> s
         f"Architecture: {_str(design.get('title'))}\n"
         f"{_str(design.get('body'))[:_BRIEF_CAP]}\n"
         f"Components: {', '.join(_strs(design.get('components'))) or '(none)'}"
+        + ("\nDecisions:\n" + "\n".join(decisions) if decisions else "")
         + (
             "\nPinned constraints (apply to every ticket):\n" + "\n".join(constraints)
             if constraints
@@ -702,9 +713,10 @@ def _contract_kind(item: dict[str, Any]) -> str:
     return kind if kind in CONTRACT_KINDS else ""
 
 
-def _contract_text(item: dict[str, Any]) -> str:
-    """A contract's body: kind + signature, description, inputs/outputs/errors.
-    A contract given only as free-text ``spec`` keeps that text unchanged."""
+def _contract_text(item: dict[str, Any], properties: Sequence[str] | None = None) -> str:
+    """A contract's body: kind + signature, description, inputs/outputs/errors and
+    its ``properties`` (as given, else read from ``item``). A contract given only as
+    free-text ``spec`` keeps that text unchanged."""
     signature = _str(item.get("signature")).strip()
     kind = _contract_kind(item)
     lines = [f"[{kind}] {signature}" if kind else signature] if signature else []
@@ -714,22 +726,67 @@ def _contract_text(item: dict[str, Any]) -> str:
     for key in ("inputs", "outputs", "errors"):
         if values := _steps(item.get(key)):
             lines.append(f"{key}: " + "; ".join(values))
+    props = _raw_properties(item) if properties is None else tuple(properties)
+    if props:
+        lines.append("properties (one property-based test each): " + "; ".join(props))
     return "\n".join(lines)
+
+
+_PROPERTY_ID = re.compile(r"PR\d+")
+
+
+def _raw_properties(item: dict[str, Any]) -> tuple[str, ...]:
+    """``item``'s properties as "<id>: <text>" lines, ids as the planner wrote them."""
+    if _contract_kind(item) not in PROPERTY_KINDS:
+        return ()
+    return tuple(
+        f"{_str(p.get('id')).strip().upper()}: {text}"
+        for p in _objs(item.get("properties"))
+        if (text := _str(p.get("text")).strip())
+    )
+
+
+def _plan_properties(items: Sequence[dict[str, Any]]) -> list[tuple[str, ...]]:
+    """Each contract's properties with ids unique across the plan: an id that is not
+    PR<n>, or repeats an earlier one, gets the next free PR<n> — the Test gate finds
+    a property's test by its id, so two properties may never share one."""
+    raw = [_raw_properties(item) for item in items]
+    taken = {
+        pid for props in raw for p in props if _PROPERTY_ID.fullmatch(pid := p.partition(":")[0])
+    }
+    used: set[str] = set()
+    n = 0
+    out: list[tuple[str, ...]] = []
+    for props in raw:
+        kept: list[str] = []
+        for p in props:
+            pid, _, text = p.partition(": ")
+            if not _PROPERTY_ID.fullmatch(pid) or pid in used:
+                n += 1
+                while f"PR{n}" in taken or f"PR{n}" in used:
+                    n += 1
+                pid = f"PR{n}"
+            used.add(pid)
+            kept.append(f"{pid}: {text}")
+        out.append(tuple(kept))
+    return out
 
 
 def _build_interfaces(
     raw: Any, seq: Seq, *, store: ArtifactStore | None = None
 ) -> list[InterfaceContract]:
+    items = _objs(raw)
     return [
         InterfaceContract(
             name=_str(item.get("name"), f"iface-{i}"),
             # Same handle as cas_uri(body); persisted so a targeted re-plan can
             # hand the contract text to the epics it re-runs.
-            spec_uri=persist_prose(_contract_text(item), store=store),
+            spec_uri=persist_prose(_contract_text(item, props), store=store),
             kind=_contract_kind(item),
             signature=_str(item.get("signature")).strip(),
             consumers=_strs(item.get("consumers")),
+            properties=props,
             seq=seq._replace(local=i),
         )
-        for i, item in enumerate(_objs(raw))
+        for i, (item, props) in enumerate(zip(items, _plan_properties(items), strict=True))
     ]

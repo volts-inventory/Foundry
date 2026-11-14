@@ -75,6 +75,38 @@ def test_summarize_case_splits_calls_by_effort_out_of_the_hint_counts(tmp_path: 
     assert bench.EFFORT_COUNT_PREFIX is EFFORT_COUNT_PREFIX
 
 
+def test_summarize_case_reports_an_input_output_ratio_per_node(tmp_path: Path) -> None:
+    root = _case(tmp_path, 0, True)
+    log = (
+        "[21:33:20] done  model call: planner (T1, ideation) in 2s, 14k tokens "
+        "(in 13000, out 1000) (run 0.00M)\n"
+        "[21:33:22] done  model call: engineering (T3, ideation) in 2s, 5k tokens "
+        "(in 4900, out 100)\n"
+        "[21:33:24] done  model call: engineering (T3, ideation) in 2s, 5k tokens "
+        "(in 5100, out 100)\n"
+        "[21:33:25] done  model call: planner (T1, ideation) in 1s, 1k tokens (run 0.00M)\n"
+    )
+    (root / "run.log").write_text(log)
+    s = bench.summarize_case(root)
+    assert s["tokens_by_node"] == {
+        "planner": {"input": 13000, "output": 1000, "ratio": 13.0},
+        "engineering": {"input": 10000, "output": 200, "ratio": 50.0},
+    }
+    assert "dice in/out: planner=13.0, engineering=50.0" in bench.render({"dice": s})
+
+
+def test_a_finished_call_logs_its_raw_input_and_output_tokens() -> None:
+    from foundry import progress
+
+    lines: list[str] = []
+    usage = {"input_tokens": 10, "cache_read_input_tokens": 990, "output_tokens": 20}
+    with progress.sink(lines.append):
+        progress.finished("model call: planner (T1, gate)", 0.0, usage, None)
+    m = bench.IO.search(lines[0])
+    assert m is not None and (m[1], m[2]) == ("1000", "20")
+    assert bench.DONE.search(lines[0]) is not None
+
+
 def test_released_requires_files_and_exit_zero(tmp_path: Path) -> None:
     assert bench.summarize_case(_case(tmp_path, 0, True))["released"] is True
 

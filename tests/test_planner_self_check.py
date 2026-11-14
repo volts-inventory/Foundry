@@ -21,6 +21,7 @@ from foundry import telemetry
 from foundry.agents import AgentRuntime, plan_contracts
 from foundry.agents.plan_contracts import check_contracts
 from foundry.agents.planner import (
+    _REPAIR_MAX_TOKENS,
     SOP,
     _add_read_deps,
     _affected,
@@ -30,7 +31,19 @@ from foundry.agents.planner import (
     _wire_entrypoint,
     make_planner_node,
 )
-from foundry.agents.planner.checks import _wiring_findings, finding_kind
+from foundry.agents.planner.build import _plan_brief
+from foundry.agents.planner.checks import (
+    _shared_type_findings,
+    _type_contract_findings,
+    _wiring_findings,
+    finding_kind,
+)
+from foundry.agents.planner.folds import (
+    _assign_shared_types,
+    _drop_dangling_refs,
+    _settle_contracts_file,
+)
+from foundry.agents.planner.spec_text import bound_conflicts, design_types, with_referenced
 from foundry.durability.artifact_store import ArtifactStore
 from foundry.gates.attestation import ZoneBSigner
 from foundry.proxy import ModelProviderProxy
@@ -98,7 +111,7 @@ def test_the_in_node_revision_repairs_the_failed_plan_without_a_fresh_replan() -
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 3  # plan, delta, repair: no fresh re-plan
-    assert efforts == [None, "medium", "medium"]
+    assert efforts == ["medium", "medium", "medium/repair"]
     repair = _content(tx.requests[2])
     assert "REPAIR PASS — the planner's own plan check" in repair
     assert "Plan check findings:\n- Must-have MH-1 ('add todo') has no covering" in repair
@@ -126,7 +139,7 @@ def test_a_repair_leaving_a_finding_falls_back_to_one_fresh_replan() -> None:
         writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert len(tx.requests) == 4
-    assert efforts == [None, "medium", "medium", None]
+    assert efforts == ["medium", "medium", "medium/repair", "medium"]
     fresh = _content(tx.requests[3])
     assert "REVISION PASS — the planner's own plan check" in fresh
     assert "id=AC-001 (ticket=T-002)" in fresh  # the criteria to keep
@@ -218,7 +231,7 @@ def test_an_epic_repair_leaving_a_finding_falls_back_to_one_fresh_epic_call() ->
         make_planner_node(rt)({"request": "x"}, config_for("r"))
 
     assert [_epic_of(r) for r in tx.requests[4:]] == ["E2", "E2"]
-    assert efforts[4:] == ["medium", None]
+    assert efforts[4:] == ["medium/repair", "medium"]
     repair, fresh = (_content(r) for r in tx.requests[4:])
     assert "REPAIR PASS" in repair and "E2-T03" in repair and "REPAIR PASS" not in fresh
     got = counts.snapshot()
@@ -349,15 +362,15 @@ def test_an_epic_with_no_previous_one_to_repair_is_planned_at_the_default_effort
     real = rt.proxy.complete
 
     def spy(*args: Any, **kwargs: Any) -> Any:
-        seen.append((_epic_of({"args": args}), kwargs.get("effort")))
+        seen.append((_epic_of({"args": args}), kwargs.get("max_tokens")))
         return real(*args, **kwargs)
 
     rt.proxy.complete = spy  # type: ignore[method-assign]
     node(_failed(first, "no criterion flags security_abuse=true"), config_for("r", step=5))
 
-    epic_efforts = [effort for epic, effort in seen if epic is not None]
-    assert len(epic_efforts) >= 3 and set(epic_efforts) == {None}
-    assert "medium" in {effort for epic, effort in seen if epic is None}
+    epic_caps = [cap for epic, cap in seen if epic is not None]
+    assert len(epic_caps) >= 3 and set(epic_caps) == {None}  # planned afresh, not repaired
+    assert _REPAIR_MAX_TOKENS in {cap for epic, cap in seen if epic is None}
 
 
 def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None:
@@ -387,7 +400,7 @@ def test_a_gate_epic_repair_with_an_open_review_gap_gets_a_fresh_rerun() -> None
     assert got["planner.replan.used"] == 1 and "planner.repair.closed" not in got
 
 
-def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
+def test_a_gate_epic_repair_dropping_the_only_security_flag_is_closed_by_the_fold() -> None:
     _, replies = multi_epic_plan()
     unflagged = _copy(replies["E1"])
     unflagged["tickets"][1]["scenarios"][0]["security_abuse"] = False  # the only one
@@ -402,9 +415,11 @@ def test_a_gate_epic_repair_left_open_naming_no_epic_logs_no_fallback() -> None:
             config_for("r", step=5),
         )
 
-    assert [_epic_of(r) for r in tx.requests[4:]] == ["E1"]  # no fresh re-run to run
+    # The missing security flag is restored in code: no finding is left to re-run.
+    assert [_epic_of(r) for r in tx.requests[4:]] == ["E1"]
     got = counts.snapshot()
-    assert "planner.repair.fallback" not in got and "planner.repair.closed" not in got
+    assert "planner.repair.fallback" not in got and got["planner.repair.closed"] == 1
+    assert got["planner.fold.ensure_security_scenario"] == 1
 
 
 # ---- patch, don't re-plan: one delta call instead of a full plan call ----------------
@@ -1012,6 +1027,341 @@ def test_an_entrypoint_class_composing_other_contracts_must_declare_how_it_recei
     assert _wiring_findings(plain, [_STORE, _BARE_APP]) == ()
 
 
+_PARSE = _ifc("parse", "def parse(text: str) -> DiceExpression: ...", "function")
+_EVALUATE = _ifc(
+    "evaluate",
+    "def evaluate(expr: DiceExpression, rng: random.Random, limit: Optional[int]) -> int: ...",
+    "function",
+)
+
+
+def test_a_data_type_two_tickets_name_must_be_declared_in_the_contracts_file() -> None:
+    # A local dice run: the parser and the evaluator each defined their own
+    # DiceExpression, and cli.py converted between the two copies.
+    tickets = [
+        _t("PARSER", implements=("parse",)),
+        _t("EVAL", implements=("evaluate",)),
+        _t("CLI", "PARSER", "EVAL", entry=True, consumes=("parse", "evaluate")),
+    ]
+    (finding,) = _shared_type_findings(tickets, [_PARSE, _EVALUATE], frozenset())
+    assert finding.startswith("Type DiceExpression is used by the contracts of tickets PARSER, ")
+    assert "EVAL" in finding and finding_kind(finding) == "type-undeclared"
+    # A consumer of the one ticket naming it shares it too.
+    alone = [tickets[0], _t("CLI", "PARSER", consumes=("parse",))]
+    assert len(_shared_type_findings(alone, [_PARSE], frozenset())) == 1
+
+    # Declared as a data type (its fields, in the contracts file): no finding.
+    expr = _ifc(
+        "DiceExpression",
+        "class Constant:\n    value: int\n\n"
+        "class BinaryOp:\n    op: str\n    left: DiceExpression\n    right: DiceExpression\n\n"
+        "DiceExpression = Constant | BinaryOp",
+        "type",
+    )
+    declared = frozenset({"DiceExpression"})
+    assert _shared_type_findings(tickets, [expr, _PARSE, _EVALUATE], declared) == ()
+    # A name only that type's signature defines is in the contracts file too.
+    const = _ifc("parse_constant", "def parse_constant(t: str) -> Constant: ...", "function")
+    users = [_t("A", implements=("parse_constant",)), _t("B", consumes=("parse_constant",))]
+    assert _shared_type_findings(users, [expr, const], declared) == ()
+    # A class contract one ticket implements is imported from that ticket.
+    store = [_t("STORE", implements=("DomainStore",)), _t("APP", consumes=("DomainStore",))]
+    assert _shared_type_findings(store, [_STORE], frozenset()) == ()
+
+
+def test_a_shared_undeclared_type_gets_one_owner_in_code_not_a_repair() -> None:
+    def files(t: Ticket, *paths: str) -> Ticket:
+        return t.model_copy(update={"files": paths})
+
+    tickets = [
+        files(_t("PARSER", implements=("parse",)), "tests/test_parse.py", "dice/parser.py"),
+        files(_t("EVAL", implements=("evaluate",)), "dice/evaluator.py"),
+        files(_t("CLI", "PARSER", "EVAL", entry=True, consumes=("parse", "evaluate")), "main.py"),
+    ]
+    out, concerns, owned = _assign_shared_types(tickets, [_PARSE, _EVALUATE], frozenset(), "python")
+    parser, evaluator, cli = out
+    assert "Define the shared data type DiceExpression in dice/parser.py" in parser.description
+    assert "Import the shared data type DiceExpression from dice/parser.py" in evaluator.description
+    assert evaluator.depends_on == ("PARSER",)  # it imports the owner's module
+    assert "Import the shared data type" in cli.description and cli.depends_on == ("PARSER", "EVAL")
+    assert concerns == [
+        "Shared type DiceExpression: owned by PARSER in dice/parser.py, imported by EVAL, CLI."
+    ]
+    assert owned == {"DiceExpression": "dice/parser.py"}
+    assert _shared_type_findings(out, [_PARSE, _EVALUATE], frozenset(), owned) == ()
+    # A type no user can own (none writes a source file) is still a plan finding.
+    bare = [t.model_copy(update={"files": ()}) for t in tickets]
+    assert _assign_shared_types(bare, [_PARSE, _EVALUATE], frozenset(), "python") == (
+        bare,
+        [],
+        {},
+    )
+    assert len(_shared_type_findings(bare, [_PARSE, _EVALUATE], frozenset())) == 1
+
+
+def test_a_shared_type_in_java_gets_its_own_file_in_the_owner_ticket() -> None:
+    parse = _ifc("parse", "public static Roll parse(String text);", "function")
+    total = _ifc("total", "public static int total(Roll roll);", "function")
+    tickets = [
+        _t("PARSER", implements=("parse",)).model_copy(
+            update={"files": ("src/main/java/dice/Parser.java",)}
+        ),
+        _t("EVAL", implements=("total",)).model_copy(
+            update={"files": ("src/main/java/dice/Evaluator.java",)}
+        ),
+    ]
+    (parser, evaluator), _, owned = _assign_shared_types(
+        tickets, [parse, total], frozenset(), "java"
+    )
+    assert owned == {"Roll": "src/main/java/dice/Roll.java"}
+    assert parser.files[-1] == "src/main/java/dice/Roll.java"
+    assert "from src/main/java/dice/Roll.java" in evaluator.description
+
+
+_DICE_DESIGN = """Types live in contracts.py, all frozen dataclasses:
+
+```python
+@dataclass(frozen=True)
+class DiceTerm:
+    count: int  # how many dice
+    sides: int
+```
+
+ConstantTerm(value: int), SignedTerm(sign: int, term: DiceTerm | ConstantTerm) and
+RollExpression(terms: list[SignedTerm]). parse(text) returns a RollExpression.
+"""
+_ROLL_PARSE = _ifc("parse", "def parse(text: str) -> RollExpression: ...", "function")
+_ROLL_TOTAL = _ifc("total", "def total(expr: RollExpression) -> int: ...", "function")
+
+
+def _with_files(t: Ticket, *paths: str, reads: tuple[str, ...] = ()) -> Ticket:
+    return t.model_copy(update={"files": paths, "reads": reads})
+
+
+def test_design_types_reads_inline_and_block_definitions_in_any_language() -> None:
+    types = design_types(
+        _DICE_DESIGN
+        + "\ninterface Note {\n  id: number;\n  tags?: string[];\n  render(): string;\n}\n"
+        + "public record Point(int x, int y) {}\n"
+        + "A Helper(the input) is prose, not a type.\n"
+    )
+    assert types == {
+        "ConstantTerm": "ConstantTerm(value: int)",
+        "SignedTerm": "SignedTerm(sign: int, term: DiceTerm | ConstantTerm)",
+        "RollExpression": "RollExpression(terms: list[SignedTerm])",
+        "Point": "Point(int x, int y)",
+        "DiceTerm": "DiceTerm(count: int, sides: int)",
+        "Note": "Note(id: number, tags: string[])",
+    }
+    assert with_referenced(["RollExpression"], types) == [
+        "RollExpression",
+        "SignedTerm",
+        "DiceTerm",
+        "ConstantTerm",
+    ]
+
+
+def test_a_shared_type_the_design_defines_carries_its_fields_and_the_types_they_use() -> None:
+    # A local dice run: the design body gave RollExpression(terms: list[SignedTerm]) but
+    # no type contract, so the owner invented the fields and SignedTerm went unused.
+    tickets = [
+        _with_files(_t("PARSER", implements=("parse",)), "dice/parser.py"),
+        _with_files(_t("EVAL", implements=("total",)), "dice/evaluator.py"),
+    ]
+    types = design_types(_DICE_DESIGN)
+    (parser, evaluator), concerns, owned = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python", types
+    )
+    assert owned == {"RollExpression": "dice/parser.py"}
+    assert (
+        "Its fields, from the design (define the types they use beside it): "
+        "RollExpression(terms: list[SignedTerm]); "
+        "SignedTerm(sign: int, term: DiceTerm | ConstantTerm); "
+        "DiceTerm(count: int, sides: int); ConstantTerm(value: int)."
+    ) in parser.description
+    assert "never define your own copy. Its fields, from the design: Roll" in (
+        evaluator.description
+    )
+    # A design type only one ticket's contracts use gets its fields there.
+    (alone,), concerns, owned = _assign_shared_types(
+        tickets[:1], [_ROLL_PARSE], frozenset(), "python", types
+    )
+    assert owned == {}
+    assert "Define the data type RollExpression. Its fields, from the design" in alone.description
+    assert concerns == ["Type RollExpression: ticket PARSER defines it with the design's fields."]
+    # No design definition: the notes stay as they were.
+    (bare, _), _, _ = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python"
+    )
+    assert "Its fields" not in bare.description
+
+
+def test_reads_of_files_no_ticket_writes_and_unknown_dependencies_are_dropped() -> None:
+    tickets = [
+        _with_files(
+            _t("PARSER", "contracts", "GONE"),
+            "dice/parser.py",
+            reads=("contracts.py", "dice/", "features/parser.feature", "docs/*.md", "README.md"),
+        ),
+        _with_files(_t("CLI", "PARSER"), "dice/cli.py", reads=("dice/parser.py",)),
+    ]
+    (parser, cli), concerns = _drop_dangling_refs(tickets, existing=("README.md",))
+    assert parser.reads == ("dice/", "features/parser.feature", "docs/*.md", "README.md")
+    assert parser.depends_on == ()
+    assert cli is tickets[1]
+    assert concerns == [
+        "Ticket PARSER: dropped reads contracts.py, which no ticket writes.",
+        "Ticket PARSER: dropped depends_on contracts, GONE, which no ticket has.",
+    ]
+
+
+def test_a_contracts_file_no_ticket_writes_is_renamed_to_the_shared_types_home() -> None:
+    # A local dice plan named contracts.py, but no contract was a data type: the
+    # shared-type fold put RollExpression in diceroll/__init__.py, while T1 and T2
+    # still said "data types from contracts.py".
+    def said(t: Ticket, text: str) -> Ticket:
+        return t.model_copy(update={"description": text})
+
+    tickets = [
+        said(
+            _with_files(_t("T1", implements=("parse",)), "diceroll/__init__.py"),
+            "Parse notation into the data types from contracts.py.",
+        ),
+        said(
+            _with_files(_t("T2", implements=("total",)), "diceroll/roll.py"),
+            "Total a roll; import RollExpression from `contracts.py` (see contracts.pyc).",
+        ),
+    ]
+    tickets, _, owned = _assign_shared_types(
+        tickets, [_ROLL_PARSE, _ROLL_TOTAL], frozenset(), "python"
+    )
+    assert owned == {"RollExpression": "diceroll/__init__.py"}
+    (t1, t2), concerns = _settle_contracts_file(tickets, "contracts.py", owned.values())
+    assert t1.description.startswith("Parse notation into the data types from diceroll/__init__")
+    assert "import RollExpression from `diceroll/__init__.py` (see contracts.pyc)" in (
+        t2.description
+    )
+    assert "contracts.py" not in t1.description + t2.description.replace("contracts.pyc", "")
+    assert len(concerns) == 2
+    # A nested path is matched by its name too; with no home the mention is generic.
+    (bare,), _ = _settle_contracts_file(
+        [said(_t("A"), "Use the types in src/contracts.ts and contracts.ts.")],
+        "src/contracts.ts",
+        (),
+    )
+    assert bare.description == (
+        "Use the types in the module that defines them and the module that defines them."
+    )
+    # Written by a ticket, or already in the base tree: left alone.
+    owner = [_with_files(said(_t("contracts"), "x"), "contracts.py"), tickets[0]]
+    assert _settle_contracts_file(owner, "contracts.py", ()) == (owner, [])
+    assert _settle_contracts_file(tickets, "contracts.py", (), ("contracts.py",)) == (
+        tickets,
+        [],
+    )
+
+
+def test_the_epic_brief_names_the_contracts_file_only_when_one_is_written() -> None:
+    payload = {
+        "stack": {"language": "python", "contracts_file": "contracts.py"},
+        "adrs": [{"id": "ADR-1", "title": "Seeded RNG", "decision": "random.Random(seed)"}],
+    }
+    assert "contracts file" in _plan_brief(payload)
+    brief = _plan_brief(payload, contracts=False)
+    assert "contracts.py" not in brief
+    # The ADRs reach the epic calls from adrs[], not a design body restating them.
+    assert "Decisions:\n- ADR-1 Seeded RNG: random.Random(seed)" in brief
+
+
+def test_the_sop_asks_for_each_fact_once() -> None:
+    # A local dice plan restated ADR-1..4 in design.body (~1.8k chars of a 33k-token
+    # reply that took ~25 minutes).
+    from foundry.agents.planner.schema import EPIC_SOP, SOP
+
+    assert "every decision ONLY in adrs[]" in SOP and "never in design.body" in SOP
+    for sop in (SOP, EPIC_SOP):
+        assert "never restate what its own fields carry" in sop
+        assert "belong to the first-wave ticket every test depends on" in sop
+
+
+def test_design_types_for_the_contracts_file_without_type_contracts_are_a_finding() -> None:
+    tickets = [_t("PARSER", implements=("parse",)), _t("EVAL", implements=("total",))]
+    ifcs = [_ROLL_PARSE, _ROLL_TOTAL]
+    types = design_types(_DICE_DESIGN)
+    (finding,), concerns = _type_contract_findings(
+        tickets, ifcs, frozenset(), types, "dice/contracts.py", _DICE_DESIGN
+    )
+    assert concerns == ()
+    assert finding.startswith(
+        "The design defines RollExpression, SignedTerm, DiceTerm, ConstantTerm for "
+        "dice/contracts.py, but no interface contract declares them"
+    )
+    assert finding_kind(finding) == "type-contract-missing"
+    # One ticket using them: the fold's field list covers it, a concern only.
+    assert _type_contract_findings(
+        tickets[:1], ifcs[:1], frozenset(), types, "contracts.py", _DICE_DESIGN
+    ) == ((), (finding.replace("dice/contracts.py", "contracts.py"),))
+    # A type contract exists, or the design never names the file: nothing.
+    record = _ifc("Other", "class Other:\n    x: int", "type")
+    assert _type_contract_findings(
+        tickets, [*ifcs, record], frozenset({"Other"}), types, "contracts.py", _DICE_DESIGN
+    ) == ((), ())
+    assert _type_contract_findings(
+        tickets, ifcs, frozenset(), types, "src/types.ts", _DICE_DESIGN
+    ) == ((), ())
+
+
+def _crit(cid: str, given: str, when: str, then: str, abuse: bool = False) -> AcceptanceCriterion:
+    return AcceptanceCriterion(
+        id=cid,
+        text=f"Given {given} When {when} Then {then}",
+        given=(given,),
+        when=(when,),
+        then=(then,),
+        security_abuse=abuse,
+        seq=_SEQ,
+    )
+
+
+def test_a_scenario_example_breaking_a_pinned_numeric_bound_is_a_finding() -> None:
+    one_side = _crit("AC-1", "a die with 1 side", "it is rolled", "the total is 1")
+    (finding,) = bound_conflicts([("PC-001", "Die sides must be ≥ 2.")], [one_side])
+    assert finding.startswith("Scenario AC-1 uses sides 1, but pinned constraint PC-001")
+    assert "requires sides ≥ 2" in finding
+    assert finding_kind(finding) == "scenario-constraint-conflict"
+    for text in ("at least 2 sides", "sides between 2 and 100", "sides >= 2"):
+        assert len(bound_conflicts([("PC-1", text)], [one_side])) == 1, text
+    ok = [
+        # The example satisfies the bound.
+        _crit("AC-2", "a die with 6 sides", "it is rolled", "the total is at most 6"),
+        # It proves the value is refused.
+        _crit("AC-3", "a die with 1 side", "it is rolled", "an error is printed"),
+        _crit("AC-4", "a die with 1 side", "it is rolled", "the total is 1", abuse=True),
+    ]
+    assert bound_conflicts([("PC-001", "sides ≥ 2")], ok) == ()
+    # Ambiguous bounds are never reported: conditional, generic noun, a unit after it.
+    for text in ("sides >= 2 unless the die is fudge", "value >= 2", "names at most 1 word"):
+        assert bound_conflicts([("PC-1", text)], [one_side]) == (), text
+
+
+def test_builtin_and_generic_names_are_never_shared_types() -> None:
+    sigs = {
+        "py": "def f(xs: List[str], o: Optional[Path], r: Random, m: Literal['Add']) -> "
+        'Iterator[Decimal]:\n    """Return the Parsed Result."""',
+        "ts": "export function f(xs: Array<string>, m: Map<string, Date>): Promise<Record<"
+        "string, Partial<T>>> // Returns Nothing Useful",
+        "go": "func F(ctx context.Context, w http.ResponseWriter) (time.Time, error)",
+        "consts": "def f(level: int = MAX_LEVEL, c: str = Color.RED) -> None: ...",
+        "imported": "from vendor.sdk import Client\ndef f(c: Client) -> None: ...",
+    }
+    for lang, sig in sigs.items():
+        f = _ifc("f", sig, "function")
+        tickets = [_t("A", implements=("f",)), _t("B", consumes=("f",))]
+        assert _shared_type_findings(tickets, [f], frozenset()) == (), lang
+    # One ticket alone naming its own type is its business.
+    assert _shared_type_findings([_t("PARSER", implements=("parse",))], [_PARSE], frozenset()) == ()
+
+
 def _wired_plan(app_signature: str) -> dict[str, Any]:
     plan = _copy(PLAN)
     plan["interfaces"] = [
@@ -1248,3 +1598,150 @@ def test_an_unused_contract_is_a_concern_not_a_finding() -> None:
         c.startswith("Contract Unused (implemented by T-002) has no consumer")
         for c in writes["agent_journal"][0].concerns
     )
+
+
+# ---- repairs: medium effort, never re-rolled at a length stop ---------------------
+
+
+def test_a_repair_cut_at_its_cap_goes_straight_to_the_fresh_revision() -> None:
+    from foundry.proxy.model_provider_proxy import OutputLimitReached
+
+    flagged = {**PLAN, "criteria_review": _review("no scenario for an empty title")}
+    rt, tx = runtime_for(flagged, PLAN)
+    seen: list[tuple[Any, Any]] = []
+    real = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append((kwargs.get("effort"), kwargs.get("max_tokens")))
+        if kwargs.get("max_tokens") == _REPAIR_MAX_TOKENS:
+            raise OutputLimitReached("cut at the cap")
+        return real(*args, **kwargs)
+
+    rt.proxy.complete = spy  # type: ignore[method-assign]
+    with telemetry.counting() as counts:
+        make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    # first plan, the cut repair (never re-rolled), the fresh self-review revision
+    assert seen == [("medium", None), ("medium", _REPAIR_MAX_TOKENS), ("medium", None)]
+    assert "SELF-REVIEW REVISION" in _content(tx.requests[-1])
+    got = counts.snapshot()
+    assert got["planner.repair.cut"] == 1 and got["planner.repair.fallback"] == 1
+
+
+def test_the_repair_prompt_carries_the_findings_it_must_close() -> None:
+    flagged = {**PLAN, "criteria_review": _review("no scenario for an empty title")}
+    rt, tx = runtime_for(flagged, PLAN)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+    repair = _content(tx.requests[1])
+    assert "REPAIR PASS" in repair
+    assert "Flagged gaps:\n- no scenario for an empty title" in repair
+
+
+# ---- self-review: what the review rules out of scope never blocks ----------------
+
+
+def test_a_missing_gap_the_review_rules_out_of_the_spec_triggers_no_repair() -> None:
+    from foundry.agents.planner.prompt import _review_deferred, _self_review_gaps
+
+    csrf = (
+        "No CSRF protection scenario for the POST forms; the spec does not mention "
+        "CSRF. Flagged for a future iteration."
+    )
+    review = {
+        "missing": [csrf, "no scenario for an empty title"],
+        "security_abuse_omissions": [],
+        "out_of_scope": ["multi-user sharing"],
+    }
+    assert _self_review_gaps({"criteria_review": review}) == ("no scenario for an empty title",)
+    assert _review_deferred(review) == ("multi-user sharing", csrf)
+
+    deferred = {**review, "missing": [csrf]}
+    cas = ArtifactStore()
+    rt, tx = runtime_for({**PLAN, "criteria_review": deferred}, cas=cas)
+    writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+    assert len(tx.requests) == 1  # no self-review repair
+    critique = _critique(cas, writes)
+    assert critique.missing == ()
+    assert "Out of scope (self-review): multi-user sharing" in writes["agent_journal"][0].concerns
+
+
+def test_the_review_schema_has_a_non_blocking_out_of_scope_field() -> None:
+    from foundry.agents.planner.schema import _REVIEW_SCHEMA
+
+    assert "out_of_scope" in _REVIEW_SCHEMA["required"]
+    assert "out_of_scope" in SOP and "never under missing" in SOP
+
+
+# ---- contract properties: required, and patched by the delta -------------------
+
+
+def _propless() -> dict[str, Any]:
+    plan = _copy(PLAN)
+    plan["interfaces"].append(
+        {
+            "name": "parse_title",
+            "kind": "function",
+            "signature": "def parse_title(text: str) -> str: ...",
+            "inputs": ["text"],
+            "outputs": ["title"],
+            "errors": [],
+            "description": "Normalise a todo title.",
+            "properties": [],
+        }
+    )
+    plan["tickets"][0]["implements"].append("parse_title")
+    return plan
+
+
+def test_a_contract_without_properties_is_patched_by_the_delta_not_re_planned() -> None:
+    from foundry.agents.planner.delta import _delta_properties
+
+    idem = "parse_title(parse_title(s)) == parse_title(s)"
+    delta = {
+        "tickets": [],
+        "remove_tickets": [],
+        "remove_scenarios": [],
+        "contract_properties": [
+            {"contract": "parse_title", "properties": [{"id": "PR1", "text": idem}]}
+        ],
+        "criteria_review": {"missing": [], "security_abuse_omissions": [], "out_of_scope": []},
+    }
+    cas = ArtifactStore()
+    rt, tx = runtime_for(_propless(), delta, cas=cas)
+    efforts = _efforts(rt)
+    with telemetry.counting() as counts:
+        writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert len(tx.requests) == 2 and efforts == ["medium", "medium"]
+    assert DELTA_SOP_KEY in json.dumps(tx.requests[1])
+    assert "parse_title" in _content(tx.requests[1])
+    assert counts.snapshot()["planner.delta.accepted"] == 1
+    contracts = {c.name: c for c in _bodies(cas, writes, "interface_contract")}
+    assert contracts["parse_title"].properties == (f"PR1: {idem}",)
+
+    # A taken or malformed id is renumbered; a data type never takes one.
+    taken = InterfaceContract(
+        name="roll", spec_uri="cas://x", kind="function", properties=("PR1: a",), seq=_SEQ
+    )
+    record = InterfaceContract(name="Roll", spec_uri="cas://y", kind="type", seq=_SEQ)
+    more = [{"id": "PR1", "text": "b"}, {"id": "x", "text": "c"}]
+    out = _delta_properties(
+        [taken, record],
+        {
+            "contract_properties": [
+                {"contract": "roll", "properties": more},
+                {"contract": "Roll", "properties": [{"id": "PR9", "text": "d"}]},
+            ]
+        },
+    )
+    assert [c.properties for c in out] == [("PR1: a", "PR2: b", "PR3: c"), ()]
+
+
+def test_interface_properties_are_required_and_the_sop_says_to_fill_them() -> None:
+    from foundry.agents.planner.schema import _INTERFACE_SCHEMA, DELTA_SCHEMA
+
+    assert "properties" in _INTERFACE_SCHEMA["required"]
+    assert "contract_properties" in DELTA_SCHEMA["required"]
+    assert "properties[] IS the one field a property lives in" in SOP
+    # Each operator or mode the spec names gets an end-to-end property.
+    assert "checks the RESULT the spec defines for it" in SOP

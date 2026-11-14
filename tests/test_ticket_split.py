@@ -183,6 +183,9 @@ def _build_only_wave_checks(monkeypatch: Any) -> None:
     # The synthetic diff's scenarios bind only under the final gates: the wave checks
     # between tickets judge the build alone.
     monkeypatch.setattr(WaveBuildCheck, "_scenarios", lambda self, state: frozenset())
+    # It writes test_app.py and test_steps.py whatever files the plan lists, so the
+    # file-ownership check would FAIL every tree.
+    monkeypatch.setattr("foundry.graph.gate_wiring.runs.owned_paths", lambda *_: None)
 
 
 def _names(state: FactoryState, tid: str) -> list[str]:

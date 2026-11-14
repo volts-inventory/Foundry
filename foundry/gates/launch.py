@@ -209,7 +209,34 @@ def run_variants(runs):
         for label, cmd, data, show in plan["runs"]:
             rc, output = run_once(cmd, data)
             out.append({"cmd": show, "variant": label, "rc": rc, "output": output})
+        for label, line, swapped, was, now in plan.get("swaps") or ():
+            q = run_swap(runs, line, swapped, was, now)
+            if q is not None:
+                out.append({**q, "variant": label})
     return out
+
+
+def seed_option(runs, line):
+    # A seed option the top --help lists pins random output, so the swap can compare.
+    top = next((r for r in runs if r["cmd"] == cfg["help"] and r["rc"] == 0), None)
+    found = re.findall(cfg["value_opt"], top["output"]) if top else []
+    seed = next((o for o in found if "seed" in o.lower()), None)
+    return None if seed is None or seed in shlex.split(line) else seed
+
+
+def run_swap(runs, line, swapped, was, now):
+    # One operator swapped for its opposite must change the answer (or be refused):
+    # the same output means it was parsed and dropped. Only an input that answers the
+    # same way twice can be compared.
+    seed = seed_option(runs, line)
+    tail = f" {shlex.quote(seed)} 7" if seed else ""
+    (rc1, a), (rc2, b) = run_once(line + tail), run_once(line + tail)
+    if rc1 != 0 or rc2 != 0 or a != b or not a.strip():
+        return None
+    rc, output = run_once(swapped + tail)
+    same = rc == 0 and output.replace(now, was) == a
+    return {"cmd": swapped + tail, "base": line + tail, "rc": rc, "output": output,
+            "same": same}
 
 
 def value_options(help_text):
@@ -1262,6 +1289,33 @@ def _mutations(value: str) -> list[tuple[str, str]]:
     return [(label, v) for v, label in out.items()][:_MAX_VARIANTS]
 
 
+_BINARY_OP = re.compile(r"(?<=[\w)\]])(\s*)([-+*/])(\s*)(?=[\w(\[])")
+_OPPOSITE = {"+": "-", "-": "+", "*": "/", "/": "*"}
+
+
+def _operator_swaps(value: str) -> list[tuple[str, str, str]]:
+    """(label, input, the input with one operator swapped for its opposite) pairs of a
+    valid input: its first binary operator swapped, and for a commutative one (+, *)
+    its operands also commuted, so the swap lands before each operand kind (a term
+    a leading sign never reaches, e.g. the second operand of ``a+b``)."""
+    m = _BINARY_OP.search(value)
+    if m is None:
+        return []
+    op, left, right = m[2], value[: m.start()], value[m.end() :]
+    sp1, sp2, opp = m[1], m[3], _OPPOSITE[m[2]]
+    out = [(f"'{op}' swapped for '{opp}'", value, f"{left}{sp1}{opp}{sp2}{right}")]
+    if op in "+*":
+        flipped = f"{right}{sp1}{op}{sp2}{left}"
+        out.append(
+            (
+                f"operands commuted, '{op}' swapped for '{opp}'",
+                flipped,
+                f"{right}{sp1}{opp}{sp2}{left}",
+            )
+        )
+    return out
+
+
 def _main_argument(
     cmd: str, run: str, fuzz: Iterable[tuple[str, str, str]], subs: Iterable[str]
 ) -> tuple[str, str, str] | None:
@@ -1307,7 +1361,11 @@ def _variant_plans(target: LaunchTarget, bases: Sequence[str]) -> list[dict[str,
         for label, v in _mutations(value):
             line = f"{prefix} {shlex.quote(v)}{suffix}"
             runs.append([label, line, None, line])
-        plans.append({"base": run, "runs": runs})
+        swaps = []
+        for label, was, now in _operator_swaps(value):
+            base_line = f"{prefix} {shlex.quote(was)}{suffix}"
+            swaps.append([label, base_line, f"{prefix} {shlex.quote(now)}{suffix}", was, now])
+        plans.append({"base": run, "runs": runs, "swaps": swaps})
     stdin = next((f[1] for f in target.fuzz if f[0] == "stdin"), None)
     if stdin is not None and target.stdin_sample.strip():
         runs = [
@@ -1320,10 +1378,20 @@ def _variant_plans(target: LaunchTarget, bases: Sequence[str]) -> list[dict[str,
 
 
 def _variant_findings(r: dict[str, Any]) -> list[str]:
-    """A variant of an input the app answered must not crash it."""
+    """A variant of an input the app answered must not crash it, and an operator
+    swapped for its opposite must not leave the answer unchanged."""
     fails: list[str] = []
     for q in r.get("variants") or ():
         rc, text = q.get("rc"), str(q.get("output", ""))
+        if q.get("same"):
+            fails.append(
+                f"launch: `{q.get('cmd')}` printed the same answer as `{q.get('base')}` "
+                f"({q.get('variant')}): the operator is accepted and then ignored. Every "
+                "operator the app accepts must change the result as it means, or be "
+                "rejected with an error — never parsed and dropped. Its output:\n"
+                f"{_tail(_squash(text))}"
+            )
+            continue
         if _CRASH.search(text) or _signalled(rc):
             fails.append(
                 f"launch: `{q.get('cmd')}` crashed given a variant of a valid input "
@@ -1528,7 +1596,10 @@ class LaunchGate:
         fuzz = (
             len(target.fuzz) * 4
             + (_MAX_RANGE if self._range_bases else 0)
-            + max((len(p["runs"]) for p in self._variants if p["base"]), default=0)
+            + max(
+                (len(p["runs"]) + 3 * len(p["swaps"]) for p in self._variants if p["base"]),
+                default=0,
+            )
             + sum(len(p["runs"]) + 1 for p in self._variants if p["base"] is None)
             if target.kind == "cli"
             else 0

@@ -922,7 +922,7 @@ def test_a_cli_that_crashes_on_a_variant_of_a_valid_input_fails(tmp_path: Path) 
     spaced = [f for f in bad if "(spaces around its symbols)" in f]
     assert spaced and f"`{_PY} dice.py '2d6 + 3'` crashed" in spaced[0], bad
     assert "ValueError" in spaced[0]
-    assert len(obs.structured["launch"]["variants"]) == 4
+    assert len([q for q in obs.structured["launch"]["variants"] if "same" not in q]) == 4
 
 
 def test_a_cli_that_cleanly_rejects_variants_passes(tmp_path: Path) -> None:
@@ -985,3 +985,71 @@ def test_variants_of_a_valid_input_are_deduped_and_capped() -> None:
         "",
     )
     assert _main_argument("py d.py", "py d.py --all", (), ()) is None
+
+
+# ---- an operator swapped for its opposite must change the answer ------------------
+
+# The bench dice CLI: '-' before a dice term was parsed and dropped (1d4-1d4 summed).
+_SIGNED_CLI = """\
+import argparse, random, re
+p = argparse.ArgumentParser()
+p.add_argument("--seed", type=int, default=None)
+p.add_argument("expr")
+a = p.parse_args()
+rng = random.Random(a.seed)
+total = 0
+for sign, term in re.findall(r"([+-]?)(\\d*d\\d+|\\d+)", a.expr):
+    s = -1 if sign == "-" else 1
+    if "d" in term:
+        n, m = term.split("d")
+        total += DICE
+    else:
+        total += s * int(term)
+print(f"Expression: {a.expr}")
+print(f"Total: {total}")
+"""
+
+
+def _signed(tmp_path: Path, dice: str) -> LaunchGate:
+    rolls = "sum(rng.randint(1, int(m)) for _ in range(int(n or 1)))"
+    (tmp_path / "dice.py").write_text(_SIGNED_CLI.replace("DICE", dice.format(rolls=rolls)))
+    cmd = f"{_PY} dice.py"
+    return LaunchGate(LaunchTarget(kind="cli", cmd=cmd, runs=(f"{cmd} 2d6+3", f"{cmd} --help")))
+
+
+def test_a_cli_that_drops_an_operator_before_a_term_fails(tmp_path: Path) -> None:
+    gate = _signed(tmp_path, "{rolls}")
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    bad = [f for f in obs.findings if "accepted and then ignored" in f]
+    assert len(bad) == 1, obs.findings
+    assert f"`{_PY} dice.py 3-2d6 --seed 7` printed the same answer" in bad[0]
+    assert "operands commuted" in bad[0]
+
+
+def test_a_cli_that_honours_every_operator_passes_the_swap(tmp_path: Path) -> None:
+    gate = _signed(tmp_path, "s * {rolls}")
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.PASS, obs.findings
+    swaps = [q for q in obs.structured["launch"]["variants"] if "same" in q]
+    assert len(swaps) == 2 and not any(q["same"] for q in swaps)
+
+
+def test_unpinned_random_output_is_not_compared(tmp_path: Path) -> None:
+    gate = _signed(tmp_path, "{rolls}")
+    src = (tmp_path / "dice.py").read_text().replace('"--seed"', '"--salt"')
+    (tmp_path / "dice.py").write_text(src.replace("random.Random(a.seed)", "random.Random()"))
+    obs = gate.execute(tmp_path)
+    assert not any("accepted and then ignored" in f for f in obs.findings), obs.findings
+
+
+def test_operator_swaps_of_a_valid_input() -> None:
+    from foundry.gates.launch import _operator_swaps
+
+    assert _operator_swaps("2d6+3") == [
+        ("'+' swapped for '-'", "2d6+3", "2d6-3"),
+        ("operands commuted, '+' swapped for '-'", "3+2d6", "3-2d6"),
+    ]
+    assert _operator_swaps("a - b") == [("'-' swapped for '+'", "a - b", "a + b")]
+    assert _operator_swaps("-3") == []
+    assert _operator_swaps("milk") == []

@@ -266,8 +266,9 @@ def _verdict_findings(
     one of ``failing_gates`` / ``failing_tests`` (what failed on the reviewed tree,
     per the caller's attested ``gates`` channel; see :func:`_failing_match`), or it
     gives a command whose observed result differs from the correct one, or shows
-    a crash (exception, 5xx, crash exit) a correct result does not. The rest are kept,
-    prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
+    a crash (exception, 5xx, crash exit) a correct result does not. A finding the
+    reviewer itself cites as "advisory" stays advisory unless it shows such a crash.
+    The rest are kept, prefixed :data:`ADVISORY_PREFIX`. A plain-string finding (an ungrammared
     backend) cites nothing."""
     gates, tests = tuple(failing_gates), tuple(failing_tests)
     out: list[str] = []
@@ -279,6 +280,14 @@ def _verdict_findings(
         text = str(item.get("finding", "")).strip()
         check, command = _cited(item, "failing_check"), _cited(item, "command")
         correct, observed = _result(item, "correct_result"), _result(item, "observed_result")
+        # The reviewer's own "advisory" label holds unless the evidence is a crash:
+        # an unused import it backed with a grep cost a fix and a re-review.
+        own_advisory = check.lower().startswith("advisory") and not (
+            _CRASH.search(observed) and not _CRASH.search(correct)
+        )
+        if own_advisory:
+            out.append(ADVISORY_PREFIX + text)
+            continue
         if (matched := _failing_match(check, command, gates, tests)) is not None:
             out.append(f"{text} [evidence: failing {matched}]")
         elif _backed_reproduction(command, correct, observed):

@@ -347,6 +347,29 @@ def test_a_backed_finding_blocks_even_when_the_model_approves(verifier, installe
     assert verifier.verify_judgment_binding(g)
 
 
+@pytest.mark.parametrize(
+    ("observed", "blocks"),
+    [
+        ("parser.py:6:from dataclasses import dataclass, field", False),
+        ("Traceback (most recent call last): ...", True),
+    ],
+)
+def test_a_finding_the_reviewer_labels_advisory_blocks_only_on_a_crash(
+    verifier, installed, observed, blocks
+):
+    note = _finding(
+        "unused import",
+        failing_check="advisory",
+        command="grep -n 'import dataclass, field' parser.py",
+        correct_result="no match",
+        observed_result=observed,
+    )
+    g = _judge_findings([note], status="approve")
+    assert (g.status == GateStatus.FAIL) is blocks
+    assert g.findings[0].startswith(ADVISORY_PREFIX) is not blocks
+    assert verifier.verify_judgment_binding(g)
+
+
 def test_a_reproduction_with_differing_results_blocks(verifier, installed):
     g = _judge_findings(
         [

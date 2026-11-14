@@ -30,7 +30,7 @@ from foundry.execution.adapters.tiered import (
     STOPPED_TRIAGE,
 )
 from foundry.schemas.base import Artifact
-from foundry.schemas.implementation import Ticket, ticket_effort
+from foundry.schemas.implementation import Ticket, ticket_effort, ticket_thinking_budget
 from foundry.state.seq import Seq
 
 if TYPE_CHECKING:
@@ -261,6 +261,7 @@ def _escalated_packet(
                 "escalated": True,
             },
             "effort": ticket_effort(packet.task["difficulty"], retry=True),
+            "thinking_budget": ticket_thinking_budget(packet.task["difficulty"], retry=True),
             "prior_failures": context,
             "turn_budget": turn_budget,
         }

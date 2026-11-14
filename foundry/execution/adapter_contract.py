@@ -44,6 +44,7 @@ __all__ = [
     "WorkerAdapter",
     "assemble_prompt",
     "current_packet_effort",
+    "current_packet_thinking_budget",
     "current_packet_tier",
     "packet_tier_scope",
 ]
@@ -53,19 +54,23 @@ __all__ = [
 # proxy-agent). A ContextVar so concurrent pool workers each see their own packet.
 _PACKET_TIER: ContextVar[str | None] = ContextVar("packet_tier", default=None)
 _PACKET_EFFORT: ContextVar[Effort | None] = ContextVar("packet_effort", default=None)
+_PACKET_BUDGET: ContextVar[int | None] = ContextVar("packet_thinking_budget", default=None)
 
 
 @contextmanager
 def packet_tier_scope(packet: TaskPacket) -> Iterator[None]:
-    """Expose ``packet``'s tier and thinking level to :func:`current_packet_tier`
-    and :func:`current_packet_effort` for the duration."""
+    """Expose ``packet``'s tier, thinking level and reasoning budget to
+    :func:`current_packet_tier`, :func:`current_packet_effort` and
+    :func:`current_packet_thinking_budget` for the duration."""
     tier = packet.task.get("tier")
     effort = packet.effort
     token = _PACKET_TIER.set(str(tier) if tier else None)
     effort_token = _PACKET_EFFORT.set(effort if effort in EFFORT_LEVELS else None)
+    budget_token = _PACKET_BUDGET.set(packet.thinking_budget)
     try:
         yield
     finally:
+        _PACKET_BUDGET.reset(budget_token)
         _PACKET_EFFORT.reset(effort_token)
         _PACKET_TIER.reset(token)
 
@@ -79,6 +84,12 @@ def current_packet_effort() -> Effort | None:
     """The local thinking level of the packet being run on this thread, or None
     (the proxy's default for an agent turn)."""
     return _PACKET_EFFORT.get()
+
+
+def current_packet_thinking_budget() -> int | None:
+    """The local reasoning budget cap of the packet being run on this thread, or
+    None (its thinking level's own)."""
+    return _PACKET_BUDGET.get()
 
 
 class AdapterUnavailableError(RuntimeError):
@@ -120,6 +131,8 @@ class TaskPacket(FrozenModel):
     # The local thinking level the session runs at; never in the prompt (a cloud
     # model, or the session itself, has nothing to do with it).
     effort: Effort | None = None
+    # The reasoning budget cap of its local turns (None: the level's own).
+    thinking_budget: int | None = None
     worktree_path: str
     turn_budget: int
     cost_budget_microusd: int  # integer micro-USD, never floats (arch §8)

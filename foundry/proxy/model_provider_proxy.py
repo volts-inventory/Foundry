@@ -1321,6 +1321,7 @@ class ModelProviderProxy:
         tools: Sequence[dict[str, Any]] | None = None,
         effort: Effort | None = None,
         max_tokens: int | None = None,
+        thinking_budget: int | None = None,
     ) -> CompletionResult:
         """One credentialed model call: build → send (bounded retry) →
         observe lineage → record manifest → return text/JSON + usage.
@@ -1332,7 +1333,10 @@ class ModelProviderProxy:
         xhigh): a ticket's session thinks at its difficulty's level, a plan repair
         (an edit, not an invention) at medium. ``max_tokens`` caps the output budget
         after that sizing; a structured reply cut at length under it is not
-        re-rolled but raises :class:`OutputLimitReached` at once."""
+        re-rolled but raises :class:`OutputLimitReached` at once. ``thinking_budget``
+        caps every thinking level's reasoning budget on a local thinking call (a
+        caller sizing it to the job: a short plan, a trivial ticket); elsewhere it
+        is ignored."""
         if purpose not in _PURPOSES:
             raise ValueError(f"unknown purpose: {purpose!r}")
         if tier not in self._tier_models:
@@ -1378,6 +1382,8 @@ class ModelProviderProxy:
             request["max_tokens"] = min(int(request["max_tokens"]), max_tokens)
         if thinking:
             request["local_reasoning_budget"] = _reasoning_budgets(kind, int(request["max_tokens"]))
+            if thinking_budget is not None:
+                request = _capped_budgets(request, thinking_budget)
         if local:
             profile = local_sampling_for(requested_model, self._local_sampling)
             if profile is not None:

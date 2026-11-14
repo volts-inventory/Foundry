@@ -15,7 +15,11 @@ from foundry.cli.defaults import (
     ADAPTERS,
     BACKENDS,
 )
-from foundry.execution.adapter_contract import current_packet_effort, current_packet_tier
+from foundry.execution.adapter_contract import (
+    current_packet_effort,
+    current_packet_thinking_budget,
+    current_packet_tier,
+)
 from foundry.execution.adapters.stub import StubAdapter
 from foundry.gates import DevGateWriteVerifier, ZoneBSigner
 from foundry.gates.signing import signing_schemes_from_env
@@ -93,6 +97,7 @@ def make_coding_adapter(
                     [{"role": "user", "content": prompt}],
                     purpose="ideation",
                     effort=current_packet_effort(),
+                    thinking_budget=current_packet_thinking_budget(),
                 ).text
                 or ""
             )
@@ -122,6 +127,7 @@ def make_coding_adapter(
                 list(messages),
                 purpose="ideation",
                 effort=current_packet_effort(),
+                thinking_budget=current_packet_thinking_budget(),
                 schema=schema,
             )
             return result.text or "", result.parsed
@@ -134,6 +140,7 @@ def make_coding_adapter(
                 list(messages),
                 purpose="ideation",
                 effort=current_packet_effort(),
+                thinking_budget=current_packet_thinking_budget(),
                 tools=tools,
             )
             return result.text or "", result.tool_calls

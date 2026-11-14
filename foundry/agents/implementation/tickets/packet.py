@@ -42,6 +42,7 @@ from foundry.schemas.implementation import (
     feature_path,
     scenario_ref,
     ticket_effort,
+    ticket_thinking_budget,
 )
 from foundry.schemas.product import AcceptanceCriterion
 from foundry.state.seq import Seq
@@ -601,6 +602,7 @@ def _ticket_packet(
         retrieved_spans=spans,
         prior_failures=prior_failures,
         effort=ticket_effort(ticket.difficulty),
+        thinking_budget=ticket_thinking_budget(ticket.difficulty),
         worktree_path=task.branch,  # placeholder; adapters use sandbox.worktree
         turn_budget=turn_budget,
         cost_budget_microusd=cost_budget_microusd,

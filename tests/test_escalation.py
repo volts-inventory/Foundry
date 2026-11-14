@@ -926,3 +926,41 @@ def test_after_an_escalation_the_better_of_local_and_cloud_is_carried() -> None:
     assert best_attempt([(3, "local"), (3, "cloud")]) == (3, "cloud")
     assert best_attempt([(None, "local"), (None, "cloud")]) == (None, "cloud")
     assert best_attempt([]) is None
+
+
+class _BudgetSession(_Session):
+    def __init__(self, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.budgets: list[tuple[str, int | None]] = []
+
+    def run(self, packet: TaskPacket, sandbox: Sandbox) -> AdapterResult:
+        self.budgets.append((str(packet.task["id"]), packet.thinking_budget))
+        return super().run(packet, sandbox)
+
+
+def test_a_trivial_ticket_starts_under_a_small_thinking_budget_and_retries_without_it(
+    tmp_path: Path,
+) -> None:
+    from foundry.schemas.implementation import Difficulty
+
+    local = _BudgetSession(
+        writes={
+            "T-001": {"app.py": "def broken(:\n"},
+            "T-002": {"app.py": "def two():\n    return 2\n"},
+        }
+    )
+    cloud = _BudgetSession(
+        writes={
+            "fix-1": {"app.py": "def broken_1(:\n"},
+            "T-001": {"app.py": "def one():\n    return 1\n"},
+        }
+    )
+    tickets = [
+        _ticket("T-001", 0, files=("app.py",), difficulty=Difficulty.TRIVIAL),
+        _ticket("T-002", 1, files=("app.py",), deps=("T-001",)),
+    ]
+    _wave_run(tmp_path, _tiered(cloud, local), tickets=tickets)  # type: ignore[arg-type]
+    # The first attempt reasons under 2K a turn; its restart and escalation, and a
+    # standard ticket, under their level's own budget.
+    assert local.budgets == [("T-001", 2048), ("T-001", None), ("T-002", None)]
+    assert ("T-001", None) in cloud.budgets

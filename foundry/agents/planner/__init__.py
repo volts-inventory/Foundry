@@ -61,6 +61,7 @@ model only via ``rt.proxy`` (L6), and its self-review of the criteria is stamped
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -262,6 +263,7 @@ __all__ = [
     "_python_deps_rule",
     "_safe_ticket_ids",
     "_wire_entrypoint",
+    "local_plan_budget",
     "make_planner_node",
     "stack_files",
     "ticket_owner",
@@ -285,6 +287,28 @@ _REPAIR_MAX_TOKENS = _LOCAL_PLAN_MAX_TOKENS
 _DELTA_EFFORT: Effort = "medium"
 _DELTA_MAX_TOKENS = 32_000
 _LENGTH_STOPS = frozenset({"length", "max_tokens"})
+# A local planner call's reasoning budget, sized from what is known before the plan:
+# the request's length and the scope tier. Local dice (a one-line, single-feature
+# demo request) reasoned past a fixed 16K for a ~7K-token plan, 11.6 minutes before
+# the abort; a long multi-feature request still gets the full 16K.
+_PLAN_BUDGET_FLOOR = 4096
+_PLAN_BUDGET_CEILING = 16384
+_PLAN_BUDGET_PER_CHAR = 4
+_PLAN_BUDGET_FULL_SCOPE = 2048
+# The budget of the planner node pass running on this thread (None: not local),
+# carried into the parallel epic calls by ``_run_parallel``'s context copy.
+_PASS_BUDGET: ContextVar[int | None] = ContextVar("planner_thinking_budget", default=None)
+
+
+def local_plan_budget(request: str, scope: ScopeTier | None) -> int:
+    """The reasoning budget of a local planner call (plan, epic, repair, delta) for
+    ``request`` at ``scope`` (None: undecided, sized like a standard run): 4K plus
+    4 tokens a request character, 2K more unless the scope is demo, rounded up to
+    1K and capped at 16K."""
+    raw = _PLAN_BUDGET_FLOOR + _PLAN_BUDGET_PER_CHAR * len(request.strip())
+    if scope is not ScopeTier.DEMO:
+        raw += _PLAN_BUDGET_FULL_SCOPE
+    return min(-(-raw // 1024) * 1024, _PLAN_BUDGET_CEILING)
 
 
 def _count_findings(findings: Iterable[str]) -> None:
@@ -385,6 +409,7 @@ def make_planner_node(
             purpose="ideation",
             schema=schema,
             effort=effort or first_effort,
+            thinking_budget=_PASS_BUDGET.get(),
         )
         return completion.parsed or {}
 
@@ -401,6 +426,7 @@ def make_planner_node(
                 schema=schema,
                 effort=_REPAIR_EFFORT,
                 max_tokens=_REPAIR_MAX_TOKENS,
+                thinking_budget=_PASS_BUDGET.get(),
             )
         except OutputLimitReached:
             completion = None
@@ -571,6 +597,7 @@ def make_planner_node(
                 schema=DELTA_SCHEMA,
                 effort=_DELTA_EFFORT,
                 max_tokens=_DELTA_MAX_TOKENS,
+                thinking_budget=_PASS_BUDGET.get(),
             )
         except OutputLimitReached:
             # Never re-rolled: the same request runs into the same cap.
@@ -1599,4 +1626,17 @@ def make_planner_node(
             ],
         }
 
-    return _node
+    def _sized(state: FactoryState, config: RunnableConfig) -> dict[str, Any]:
+        decision = state.get("scope_tier")
+        budget = (
+            local_plan_budget(str(state.get("request", "")), decision.tier if decision else None)
+            if TIER in rt.proxy.local_tiers
+            else None
+        )
+        token = _PASS_BUDGET.set(budget)
+        try:
+            return _node(state, config)
+        finally:
+            _PASS_BUDGET.reset(token)
+
+    return _sized

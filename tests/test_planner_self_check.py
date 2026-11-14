@@ -1757,3 +1757,64 @@ def test_a_local_planner_drafts_at_low_effort_and_repairs_at_medium() -> None:
 
     assert efforts[0] == "low"
     assert "medium/repair" in efforts
+
+
+def _budgets(rt: Any) -> list[int | None]:
+    seen: list[int | None] = []
+    real = rt.proxy.complete
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs.get("thinking_budget"))
+        return real(*args, **kwargs)
+
+    rt.proxy.complete = spy
+    return seen
+
+
+def test_the_local_plan_budget_scales_with_the_request_and_scope() -> None:
+    from foundry.agents.planner import local_plan_budget
+    from foundry.schemas.governance import ScopeTier
+
+    short = "a command-line tool that rolls dice given notation like 2d6+3"
+    assert local_plan_budget(short, ScopeTier.DEMO) == 5120
+    assert local_plan_budget(short, ScopeTier.STANDARD) == 7168
+    assert local_plan_budget(short, None) == local_plan_budget(short, ScopeTier.STANDARD)
+    medium = short + ", with " + "a feature of several words, " * 30
+    assert 5120 < local_plan_budget(medium, ScopeTier.DEMO) < 16384
+    assert local_plan_budget("x " * 3000, ScopeTier.STANDARD) == 16384
+    assert local_plan_budget("", ScopeTier.DEMO) == 4096
+
+
+def test_a_local_planners_plan_and_repair_calls_carry_the_sized_budget() -> None:
+    from foundry.agents.planner import local_plan_budget
+    from foundry.agents.planner.schema import TIER
+
+    rt, _ = runtime_for(_uncovered(), {}, PLAN)
+    rt.proxy._local_tiers = frozenset({TIER})
+    efforts, budgets = _efforts(rt), _budgets(rt)
+    make_planner_node(rt)({"request": "a dice roller"}, config_for("r"))
+
+    assert "medium/repair" in efforts
+    assert budgets == [local_plan_budget("a dice roller", None)] * len(budgets)
+
+
+def test_a_local_planners_delta_call_carries_the_sized_budget() -> None:
+    from foundry.agents.planner import local_plan_budget
+    from foundry.agents.planner.schema import TIER
+
+    rt, tx = runtime_for(_two_implementers(), _DROP_CONTRACTS_1)
+    rt.proxy._local_tiers = frozenset({TIER})
+    budgets = _budgets(rt)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert _is_delta(tx.requests[1])
+    assert budgets == [local_plan_budget("x", None)] * 2
+
+
+def test_a_cloud_planner_sends_no_thinking_budget() -> None:
+    rt, tx = runtime_for(_two_implementers(), _DROP_CONTRACTS_1)
+    budgets = _budgets(rt)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert _is_delta(tx.requests[1]) and budgets == [None, None]
+    assert all("local_reasoning_budget" not in r for r in tx.requests)

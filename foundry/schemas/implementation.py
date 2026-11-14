@@ -69,6 +69,23 @@ def ticket_effort(difficulty: Difficulty | str, *, retry: bool = False) -> Effor
     return EFFORT_LEVELS[min(base + retry, len(EFFORT_LEVELS) - 1)]
 
 
+# Difficulty -> the reasoning budget a local session's turns start under (None: its
+# level's own, 8K at medium). A trivial ticket's turns are small edits: a 2K budget
+# lets a turn that would ramble abort and answer without thinking. Its retry keeps
+# the level's own budget, like every other ticket's.
+TICKET_THINKING_BUDGET: dict[Difficulty, int | None] = {
+    Difficulty.TRIVIAL: 2048,
+    Difficulty.STANDARD: None,
+    Difficulty.COMPLEX: None,
+}
+
+
+def ticket_thinking_budget(difficulty: Difficulty | str, *, retry: bool = False) -> int | None:
+    """The local reasoning budget cap of a ticket of ``difficulty``'s session; a
+    ``retry`` (rebuild, restart, escalation) none beyond its level's own."""
+    return None if retry else TICKET_THINKING_BUDGET[Difficulty(difficulty)]
+
+
 def fix_effort(attempt: int) -> Effort:
     """A fix-loop fixer's thinking level: medium on its first pass, the top level after."""
     return "medium" if attempt <= 1 else "xhigh"

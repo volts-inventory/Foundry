@@ -44,7 +44,13 @@ from foundry.proxy.model_provider_proxy import (
 )
 from foundry.proxy.test_doubles import MockTransport
 from foundry.proxy.token_meter import TimeCapExceeded, TokenMeter
-from foundry.schemas.implementation import EFFORT_LEVELS, Difficulty, fix_effort, ticket_effort
+from foundry.schemas.implementation import (
+    EFFORT_LEVELS,
+    Difficulty,
+    fix_effort,
+    ticket_effort,
+    ticket_thinking_budget,
+)
 
 SIGNER = ZoneBSigner(b"k" * 16, "kid")
 CALL = ("node", "SOP", [{"role": "user", "content": "x"}])
@@ -1807,3 +1813,70 @@ def test_a_runaway_tool_turn_steps_down_a_level_at_a_time() -> None:
     assert [s.read < 30000 for s in completions.streams] == [True, True, True]
     assert completions.calls[3]["messages"] == completions.calls[0]["messages"]
     assert result.tool_calls[0]["name"] == "run"
+
+
+def test_a_sized_planner_call_aborts_at_its_budget_and_still_steps_down() -> None:
+    completions = _RunawayCompletions(think=60000)
+    proxy = _runaway_proxy(completions)
+    msgs = [{"role": "user", "content": "plan"}]
+    result = proxy.complete(
+        "planner",
+        "T2",
+        "SOP",
+        msgs,
+        purpose="ideation",
+        schema=SCHEMA,
+        effort="low",
+        thinking_budget=5120,
+    )
+    assert result.parsed == {"answer": "42"}
+    assert [c["reasoning_effort"] for c in completions.calls] == ["low", "none"]
+    # Aborted at its own 5K budget, not the planner table's 16K at low.
+    assert completions.streams[0].read < 5300
+
+
+def test_a_thinking_budget_caps_every_local_level_and_leaves_cloud_alone() -> None:
+    local = RecordingTransport()
+    msgs = [{"role": "user", "content": "x"}]
+    _local_proxy(local).complete(
+        "planner", "T2", "SOP", msgs, purpose="ideation", effort="medium", thinking_budget=6144
+    )
+    assert local.requests[0]["local_reasoning_budget"] == {
+        "low": 6144,
+        "medium": 6144,
+        "xhigh": 6144,
+    }
+    cloud = RecordingTransport()
+    proxy = _hybrid(cloud, RecordingTransport())
+    proxy.complete("planner", "T1", "SOP", msgs, purpose="ideation", effort="medium")
+    proxy.complete(
+        "planner", "T1", "SOP", msgs, purpose="ideation", effort="medium", thinking_budget=6144
+    )
+    assert cloud.requests[0] == cloud.requests[1]
+    assert "local_reasoning_budget" not in cloud.requests[1]
+
+
+def test_a_packets_thinking_budget_reaches_the_proxy_closures() -> None:
+    from foundry.execution.adapter_contract import (
+        assemble_prompt,
+        current_packet_thinking_budget,
+        packet_tier_scope,
+    )
+
+    packet = TaskPacket(
+        task={"id": "T-1", "tier": "T3"},
+        effort="low",
+        thinking_budget=2048,
+        worktree_path=".",
+        turn_budget=1,
+        cost_budget_microusd=0,
+    )
+    with packet_tier_scope(packet):
+        assert current_packet_thinking_budget() == 2048
+    assert current_packet_thinking_budget() is None
+    assert "2048" not in assemble_prompt(packet)
+
+
+def test_a_trivial_ticket_starts_under_a_small_budget_and_its_retry_does_not() -> None:
+    assert [ticket_thinking_budget(d) for d in Difficulty] == [2048, None, None]
+    assert [ticket_thinking_budget(d, retry=True) for d in Difficulty] == [None, None, None]

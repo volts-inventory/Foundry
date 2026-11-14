@@ -204,6 +204,7 @@ from foundry.schemas.implementation import (
     Task,
     Ticket,
     ticket_effort,
+    ticket_thinking_budget,
 )
 from foundry.schemas.product import AcceptanceCriterion
 
@@ -751,7 +752,12 @@ def make_engineering_node(
                     # A rebuild of a failed attempt (carried, re-planned) or a fix-loop
                     # restart thinks one level harder than the ticket's first attempt.
                     packet = packet.model_copy(
-                        update={"effort": ticket_effort(ticket.difficulty, retry=True)}
+                        update={
+                            "effort": ticket_effort(ticket.difficulty, retry=True),
+                            "thinking_budget": ticket_thinking_budget(
+                                ticket.difficulty, retry=True
+                            ),
+                        }
                     )
                 if tid in rebuild:
                     packet = _escalated_packet(packet, str(target), rebuild[tid], turn_budget)

@@ -24,6 +24,7 @@ from foundry.agents.planner.checks import (
     _size_findings,
     _type_contract_findings,
     _unused_contracts,
+    _variant_findings,
     _wiring_findings,
 )
 from foundry.agents.planner.folds import (
@@ -91,6 +92,7 @@ class _Frame:
     contracts_file: str = ""  # where the contract data types go
     ui: bool = False  # the PRD declares a 'ui' capability
     dependencies: tuple[str, ...] = ()  # the plan's stack.dependencies, as manifest entries
+    request: str = ""  # the user's request as typed
 
 
 @dataclass(frozen=True)
@@ -231,6 +233,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *_garbled_step_findings(criteria),
         *bound_conflicts(frame.constraints, criteria),
         *_branch_findings(criteria, frame.brief),
+        *(_variant_findings(criteria, frame.request) if base is None else ()),
         # A change build's base tree already owns its roles.
         *(_role_findings(tickets, frame.brief) if base is None else ()),
         *_size_findings(tickets, frame.ceilings, protected),

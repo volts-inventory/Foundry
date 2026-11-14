@@ -427,6 +427,50 @@ def _branch_findings(
     )
 
 
+# An example input of a notation the request names: `notation like 2d6+3`,
+# `expressions such as (1+2)*3`. Users type such notations with spaces and in
+# either case, so a plan whose scenarios only ever feed the exact example accepts
+# one spelling.
+_NOTATION_EXAMPLE = re.compile(
+    r"\b(?:notation|expressions?|syntax|formulas?|queries|query)\s+"
+    r"(?:like|such as|e\.g\.,?|for example,?)\s+[`'\"]?([^\s`'\",;]+)"
+)
+_EXAMPLE_PARTS = re.compile(r"[A-Za-z0-9]+|[^A-Za-z0-9\s]")
+
+
+def _variant_findings(criteria: Sequence[AcceptanceCriterion], request: str) -> tuple[str, ...]:
+    """A request showing a notation's example input whose scenarios never feed it
+    with spaces around its symbols, or in the other letter case: the plan accepts
+    only the spelling the request happened to show."""
+    said = request
+    texts = [c.text for c in criteria]
+    out: list[str] = []
+    for example in dict.fromkeys(_NOTATION_EXAMPLE.findall(said)):
+        example = example.rstrip(".")
+        parts = _EXAMPLE_PARTS.findall(example)
+        if len(parts) < 2 or not re.search(r"[A-Za-z]", example):
+            continue
+        loose = re.compile(r"\s*".join(map(re.escape, parts)), re.I)
+        seen = [m[0] for t in texts for m in loose.finditer(t)]
+        if not any(re.search(r"\s", v) for v in seen):
+            spaced = " ".join(parts)
+            out.append(
+                f"No scenario feeds the example input {example!r} with spaces "
+                f"(e.g. {spaced!r}): add one where it gets the same answer, "
+                "per the CONVENTIONS rule."
+            )
+        if not any(
+            v.replace(" ", "") != example and v.lower().replace(" ", "") == example.lower()
+            for v in seen
+        ):
+            out.append(
+                f"No scenario feeds the example input {example!r} in the other letter "
+                f"case (e.g. {example.swapcase()!r}): add one where it gets the same "
+                "answer, per the CONVENTIONS rule."
+            )
+    return tuple(out)
+
+
 _ROLE_WORDS = re.compile(r"\b(admins?|administrators?|roles?|moderators?|superusers?)\b", re.I)
 _ROLE_OWNER = re.compile(r"\b(roles?|admins?|administrators?|seed(?:s|ed|ing)?)\b", re.I)
 
@@ -983,6 +1027,7 @@ _FINDING_KINDS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
         (r"^Entrypoint ticket \S+ does not depend", "entrypoint-unwired"),
         (r"^Entrypoint ticket \S+ redefines what", "entrypoint-redefines"),
         (r"names alternatives .* but only scenario", "or-branch"),
+        (r"^No scenario feeds the example input", "notation-variant"),
         (r"has user roles but no ticket owns", "roles-unowned"),
         (r"^stack\.run is empty", "run-missing"),
         (r"starts the server, which never exits", "run-server"),

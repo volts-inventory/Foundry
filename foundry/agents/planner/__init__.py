@@ -779,6 +779,7 @@ def make_planner_node(
             stack_findings=_stack_command_findings(decided),
             ceilings=ceilings,
             keep=_kept_ids(state, rt),
+            request=str(state.get("request", "")),
             design="\n".join(
                 _str(x)
                 for x in (
@@ -1340,6 +1341,7 @@ def make_planner_node(
             generated=prior.generated,
             stack=stack,
             brief=prior.intent,
+            request=str(state.get("request", "")),
             run=None if stack is None or stack.profile else stack.run,
             declared=prior.declared | existing,
             # The contracts are the earlier pass's, already checked there.

@@ -1825,3 +1825,23 @@ def test_a_cloud_planner_sends_no_thinking_budget() -> None:
 
     assert _is_delta(tx.requests[1]) and budgets == [None, None]
     assert all("local_reasoning_budget" not in r for r in tx.requests)
+
+
+def test_a_notation_example_needs_spaced_and_other_case_scenarios() -> None:
+    from foundry.agents.planner.checks import _variant_findings
+
+    req = "a Python command-line tool that rolls dice given notation like 2d6+3"
+    exact = [_crit("AC-1", "the input '2d6+3'", "it is rolled", "the total is 2 dice plus 3")]
+    spaced, cased = _variant_findings(exact, req)
+    assert "with spaces (e.g. '2d6 + 3')" in spaced
+    assert "other letter case (e.g. '2D6+3')" in cased
+    assert finding_kind(spaced) == finding_kind(cased) == "notation-variant"
+    covered = [
+        *exact,
+        _crit("AC-2", "the input '2d6 + 3'", "it is rolled", "the same total as '2d6+3'"),
+        _crit("AC-3", "the input '2D6+3'", "it is rolled", "the same total as '2d6+3'"),
+    ]
+    assert _variant_findings(covered, req) == ()
+    # No named notation, or an example with no letters or symbols: nothing to vary.
+    assert _variant_findings(exact, "a tool that rolls 2d6+3") == ()
+    assert _variant_findings(exact, "a calculator for expressions like 42") == ()

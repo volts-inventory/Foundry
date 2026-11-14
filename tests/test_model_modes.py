@@ -1880,3 +1880,22 @@ def test_a_packets_thinking_budget_reaches_the_proxy_closures() -> None:
 def test_a_trivial_ticket_starts_under_a_small_budget_and_its_retry_does_not() -> None:
     assert [ticket_thinking_budget(d) for d in Difficulty] == [2048, None, None]
     assert [ticket_thinking_budget(d, retry=True) for d in Difficulty] == [None, None, None]
+
+
+def test_an_aborted_structured_call_carries_its_reasoning_into_the_retry() -> None:
+    completions = _RunawayCompletions(think=60000)
+    proxy = _runaway_proxy(completions)
+    msgs = [{"role": "user", "content": "plan"}]
+    proxy.complete(
+        "planner",
+        "T2",
+        "SOP",
+        msgs,
+        purpose="ideation",
+        schema=SCHEMA,
+        effort="low",
+        thinking_budget=5120,
+    )
+    retry = completions.calls[1]["messages"][-1]["content"]
+    assert "Your reasoning before it was cut" in retry and "hmm hmm" in retry
+    assert completions.calls[0]["messages"][-1]["content"] == "plan"

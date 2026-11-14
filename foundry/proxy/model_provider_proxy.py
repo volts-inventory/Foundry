@@ -702,6 +702,9 @@ def is_transient_failure(exc: BaseException) -> bool:
 
 
 _MISS_TAIL_CHARS = 2000
+# How much of an aborted call's reasoning its retry carries forward (~10K tokens):
+# a planner's 11K-token think, thrown away, cost 8 minutes locally to redo.
+_CARRIED_REASONING_CHARS = 40_000
 
 
 _ONE_LEVEL_LOWER: dict[str, Effort] = {"xhigh": "medium", "medium": "low"}
@@ -744,6 +747,7 @@ def _with_parse_correction(
     previous: dict[str, Any] | None = None,
     *,
     lower: bool | None = None,
+    reasoning: str = "",
 ) -> dict[str, Any]:
     """``request`` with the previous unparseable reply's error and tail in its last
     user turn, at the thinking level of ``previous`` (the attempt that missed;
@@ -753,7 +757,8 @@ def _with_parse_correction(
     ``lower`` steps that level down one; by default it does unless the reply was
     an answer cut at the output cap. That reply's reasoning was not the problem:
     its retry keeps the level and is told to be markedly shorter, where a retry
-    without thinking would answer with no plan behind it."""
+    without thinking would answer with no plan behind it. ``reasoning`` (an aborted
+    call's thinking) is carried into the note so the retry builds on it."""
     text = miss.text or ""
     cut = miss.stop_reason in _LENGTH_STOPS and bool(text.strip())
     if lower is None:
@@ -775,6 +780,11 @@ def _with_parse_correction(
         "Reply with ONLY that JSON object, complete, with no prose before or after it. "
         f"{concise}]"
     )
+    if kept := reasoning.strip()[-_CARRIED_REASONING_CHARS:]:
+        note += (
+            "\n\n[Your reasoning before it was cut, to build on: do not redo it, settle "
+            f"what is still open briefly and answer.\n<<<\n{kept}\n>>>]"
+        )
     messages = [dict(m) for m in request.get("messages") or ()]
     last = messages[-1] if messages else None
     if last is not None and last.get("role") == "user" and isinstance(last.get("content"), str):
@@ -1813,6 +1823,7 @@ class ModelProviderProxy:
                         str(over),
                         previous=sent,
                         lower=not stay,
+                        reasoning=over.response.reasoning or "",
                     )
                 else:
                     effort = {k: sent[k] for k in _EFFORT_FIELDS if k in sent}

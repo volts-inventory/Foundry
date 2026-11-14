@@ -17,7 +17,7 @@ from foundry.agents.planner.checks import (
 )
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
-from foundry.agents.planner.sizing import Ceilings, over_ceiling
+from foundry.agents.planner.sizing import Ceilings, is_scaffold, over_ceiling
 from foundry.agents.planner.spec_text import with_referenced
 from foundry.gates.app_checks import is_app_source
 from foundry.gates.bdd_scaffold import is_helper_module, step_module, ticket_step_module
@@ -584,6 +584,133 @@ def _merge_sole_dependents(
         ],
         concerns,
     )
+
+
+def _fold_scaffold_tickets(
+    tickets: Sequence[Ticket],
+    ceilings: Ceilings,
+    keep: frozenset[str] = frozenset(),
+) -> tuple[list[Ticket], list[str]]:
+    """Fold a scaffold-only ticket (every file a package marker or manifest/config,
+    no scenario, no contract it implements) into a dependent: it builds nothing a
+    scenario proves, yet costs a session and a wave of its own. The target is the
+    first dependent in plan order that no other dependent precedes; every other
+    dependent then depends on it instead, so all that followed the scaffold still
+    does. Only when that costs no parallelism: each other dependent already follows
+    the target, or both run on a local model (local sessions run one at a time).
+
+    The target keeps its difficulty (scaffolding needs no stronger model). The
+    entrypoint is never a target (the harness config must land before the feature
+    tickets' tests run), nor a test ticket; generated tickets and ``keep`` ids (an
+    earlier plan's tickets, built work) take no part."""
+    out = list(tickets)
+    concerns: list[str] = []
+
+    def eligible(t: Ticket) -> bool:
+        return t.id not in _GENERATED_TICKETS and t.id not in keep and not t.entrypoint
+
+    def scaffold(t: Ticket) -> bool:
+        return (
+            eligible(t)
+            and bool(t.files)
+            and not t.scenario_ids
+            and not t.implements
+            and all(is_scaffold(f) for f in t.files)
+        )
+
+    def local(t: Ticket) -> bool:
+        return ceilings[t.difficulty].where == "local"
+
+    while True:
+        deps = {t.id: t.depends_on for t in out}
+        pick: tuple[Ticket, Ticket, list[Ticket]] | None = None
+        for a in out:
+            if not scaffold(a):
+                continue
+            dependents = [t for t in out if a.id in t.depends_on]
+            ids = {t.id for t in dependents}
+            for b in dependents:
+                if (
+                    not eligible(b)
+                    or not b.files
+                    or b.specialty is Specialty.TEST
+                    or _ancestors(deps, b.id) & ids
+                ):
+                    continue
+                others = [t for t in dependents if t.id != b.id]
+                if all(b.id in _ancestors(deps, c.id) or (local(b) and local(c)) for c in others):
+                    pick = a, b, others
+                    break
+            if pick is not None:
+                break
+        if pick is None:
+            break
+        a, b, others = pick
+        merged = _merged(a, b).model_copy(update={"difficulty": b.difficulty})
+        rewire = {c.id for c in others}
+        out = [
+            merged
+            if t.id == b.id
+            else t.model_copy(
+                update={"depends_on": _uniq(b.id if d == a.id else d for d in t.depends_on)}
+            )
+            if t.id in rewire
+            else t
+            for t in out
+            if t.id != a.id
+        ]
+        concerns.append(
+            f"Ticket {a.id}: folded into {b.id}: it only scaffolds "
+            f"({', '.join(a.files)}), no session of its own."
+        )
+    if not concerns:
+        return out, concerns
+    return [t.model_copy(update={"seq": t.seq._replace(local=i)}) for i, t in enumerate(out)], (
+        concerns
+    )
+
+
+def _raise_oversized(
+    tickets: Sequence[Ticket],
+    ceilings: Ceilings,
+    protected: Collection[str] = (),
+    keep: frozenset[str] = frozenset(),
+) -> tuple[list[Ticket], list[str]]:
+    """Move a ticket over its difficulty's ceiling up to the easiest harder
+    difficulty whose ceiling takes it (a cloud tier in a hybrid run): that tier's
+    stronger model is what the higher ceiling is calibrated on, and the split a
+    finding asks for costs a planner call. With no such difficulty (every tier
+    local, or over every ceiling) it stays for the size check. The entrypoint is
+    exempt from the ceiling; ``keep`` ids (built work) keep their tier."""
+    order = sorted(Difficulty, key=_DIFFICULTY_RANK.__getitem__)
+    out: list[Ticket] = []
+    concerns: list[str] = []
+    for t in tickets:
+        if (
+            t.id in _GENERATED_TICKETS
+            or t.id in keep
+            or t.entrypoint
+            or over_ceiling(t, ceilings[t.difficulty], protected) is None
+        ):
+            out.append(t)
+            continue
+        up = next(
+            (
+                d
+                for d in order[order.index(t.difficulty) + 1 :]
+                if over_ceiling(t, ceilings[d], protected) is None
+            ),
+            None,
+        )
+        if up is None:
+            out.append(t)
+            continue
+        out.append(t.model_copy(update={"difficulty": up}))
+        concerns.append(
+            f"Ticket {t.id}: raised from {t.difficulty.value} to {up.value}, whose "
+            f"{ceilings[up].where} model's size ceiling takes it."
+        )
+    return out, concerns
 
 
 def _one_step_module_per_ticket(

@@ -37,6 +37,7 @@ from foundry.agents.planner.folds import (
     _drop_unsatisfiable_properties,
     _ensure_security_scenario,
     _fix_covers,
+    _fold_scaffold_tickets,
     _fold_test_bindings,
     _form_method_routes,
     _form_page_routes,
@@ -46,6 +47,7 @@ from foundry.agents.planner.folds import (
     _own_harness_files,
     _own_scenario_bindings,
     _own_stack_files,
+    _raise_oversized,
     _settle_contracts_file,
     _wire_entrypoint,
     stack_files,
@@ -145,6 +147,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     for repair in (_drop_self_consumes, _add_contract_deps):
         tickets, more = repair(tickets)
         concerns += fold(repair.__name__, more)
+    # Before the harness fold, which names the config's owner in other tickets.
+    tickets, more = _fold_scaffold_tickets(tickets, frame.ceilings, frame.keep)
+    concerns += fold(_fold_scaffold_tickets.__name__, more)
     tickets, more = _own_harness_files(tickets)
     concerns += fold(_own_harness_files.__name__, more)
     tickets, more = _declare_dependencies(tickets, frame.dependencies)
@@ -198,6 +203,9 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_form_method_routes.__name__, more)
     tickets, more = _form_page_routes(tickets, frame.stack, frame.interfaces, frame.ui)
     concerns += fold(_form_page_routes.__name__, more)
+    protected = set(stack_files(frame.stack)) if frame.stack else set()
+    tickets, more = _raise_oversized(tickets, frame.ceilings, protected, frame.keep)
+    concerns += fold(_raise_oversized.__name__, more)
     type_findings, type_concerns = _type_contract_findings(
         tickets, frame.interfaces, frame.declared, types, frame.contracts_file, frame.design
     )
@@ -225,9 +233,7 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
         *_branch_findings(criteria, frame.brief),
         # A change build's base tree already owns its roles.
         *(_role_findings(tickets, frame.brief) if base is None else ()),
-        *_size_findings(
-            tickets, frame.ceilings, set(stack_files(frame.stack)) if frame.stack else set()
-        ),
+        *_size_findings(tickets, frame.ceilings, protected),
         *frame.stack_findings,
     )
     return _Fit(

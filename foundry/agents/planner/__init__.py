@@ -268,13 +268,16 @@ __all__ = [
 ]
 
 
-Effort = Literal["medium", "xhigh"] | None
+Effort = Literal["low", "medium", "xhigh"] | None
 
 # Locally a first plan at medium kept the plan quality of xhigh at a fraction of the
 # time. A repair at xhigh ran up to 93 minutes (into a length stop, then re-rolled)
 # for an edit its findings already spell out, so it runs at medium too. The delta
 # patches a few tickets: medium, capped so a rambling reply fails fast.
 _FIRST_EFFORT: Effort = "medium"
+# A local planner spent 23 of a 29-minute first plan reasoning for a 7k-token plan;
+# the plan checks and the repair (still medium) catch what less thinking misses.
+_LOCAL_FIRST_EFFORT: Effort = "low"
 _REPAIR_EFFORT: Effort = "medium"
 # The proxy's own budget at that effort: the cap shrinks nothing, it only makes a
 # reply cut at length raise instead of re-rolling into the same cut.
@@ -369,6 +372,7 @@ def make_planner_node(
 
     ceilings = ticket_ceilings(rt.proxy.local_tiers, ticket_tiers)
     sizing = size_text(ceilings)
+    first_effort = _LOCAL_FIRST_EFFORT if TIER in rt.proxy.local_tiers else _FIRST_EFFORT
 
     def _call(
         sop: str, schema: dict[str, Any], content: str, effort: Effort = None
@@ -380,7 +384,7 @@ def make_planner_node(
             [{"role": "user", "content": content}],
             purpose="ideation",
             schema=schema,
-            effort=effort or _FIRST_EFFORT,
+            effort=effort or first_effort,
         )
         return completion.parsed or {}
 

@@ -1745,3 +1745,15 @@ def test_interface_properties_are_required_and_the_sop_says_to_fill_them() -> No
     assert "properties[] IS the one field a property lives in" in SOP
     # Each operator or mode the spec names gets an end-to-end property.
     assert "checks the RESULT the spec defines for it" in SOP
+
+
+def test_a_local_planner_drafts_at_low_effort_and_repairs_at_medium() -> None:
+    from foundry.agents.planner.schema import TIER
+
+    rt, _ = runtime_for(_uncovered(), {}, PLAN)
+    rt.proxy._local_tiers = frozenset({TIER})
+    efforts = _efforts(rt)
+    make_planner_node(rt)({"request": "x"}, config_for("r"))
+
+    assert efforts[0] == "low"
+    assert "medium/repair" in efforts

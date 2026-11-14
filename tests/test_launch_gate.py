@@ -793,3 +793,95 @@ def test_an_oversized_form_field_that_500s_fails(tmp_path: Path) -> None:
     capped = _FORM_APP.replace('500 if "{post}" in data', "413 if n > 100_000")
     gate = _http(tmp_path, capped)
     assert gate.decide(gate.execute(tmp_path)) is GateStatus.PASS
+
+
+# ---- an out-of-range option value: rejected, never silently ignored ---------------
+
+# The bench dice CLI: `--count -3` rolled nothing, printed nothing, and exited 0.
+_COUNT_CLI = """\
+import argparse, sys
+p = argparse.ArgumentParser(prog="dice")
+p.add_argument("spec")
+p.add_argument("-c", "--count", type=int, default=1)
+p.add_argument("--verbose", action="store_true")
+a = p.parse_args()
+GUARD
+for _ in range(a.count):
+    print(4)
+"""
+
+
+def _count(tmp_path: Path, guard: str, runs: tuple[str, ...] = ()) -> LaunchGate:
+    (tmp_path / "dice.py").write_text(_COUNT_CLI.replace("GUARD", guard))
+    cmd = f"{_PY} dice.py"
+    return LaunchGate(
+        LaunchTarget(kind="cli", cmd=cmd, runs=runs or (f"{cmd} 2d6", f"{cmd} --help"))
+    )
+
+
+def test_an_option_value_out_of_range_silently_ignored_fails(tmp_path: Path) -> None:
+    gate = _count(tmp_path, "")
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    bad = [f for f in obs.findings if "printed nothing given" in f]
+    assert len(bad) == 1, obs.findings
+    assert bad[0].startswith(f"launch: `{_PY} dice.py 2d6` exited 0 and printed nothing given")
+    assert "given --count -1: a value outside" in bad[0]
+
+
+def test_an_option_value_out_of_range_rejected_or_answered_passes(tmp_path: Path) -> None:
+    rejected = _count(tmp_path, 'if a.count < 1: sys.exit("error: --count must be >= 1")')
+    obs = rejected.execute(tmp_path)
+    assert rejected.decide(obs) is GateStatus.PASS, obs.findings
+    assert [q["option"] for q in obs.structured["launch"]["range"]] == ["--count"]
+    answered = _count(tmp_path, 'if a.count < 1: print("nothing to roll")')
+    obs = answered.execute(tmp_path)
+    assert answered.decide(obs) is GateStatus.PASS, obs.findings
+
+
+def test_an_option_value_out_of_range_that_crashes_fails(tmp_path: Path) -> None:
+    gate = _count(tmp_path, "if a.count < 1: raise ValueError('negative count')")
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    assert any("--count -1` crashed" in f and "ValueError" in f for f in obs.findings)
+
+
+def test_no_scenario_command_that_worked_means_no_range_probe(tmp_path: Path) -> None:
+    cmd = f"{_PY} dice.py"
+    help_only = _count(tmp_path, "", runs=(f"{cmd} --help",))
+    obs = help_only.execute(tmp_path)
+    assert help_only.decide(obs) is GateStatus.PASS, obs.findings
+    assert obs.structured["launch"]["range"] == []
+    # A scenario command that errored is no known-good base either.
+    erred = _count(tmp_path, "", runs=(f"{cmd} --nope", f"{cmd} --help"))
+    obs = erred.execute(tmp_path)
+    assert erred.decide(obs) is GateStatus.PASS, obs.findings
+    assert obs.structured["launch"]["range"] == []
+
+
+def test_value_options_are_read_from_the_help_text() -> None:
+    from foundry.gates.launch import _value_options
+
+    argparse_help = (
+        "usage: dice [-h] [-c COUNT] [--seed SEED] [--verbose] spec\n\n"
+        "options:\n"
+        "  -h, --help            show this help message and exit\n"
+        "  -c COUNT, --count COUNT\n"
+        "                        how many to roll\n"
+        "  --seed SEED           Seed the roller\n"
+        "  --verbose             Show every die\n"
+    )
+    # -c is --count's alias: probed once, by its long name.
+    assert _value_options(argparse_help) == ["--seed", "--count"]
+    assert _value_options("  -n, --count INT   how many\n  -x N  x") == ["--count", "-x"]
+    equals_help = (
+        "Usage: app [OPTIONS]\n"
+        "  --limit=LIMIT   cap results\n"
+        "  --out=<file>    write here\n"
+        "  -n <n>          number\n"
+        "  -q, --quiet     Quiet\n"
+        "  --json Output as JSON\n"
+    )
+    assert _value_options(equals_help) == ["--limit", "--out", "-n"]
+    many = " ".join(f"--o{i} V" for i in range(9))
+    assert len(_value_options(many)) == 4

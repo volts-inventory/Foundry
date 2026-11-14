@@ -28,6 +28,9 @@ app's command in its own process group and drives it:
   2000 nested brackets, a 5000-digit number, an empty string) goes where a scenario
   passes the app its input (its last positional argument, or a pipe into it): a
   traceback, panic, uncaught error or crash signal FAILs, a clean error does not.
+  Each value-taking option the ``--help`` lists (up to 4) is also given ``-1`` on a
+  scenario command that worked: an exit 0 that prints nothing (the value silently
+  ignored) FAILs, as does a crash.
   An http app's rendered POST form is also sent once with a 1 MB field: a 5xx FAILs.
 
 When the stack declares the spec's ``interface``, a cli option/subcommand its
@@ -83,7 +86,16 @@ _MAX_FORMS = 12
 _BURST = 12
 _SIGNUPS = 20  # concurrent signups in the burst, each its own session and account
 _OVERSIZED = 1_000_000  # the oversized form field's length
-_FUZZ_S = 10.0  # each hostile-input cli run's time limit
+_FUZZ_S = 10.0  # each hostile-input (and out-of-range option) cli run's time limit
+_MAX_RANGE = 4  # value-taking options given an out-of-range -1
+# An option its --help shows taking a value: `--count COUNT`, `-n N`, `--out <file>`,
+# `--limit=LIMIT` (the driver applies the same pattern to the live --help).
+_VALUE_OPTION = re.compile(
+    r"(?<![\w-])(--?[A-Za-z][\w-]*)(?:=[<\[]?[A-Za-z]| <[\w-]+>| [A-Z][A-Z0-9_]*(?![\w-]))"
+)
+# A short alias spelled before its long option (`-c COUNT, --count COUNT`, `-c, --count
+# INT`): one option, probed once by its long name.
+_ALIAS = re.compile(r"(?<![\w-])(-[A-Za-z])(?: [A-Z][A-Z0-9_]*| <[\w-]+>)?,\s*(?=--[A-Za-z])")
 
 # The trusted driver: argv[1] is its JSON config; its last stdout line is the result.
 _LAUNCH_ID_ENV = "FOUNDRY_LAUNCH_ID"
@@ -161,7 +173,33 @@ def run_cli():
             rc = None
         kill(proc)
         runs.append({"cmd": cmd, "rc": rc, "output": text(buf, t)})
-    return {"runs": runs, "fuzz": run_fuzz()}
+    return {"runs": runs, "fuzz": run_fuzz(), "range": run_range(runs)}
+
+
+def value_options(help_text):
+    skip = {"-h", "--help", *re.findall(cfg["alias"], help_text)}
+    opts = [o for o in dict.fromkeys(re.findall(cfg["value_opt"], help_text)) if o not in skip]
+    return sorted(opts, key=lambda o: not o.startswith("--"))[: cfg["range_max"]]
+
+
+def run_range(runs):
+    # Each value-taking option the top --help lists, given -1 on a scenario command
+    # that worked: a silent exit 0 means the out-of-range value was ignored.
+    base = next((r["cmd"] for r in runs if r["cmd"] in cfg["range_bases"] and r["rc"] == 0
+                 and r["output"].strip()), None)
+    top = next((r for r in runs if r["cmd"] == cfg["help"] and r["rc"] is not None), None)
+    if base is None or top is None:
+        return []
+    out = []
+    for opt in value_options(top["output"]):
+        proc, buf, t = spawn(f"{base} {shlex.quote(opt)} -1", dict(os.environ))
+        try:
+            rc = proc.wait(timeout=cfg["fuzz_s"])
+        except subprocess.TimeoutExpired:
+            rc = None
+        kill(proc)
+        out.append({"cmd": base, "option": opt, "rc": rc, "output": text(buf, t)})
+    return out
 
 
 # Generic hostile inputs for the app's main argument or stdin: each must get a clean
@@ -1120,6 +1158,35 @@ def _fuzz_findings(r: dict[str, Any]) -> tuple[list[str], list[str]]:
     return fails, slow
 
 
+def _value_options(help_text: str) -> list[str]:
+    """The driver's ``value_options``: the value-taking options a --help lists, long
+    spellings first and a short alias of one dropped, at most :data:`_MAX_RANGE`."""
+    skip = {"-h", "--help", *_ALIAS.findall(help_text)}
+    opts = [o for o in dict.fromkeys(_VALUE_OPTION.findall(help_text)) if o not in skip]
+    return sorted(opts, key=lambda o: not o.startswith("--"))[:_MAX_RANGE]
+
+
+def _range_findings(r: dict[str, Any]) -> list[str]:
+    """A scenario command that worked, given an option's value -1, must not exit 0
+    silently (the value ignored); a crash there FAILs as a hostile input's does."""
+    fails: list[str] = []
+    for q in r.get("range") or ():
+        rc, text, cmd, opt = q.get("rc"), str(q.get("output", "")), q.get("cmd"), q.get("option")
+        if _CRASH.search(text) or _signalled(rc):
+            fails.append(
+                f"launch: `{cmd} {opt} -1` crashed (exit {rc}): a value outside an option's "
+                "meaningful range must be rejected with an error message and a non-zero exit, "
+                f"never a traceback, panic or crash. Its output:\n{_tail(_squash(text))}"
+            )
+        elif rc == 0 and not text.strip():
+            fails.append(
+                f"launch: `{cmd}` exited 0 and printed nothing given {opt} -1: a value outside "
+                "an option's meaningful range must be rejected with an error message and a "
+                "non-zero exit, never silently ignored"
+            )
+    return fails
+
+
 def _program_missing(cmd: str, text: str) -> bool:
     """The shell could not find the launch command's program itself."""
     try:
@@ -1270,7 +1337,7 @@ def _cli_findings(r: dict[str, Any], launch: str) -> list[str]:
                 f"launch: `{cmd}` exited {rc}; --help must print usage and exit 0. "
                 f"Its output:\n{_tail(text)}"
             )
-    return out + _cli_interface_findings(r, launch)[0] + _fuzz_findings(r)[0]
+    return out + _cli_interface_findings(r, launch)[0] + _fuzz_findings(r)[0] + _range_findings(r)
 
 
 class LaunchGate:
@@ -1297,7 +1364,15 @@ class LaunchGate:
         self._seal_key = seal_key
         runs = len(target.runs) if target.kind == "cli" else 1
         fuzz_s = min(cli_s, _FUZZ_S)
-        fuzz = len(target.fuzz) * 4 if target.kind == "cli" else 0  # 4 hostile inputs each
+        self._range_bases = (
+            [c for c in target.runs if not c.endswith(" --help")] if target.kind == "cli" else []
+        )
+        # 4 hostile inputs each, and up to _MAX_RANGE out-of-range option runs.
+        fuzz = (
+            len(target.fuzz) * 4 + (_MAX_RANGE if self._range_bases else 0)
+            if target.kind == "cli"
+            else 0
+        )
         self._routes = _routes(target.interface) if target.kind == "http" else ()
         # Each CLI run may also spend its kill (3s + 5s) and output join (2s).
         self._timeout_s = (
@@ -1364,6 +1439,11 @@ class LaunchGate:
             "posts": list(t.posts),
             "runs": list(t.runs),
             "fuzz": [list(f) for f in t.fuzz] if t.kind == "cli" else [],
+            "help": f"{t.cmd} --help",
+            "range_bases": self._range_bases,
+            "range_max": _MAX_RANGE,
+            "value_opt": _VALUE_OPTION.pattern,
+            "alias": _ALIAS.pattern,
             "routes": [list(p) for p in self._routes],
             "launch_id": (launch_id := secrets.token_hex(16)),
         }

@@ -277,9 +277,10 @@ Effort = Literal["low", "medium", "xhigh"] | None
 # for an edit its findings already spell out, so it runs at medium too. The delta
 # patches a few tickets: medium, capped so a rambling reply fails fast.
 _FIRST_EFFORT: Effort = "medium"
-# A local planner spent 23 of a 29-minute first plan reasoning for a 7k-token plan;
-# the plan checks and the repair (still medium) catch what less thinking misses.
-_LOCAL_FIRST_EFFORT: Effort = "low"
+# Locally the sized thinking budget bounds the plan's reasoning; the effort only
+# picks what an abort steps down to. From low that is thinking off, and an unthought
+# plan put a whole app in one ticket; from medium it is low, still thinking.
+_LOCAL_FIRST_EFFORT: Effort = "medium"
 _REPAIR_EFFORT: Effort = "medium"
 # The proxy's own budget at that effort: the cap shrinks nothing, it only makes a
 # reply cut at length raise instead of re-rolling into the same cut.
@@ -291,8 +292,8 @@ _LENGTH_STOPS = frozenset({"length", "max_tokens"})
 # the request's length and the scope tier. Local dice (a one-line, single-feature
 # demo request) reasoned past a fixed 16K for a ~7K-token plan, 11.6 minutes before
 # the abort; a long multi-feature request still gets the full 16K.
-_PLAN_BUDGET_FLOOR = 4096
-_PLAN_BUDGET_CEILING = 16384
+_PLAN_BUDGET_FLOOR = 8192
+_PLAN_BUDGET_CEILING = 20480
 _PLAN_BUDGET_PER_CHAR = 4
 _PLAN_BUDGET_FULL_SCOPE = 2048
 # The budget of the planner node pass running on this thread (None: not local),
@@ -302,9 +303,9 @@ _PASS_BUDGET: ContextVar[int | None] = ContextVar("planner_thinking_budget", def
 
 def local_plan_budget(request: str, scope: ScopeTier | None) -> int:
     """The reasoning budget of a local planner call (plan, epic, repair, delta) for
-    ``request`` at ``scope`` (None: undecided, sized like a standard run): 4K plus
+    ``request`` at ``scope`` (None: undecided, sized like a standard run): 8K plus
     4 tokens a request character, 2K more unless the scope is demo, rounded up to
-    1K and capped at 16K."""
+    1K and capped at 20K."""
     raw = _PLAN_BUDGET_FLOOR + _PLAN_BUDGET_PER_CHAR * len(request.strip())
     if scope is not ScopeTier.DEMO:
         raw += _PLAN_BUDGET_FULL_SCOPE

@@ -370,7 +370,7 @@ def test_a_web_layer_of_many_pages_fits_one_local_ticket() -> None:
     many = tuple(f"templates/p{i}.html" for i in range(20))
     assert _size_findings([_t("pages", ("shop/web.py", *many), ("A1",))], _LOCAL) == (
         "Ticket pages is over its size ceiling: 1 work files, 21 files in all and 1 "
-        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 2 "
         "work files, 20 in all and 8 scenarios: split it into tickets each within the "
         "ceiling.",
     )
@@ -386,7 +386,7 @@ def test_a_ticket_over_its_tiers_ceiling_is_a_finding_to_split_it() -> None:
     hybrid = ticket_ceilings({"T2", "T3"})
     assert _size_findings(tickets, hybrid) == (
         "Ticket models is over its size ceiling: 6 work files, 6 files in all and 1 "
-        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 2 "
         "work files, 20 in all and 8 scenarios: split it into tickets each within the "
         "ceiling.",
     )
@@ -432,7 +432,7 @@ def test_the_ceiling_follows_where_each_difficultys_tier_runs() -> None:
         "complex tickets run on a cloud model: at most 12 work files, 32 files in all and "
         "12 scenarios" in text
     )
-    assert "trivial / standard tickets run on a local model: at most 4 work files, 20" in text
+    assert "trivial / standard tickets run on a local model: at most 2 work files, 20" in text
     assert "a web layer whose routes and templates fit stays ONE ticket" in text
     assert "is a ceiling, not a target" in text
     assert "Every feature ticket owns at least one scenario" in text
@@ -547,7 +547,7 @@ def _size_of(writes: dict[str, Any], cas: ArtifactStore) -> tuple[str, ...]:
 def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
     rt, tx, cas = _runtime(_oversized(), local=frozenset({"T2", "T3"}))  # hybrid
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
-    assert "at most 4 work files, 20 files in all and 8 scenarios" in json.dumps(tx.requests[0])
+    assert "at most 2 work files, 20 files in all and 8 scenarios" in json.dumps(tx.requests[0])
     assert "split by feature area into two tickets" in json.dumps(tx.requests[0])
     # Hybrid: the complex (cloud) ceiling takes it, so it moves up instead of a split.
     assert _size_of(writes, cas) == ()
@@ -557,7 +557,7 @@ def test_the_planner_sizes_tickets_by_the_proxys_local_tiers() -> None:
     writes = make_planner_node(rt)({"request": "x"}, config_for("r"))
     assert _size_of(writes, cas) == (
         "Ticket T-001 is over its size ceiling: 5 work files, 5 files in all and 1 "
-        "scenarios, where a standard ticket (built on a local model) takes at most 4 "
+        "scenarios, where a standard ticket (built on a local model) takes at most 2 "
         "work files, 20 in all and 8 scenarios: split it into tickets each within the "
         "ceiling.",
     )

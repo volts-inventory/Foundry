@@ -33,7 +33,9 @@ class TicketCeiling:
 
 
 CLOUD_CEILING = TicketCeiling(files=12, scenarios=12, where="cloud", total=32)
-LOCAL_CEILING = TicketCeiling(files=4, scenarios=8, where="local", total=20)
+# A local model builds and debugs one or two modules per session well; a ticket of
+# four modules (a whole small app) ground through 100+ failing lines for an hour.
+LOCAL_CEILING = TicketCeiling(files=2, scenarios=8, where="local", total=20)
 
 Ceilings = Mapping[Difficulty, TicketCeiling]
 

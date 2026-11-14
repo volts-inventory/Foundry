@@ -736,3 +736,40 @@ def test_the_sop_asks_for_exact_outcomes_over_random_output() -> None:
     assert "EXACT OUTCOMES" in SOP
     assert "a range or 'is an integer' check passes broken arithmetic" in SOP
     assert "never a hand-built object" in SOP
+
+
+# ---- notation variants added in code ----------------------------------------------
+
+
+def test_a_notations_spaced_and_other_case_scenarios_are_copied_from_one_feeding_it() -> None:
+    from foundry.agents.planner.folds import _add_variant_scenarios
+    from foundry.agents.planner.sizing import ALL_CLOUD
+    from foundry.schemas.product import render_scenario
+
+    def crit(cid: str, given: str, then: str) -> AcceptanceCriterion:
+        g, w, t = (given,), ("it is rolled with seed 7",), (then,)
+        c = _criterion(cid, "cli", given=g, when=w, then=t)
+        return c.model_copy(update={"text": render_scenario(g, w, t)})
+
+    request = "a tool that rolls dice given notation like 2d6+3"
+    criteria = [
+        crit("AC-1", "the input 'abc'", "an error is printed"),
+        crit("AC-2", "the input '2d6+3'", "the total is 10"),
+    ]
+    cli = _ticket("cli", scenario_ids=("AC-1", "AC-2"))
+    steps = _ticket("cli-tests", "cli", specialty=Specialty.TEST, scenario_ids=("AC-1", "AC-2"))
+    out, added, notes = _add_variant_scenarios([cli, steps], criteria, request, ALL_CLOUD)
+    spaced, cased = added[2:]
+    assert (spaced.id, spaced.given, spaced.then) == (
+        "AC-2-SPACES",
+        ("the input '2d6 + 3'",),
+        ("the total is 10",),
+    )
+    assert (cased.id, cased.given) == ("AC-2-CASE", ("the input '2D6+3'",))
+    assert "'2D6+3'" in cased.text and cased.ticket_id == "cli"
+    assert all(t.scenario_ids[-2:] == ("AC-2-SPACES", "AC-2-CASE") for t in out)
+    assert len(notes) == 2
+    # Covered already, or no scenario answering the example: nothing added.
+    again = _add_variant_scenarios(out, added, request, ALL_CLOUD)
+    assert again[1] == added and again[2] == []
+    assert _add_variant_scenarios([cli], criteria[:1], request, ALL_CLOUD)[2] == []

@@ -438,37 +438,50 @@ _NOTATION_EXAMPLE = re.compile(
 _EXAMPLE_PARTS = re.compile(r"[A-Za-z0-9]+|[^A-Za-z0-9\s]")
 
 
+def notation_examples(request: str) -> list[tuple[str, list[str]]]:
+    """(example, its parts) of each notation example input ``request`` shows that has
+    letters and at least two parts, so spacing and letter case can vary it."""
+    out: list[tuple[str, list[str]]] = []
+    for example in dict.fromkeys(_NOTATION_EXAMPLE.findall(request)):
+        example = example.rstrip(".")
+        parts = _EXAMPLE_PARTS.findall(example)
+        if len(parts) >= 2 and re.search(r"[A-Za-z]", example):
+            out.append((example, parts))
+    return out
+
+
+def missing_variants(
+    criteria: Sequence[AcceptanceCriterion], example: str, parts: Sequence[str]
+) -> list[tuple[str, str]]:
+    """("spaces" | "case", a variant of ``example``) for each variation no scenario
+    feeds it in."""
+    loose = re.compile(r"\s*".join(map(re.escape, parts)), re.I)
+    seen = [m[0] for c in criteria for m in loose.finditer(c.text)]
+    out: list[tuple[str, str]] = []
+    if not any(re.search(r"\s", v) for v in seen):
+        out.append(("spaces", " ".join(parts)))
+    if not any(
+        v.replace(" ", "") != example and v.lower().replace(" ", "") == example.lower()
+        for v in seen
+    ):
+        out.append(("case", example.swapcase()))
+    return out
+
+
+_VARIANT_WHAT = {"spaces": "with spaces", "case": "in the other letter case"}
+
+
 def _variant_findings(criteria: Sequence[AcceptanceCriterion], request: str) -> tuple[str, ...]:
     """A request showing a notation's example input whose scenarios never feed it
     with spaces around its symbols, or in the other letter case: the plan accepts
     only the spelling the request happened to show."""
-    said = request
-    texts = [c.text for c in criteria]
-    out: list[str] = []
-    for example in dict.fromkeys(_NOTATION_EXAMPLE.findall(said)):
-        example = example.rstrip(".")
-        parts = _EXAMPLE_PARTS.findall(example)
-        if len(parts) < 2 or not re.search(r"[A-Za-z]", example):
-            continue
-        loose = re.compile(r"\s*".join(map(re.escape, parts)), re.I)
-        seen = [m[0] for t in texts for m in loose.finditer(t)]
-        if not any(re.search(r"\s", v) for v in seen):
-            spaced = " ".join(parts)
-            out.append(
-                f"No scenario feeds the example input {example!r} with spaces "
-                f"(e.g. {spaced!r}): add one where it gets the same answer, "
-                "per the CONVENTIONS rule."
-            )
-        if not any(
-            v.replace(" ", "") != example and v.lower().replace(" ", "") == example.lower()
-            for v in seen
-        ):
-            out.append(
-                f"No scenario feeds the example input {example!r} in the other letter "
-                f"case (e.g. {example.swapcase()!r}): add one where it gets the same "
-                "answer, per the CONVENTIONS rule."
-            )
-    return tuple(out)
+    return tuple(
+        f"No scenario feeds the example input {example!r} {_VARIANT_WHAT[kind]} "
+        f"(e.g. {variant!r}): add one where it gets the same answer, per the "
+        "CONVENTIONS rule."
+        for example, parts in notation_examples(request)
+        for kind, variant in missing_variants(criteria, example, parts)
+    )
 
 
 _ROLE_WORDS = re.compile(r"\b(admins?|administrators?|roles?|moderators?|superusers?)\b", re.I)

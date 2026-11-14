@@ -30,6 +30,7 @@ from foundry.agents.planner.checks import (
 from foundry.agents.planner.folds import (
     _add_contract_deps,
     _add_read_deps,
+    _add_variant_scenarios,
     _assign_shared_types,
     _declare_dependencies,
     _drop_dangling_refs,
@@ -186,6 +187,11 @@ def _assemble(raw: Any, frame: _Frame, overflow: Sequence[str] = ()) -> _Fit:
     concerns += fold(_fix_covers.__name__, more)
     tickets, criteria, more = _ensure_security_scenario(tickets, criteria, frame.criteria_seq)
     concerns += fold(_ensure_security_scenario.__name__, more)
+    if base is None:
+        tickets, criteria, more = _add_variant_scenarios(
+            tickets, criteria, frame.request, frame.ceilings
+        )
+        concerns += fold(_add_variant_scenarios.__name__, more)
     tickets, interfaces, more = _lift_described_properties(tickets, frame.interfaces)
     concerns += fold(_lift_described_properties.__name__, more)
     interfaces, more = _drop_unsatisfiable_properties(interfaces)

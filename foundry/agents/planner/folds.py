@@ -14,6 +14,8 @@ from foundry.agents.planner.checks import (
     _goal_rows,
     _undeclared_type_users,
     _web_stack,
+    missing_variants,
+    notation_examples,
 )
 from foundry.agents.planner.readers import _uniq
 from foundry.agents.planner.schema import _EPIC_OF_TICKET, _GENERATED_TICKETS
@@ -1444,6 +1446,71 @@ def _ensure_security_scenario(
         [*criteria, added],
         [f"Added security scenario {cid} to ticket {owner.id}: no scenario covered misuse."],
     )
+
+
+_REFUSED = re.compile(r"(?i)\b(reject\w*|error\w*|invalid|fail\w*|refus\w*|raises?)\b")
+
+
+def _add_variant_scenarios(
+    tickets: Sequence[Ticket],
+    criteria: Sequence[AcceptanceCriterion],
+    request: str,
+    ceilings: Ceilings,
+) -> tuple[list[Ticket], list[AcceptanceCriterion], list[str]]:
+    """For each spelling of a notation's example input no scenario feeds (spaced,
+    other letter case), copy a scenario that feeds the exact example and answers
+    it, with the variant in its Given and When: the same Then holds. No repair
+    call. A ticket at its scenario ceiling gets none (the check then asks)."""
+    out_t, out_c, notes = list(tickets), list(criteria), []
+    for example, parts in notation_examples(request):
+        for kind, variant in missing_variants(out_c, example, parts):
+            source = next(
+                (
+                    c
+                    for c in out_c
+                    if c.ticket_id
+                    and not c.security_abuse
+                    and any(example in s for s in (*c.given, *c.when))
+                    and not any(example in s or _REFUSED.search(s) for s in c.then)
+                ),
+                None,
+            )
+            owner = next((t for t in out_t if source and t.id == source.ticket_id), None)
+            if source is None or owner is None:
+                continue
+            limit = ceilings[owner.difficulty].scenarios
+            if not owner.entrypoint and len(owner.scenario_ids) >= limit:
+                continue
+            cid = f"{source.id}-{kind.upper()}"
+            if any(c.id == cid for c in out_c):
+                continue
+            given = tuple(s.replace(example, variant) for s in source.given)
+            when = tuple(s.replace(example, variant) for s in source.when)
+            out_c.append(
+                source.model_copy(
+                    update={
+                        "id": cid,
+                        "text": render_scenario(given, when, source.then),
+                        "given": given,
+                        "when": when,
+                        "oracle_hint": scenario_ref(owner.id, cid),
+                        "seq": source.seq._replace(local=len(out_c)),
+                    }
+                )
+            )
+            own = set(owner.scenario_ids)
+            out_t = [
+                t.model_copy(update={"scenario_ids": (*t.scenario_ids, cid)})
+                if t.id == owner.id
+                or (t.specialty is Specialty.TEST and own and own <= set(t.scenario_ids))
+                else t
+                for t in out_t
+            ]
+            notes.append(
+                f"Added scenario {cid} to ticket {owner.id}: {source.id} fed {variant!r} "
+                f"for {example!r}."
+            )
+    return out_t, out_c, notes
 
 
 # "PR3: for any ..." / "- PR3 — ...": a contract property written into prose.

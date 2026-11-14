@@ -1776,13 +1776,13 @@ def test_the_local_plan_budget_scales_with_the_request_and_scope() -> None:
     from foundry.schemas.governance import ScopeTier
 
     short = "a command-line tool that rolls dice given notation like 2d6+3"
-    assert local_plan_budget(short, ScopeTier.DEMO) == 9216
-    assert local_plan_budget(short, ScopeTier.STANDARD) == 11264
+    assert local_plan_budget(short, ScopeTier.DEMO) == 5120
+    assert local_plan_budget(short, ScopeTier.STANDARD) == 7168
     assert local_plan_budget(short, None) == local_plan_budget(short, ScopeTier.STANDARD)
     medium = short + ", with " + "a feature of several words, " * 30
-    assert 9216 < local_plan_budget(medium, ScopeTier.DEMO) < 20480
+    assert 5120 < local_plan_budget(medium, ScopeTier.DEMO) < 20480
     assert local_plan_budget("x " * 3000, ScopeTier.STANDARD) == 20480
-    assert local_plan_budget("", ScopeTier.DEMO) == 8192
+    assert local_plan_budget("", ScopeTier.DEMO) == 4096
 
 
 def test_a_local_planners_plan_and_repair_calls_carry_the_sized_budget() -> None:

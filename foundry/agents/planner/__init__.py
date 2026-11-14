@@ -292,7 +292,7 @@ _LENGTH_STOPS = frozenset({"length", "max_tokens"})
 # the request's length and the scope tier. Local dice (a one-line, single-feature
 # demo request) reasoned past a fixed 16K for a ~7K-token plan, 11.6 minutes before
 # the abort; a long multi-feature request still gets the full 16K.
-_PLAN_BUDGET_FLOOR = 8192
+_PLAN_BUDGET_FLOOR = 4096
 _PLAN_BUDGET_CEILING = 20480
 _PLAN_BUDGET_PER_CHAR = 4
 _PLAN_BUDGET_FULL_SCOPE = 2048
@@ -303,7 +303,7 @@ _PASS_BUDGET: ContextVar[int | None] = ContextVar("planner_thinking_budget", def
 
 def local_plan_budget(request: str, scope: ScopeTier | None) -> int:
     """The reasoning budget of a local planner call (plan, epic, repair, delta) for
-    ``request`` at ``scope`` (None: undecided, sized like a standard run): 8K plus
+    ``request`` at ``scope`` (None: undecided, sized like a standard run): 4K plus
     4 tokens a request character, 2K more unless the scope is demo, rounded up to
     1K and capped at 20K."""
     raw = _PLAN_BUDGET_FLOOR + _PLAN_BUDGET_PER_CHAR * len(request.strip())

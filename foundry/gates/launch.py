@@ -30,7 +30,9 @@ app's command in its own process group and drives it:
   traceback, panic, uncaught error or crash signal FAILs, a clean error does not.
   Each value-taking option the ``--help`` lists (up to 4) is also given ``-1`` on a
   scenario command that worked: an exit 0 that prints nothing (the value silently
-  ignored) FAILs, as does a crash.
+  ignored) FAILs, as does a crash. The main argument of that same command (or a
+  piped scenario's stdin input) is also varied (spaces around its symbols, case
+  swapped, padded, repeated; up to 4 runs): a crash FAILs, a clean error does not.
   An http app's rendered POST form is also sent once with a 1 MB field: a 5xx FAILs.
 
 When the stack declares the spec's ``interface``, a cli option/subcommand its
@@ -88,6 +90,7 @@ _SIGNUPS = 20  # concurrent signups in the burst, each its own session and accou
 _OVERSIZED = 1_000_000  # the oversized form field's length
 _FUZZ_S = 10.0  # each hostile-input (and out-of-range option) cli run's time limit
 _MAX_RANGE = 4  # value-taking options given an out-of-range -1
+_MAX_VARIANTS = 4  # variant runs of a valid input
 # An option its --help shows taking a value: `--count COUNT`, `-n N`, `--out <file>`,
 # `--limit=LIMIT` (the driver applies the same pattern to the live --help).
 _VALUE_OPTION = re.compile(
@@ -173,7 +176,40 @@ def run_cli():
             rc = None
         kill(proc)
         runs.append({"cmd": cmd, "rc": rc, "output": text(buf, t)})
-    return {"runs": runs, "fuzz": run_fuzz(), "range": run_range(runs)}
+    return {"runs": runs, "fuzz": run_fuzz(), "range": run_range(runs),
+            "variants": run_variants(runs)}
+
+
+def known_good(runs):
+    return next((r["cmd"] for r in runs if r["cmd"] in cfg["range_bases"] and r["rc"] == 0
+                 and r["output"].strip()), None)
+
+
+def run_once(cmd, data=None):
+    proc, buf, t = spawn(cmd, dict(os.environ), data)
+    try:
+        rc = proc.wait(timeout=cfg["fuzz_s"])
+    except subprocess.TimeoutExpired:
+        rc = None
+    kill(proc)
+    return rc, text(buf, t)
+
+
+def run_variants(runs):
+    # Small variations of an input the app is known to answer: each must get an
+    # answer or a clean error, never a crash.
+    base, out = known_good(runs), []
+    for plan in cfg["variants"]:
+        if plan["base"] is not None and plan["base"] != base:
+            continue
+        if plan["base"] is None:  # a piped scenario: its own input must work first
+            rc, output = run_once(plan["cmd"], plan["data"])
+            if rc != 0 or not output.strip():
+                continue
+        for label, cmd, data, show in plan["runs"]:
+            rc, output = run_once(cmd, data)
+            out.append({"cmd": show, "variant": label, "rc": rc, "output": output})
+    return out
 
 
 def value_options(help_text):
@@ -185,8 +221,7 @@ def value_options(help_text):
 def run_range(runs):
     # Each value-taking option the top --help lists, given -1 on a scenario command
     # that worked: a silent exit 0 means the out-of-range value was ignored.
-    base = next((r["cmd"] for r in runs if r["cmd"] in cfg["range_bases"] and r["rc"] == 0
-                 and r["output"].strip()), None)
+    base = known_good(runs)
     top = next((r for r in runs if r["cmd"] == cfg["help"] and r["rc"] is not None), None)
     if base is None or top is None:
         return []
@@ -738,6 +773,7 @@ class LaunchTarget:
     # The cli hostile-input probes: (via, prefix, suffix); via "argument" runs
     # ``prefix <input> suffix``, via "stdin" runs ``prefix`` with the input on stdin.
     fuzz: tuple[tuple[str, str, str], ...] = ()
+    stdin_sample: str = ""  # the input a piped scenario echoes into the app
 
 
 # ---- the target: stack fields, else the run command, else the entry's files ----
@@ -889,13 +925,19 @@ def _fuzz_targets(
             suffix = "".join(f" {shlex.quote(a)}" for a in args[i + 1 :])
             out.append(("argument", prefix, suffix))
             break
+    pipe = _pipe(cmd, lines)
+    return (*out, ("stdin", pipe[0], "")) if pipe else tuple(out)
+
+
+def _pipe(cmd: str, lines: Iterable[str]) -> tuple[str, str] | None:
+    """(the app's command, the left side) of the first scenario that pipes into it."""
     names = _program_names(cmd)
     for line in lines:
         for a, b in _QUOTED.findall(line):
             text = " ".join((a or b).split())
             if "|" not in text:
                 continue
-            right = text.rsplit("|", 1)[1].strip()
+            left, right = (x.strip() for x in text.rsplit("|", 1))
             try:
                 words = shlex.split(right)
             except ValueError:
@@ -903,10 +945,21 @@ def _fuzz_targets(
             if not words or _SHELL_OPS & set(words):
                 continue
             if right.startswith(" ".join(cmd.split())):
-                return (*out, ("stdin", right, ""))
+                return right, left
             if words[0] in names:
-                return (*out, ("stdin", " ".join([cmd, *map(shlex.quote, words[1:])]), ""))
-    return tuple(out)
+                return " ".join([cmd, *map(shlex.quote, words[1:])]), left
+    return None
+
+
+def _echoed(left: str) -> str:
+    """The input ``echo <input>`` writes, or "" for any other producer."""
+    try:
+        words = shlex.split(left)
+    except ValueError:
+        return ""
+    if len(words) < 2 or words[0] != "echo" or _SHELL_OPS & set(words):
+        return ""
+    return " ".join(words[1:])
 
 
 def _cli_runs(cmd: str, lines: Iterable[str]) -> tuple[str, ...]:
@@ -990,6 +1043,7 @@ def launch_target(
     ]
     runs = _cli_runs(cmd, whens)
     fuzz = _fuzz_targets(cmd, runs, whens, _cli_interface(interface)[1]) if cmd else ()
+    pipe = _pipe(cmd, whens) if any(f[0] == "stdin" for f in fuzz) else None
     # A subcommand's own options show only in its own --help.
     helps = (f"{cmd} --help", *_sub_helps(cmd, interface))
     return LaunchTarget(
@@ -1001,6 +1055,7 @@ def launch_target(
         source=source,
         interface=interface,
         fuzz=fuzz,
+        stdin_sample=_echoed(pipe[1]) if pipe else "",
     )
 
 
@@ -1187,6 +1242,98 @@ def _range_findings(r: dict[str, Any]) -> list[str]:
     return fails
 
 
+_SYMBOLS = re.compile(r"(?:[^\w\s]|_)+")
+
+
+def _mutations(value: str) -> list[tuple[str, str]]:
+    """(label, variant) of a valid input: small changes any input format may meet,
+    deduped, the original dropped, at most :data:`_MAX_VARIANTS`."""
+    spaced = re.sub(r" {2,}", " ", _SYMBOLS.sub(lambda m: f" {m[0]} ", value)).strip()
+    found = (
+        ("spaces around its symbols", spaced),
+        ("letter case swapped", value.swapcase()),
+        ("leading and trailing whitespace", f" {value} "),
+        ("repeated twice", f"{value} {value}"),
+    )
+    out: dict[str, str] = {}
+    for label, v in found:
+        if v != value and v not in out:
+            out[v] = label
+    return [(label, v) for v, label in out.items()][:_MAX_VARIANTS]
+
+
+def _main_argument(
+    cmd: str, run: str, fuzz: Iterable[tuple[str, str, str]], subs: Iterable[str]
+) -> tuple[str, str, str] | None:
+    """(prefix, the argument, suffix) of ``run``'s main positional argument: where
+    the hostile-input probe puts its input when that fits ``run``, else the first
+    argument that is not an option, an option's value or a subcommand."""
+    for via, prefix, suffix in fuzz:
+        if via != "argument" or not run.startswith(f"{prefix} ") or not run.endswith(suffix):
+            continue
+        with contextlib.suppress(ValueError):
+            words = shlex.split(run[len(prefix) + 1 : len(run) - len(suffix)])
+            if len(words) == 1:
+                return prefix, words[0], suffix
+    try:
+        base, words = shlex.split(cmd), shlex.split(run)
+    except ValueError:
+        return None
+    if words[: len(base)] != base or _SHELL_OPS & set(words):
+        return None
+    args, skip = words[len(base) :], set(subs)
+    for i, a in enumerate(args):
+        if a.startswith("-") or a in skip:
+            continue
+        if i and args[i - 1].startswith("-") and "=" not in args[i - 1]:
+            continue
+        prefix = " ".join([cmd, *map(shlex.quote, args[:i])])
+        return prefix, a, "".join(f" {shlex.quote(x)}" for x in args[i + 1 :])
+    return None
+
+
+def _variant_plans(target: LaunchTarget, bases: Sequence[str]) -> list[dict[str, Any]]:
+    """The driver's variant runs: per candidate base command (the driver runs only
+    the one that worked) its main argument's variants, and a piped scenario's
+    input's variants. Each run is (label, command, stdin data, how it is shown)."""
+    subs = _cli_interface(target.interface)[1]
+    plans: list[dict[str, Any]] = []
+    for run in bases:
+        arg = _main_argument(target.cmd, run, target.fuzz, subs)
+        if arg is None or not arg[1].strip():
+            continue
+        prefix, value, suffix = arg
+        runs = []
+        for label, v in _mutations(value):
+            line = f"{prefix} {shlex.quote(v)}{suffix}"
+            runs.append([label, line, None, line])
+        plans.append({"base": run, "runs": runs})
+    stdin = next((f[1] for f in target.fuzz if f[0] == "stdin"), None)
+    if stdin is not None and target.stdin_sample.strip():
+        runs = [
+            [label, stdin, v + "\n", f"echo {shlex.quote(v)} | {stdin}"]
+            for label, v in _mutations(target.stdin_sample)
+        ]
+        sample = target.stdin_sample + "\n"
+        plans.append({"base": None, "cmd": stdin, "data": sample, "runs": runs})
+    return plans
+
+
+def _variant_findings(r: dict[str, Any]) -> list[str]:
+    """A variant of an input the app answered must not crash it."""
+    fails: list[str] = []
+    for q in r.get("variants") or ():
+        rc, text = q.get("rc"), str(q.get("output", ""))
+        if _CRASH.search(text) or _signalled(rc):
+            fails.append(
+                f"launch: `{q.get('cmd')}` crashed given a variant of a valid input "
+                f"({q.get('variant')}): every input must get an answer or a clean error "
+                "message with a non-zero exit, never a traceback — validate and catch at the "
+                f"entry point. Its output:\n{_tail(_squash(text))}"
+            )
+    return fails
+
+
 def _program_missing(cmd: str, text: str) -> bool:
     """The shell could not find the launch command's program itself."""
     try:
@@ -1337,7 +1484,13 @@ def _cli_findings(r: dict[str, Any], launch: str) -> list[str]:
                 f"launch: `{cmd}` exited {rc}; --help must print usage and exit 0. "
                 f"Its output:\n{_tail(text)}"
             )
-    return out + _cli_interface_findings(r, launch)[0] + _fuzz_findings(r)[0] + _range_findings(r)
+    return (
+        out
+        + _cli_interface_findings(r, launch)[0]
+        + _fuzz_findings(r)[0]
+        + _range_findings(r)
+        + _variant_findings(r)
+    )
 
 
 class LaunchGate:
@@ -1367,9 +1520,16 @@ class LaunchGate:
         self._range_bases = (
             [c for c in target.runs if not c.endswith(" --help")] if target.kind == "cli" else []
         )
-        # 4 hostile inputs each, and up to _MAX_RANGE out-of-range option runs.
+        self._variants = (
+            _variant_plans(target, self._range_bases) if target.kind == "cli" and target.cmd else []
+        )
+        # 4 hostile inputs each, up to _MAX_RANGE out-of-range option runs, and the
+        # variant runs of one base command (a piped one also runs its own input).
         fuzz = (
-            len(target.fuzz) * 4 + (_MAX_RANGE if self._range_bases else 0)
+            len(target.fuzz) * 4
+            + (_MAX_RANGE if self._range_bases else 0)
+            + max((len(p["runs"]) for p in self._variants if p["base"]), default=0)
+            + sum(len(p["runs"]) + 1 for p in self._variants if p["base"] is None)
             if target.kind == "cli"
             else 0
         )
@@ -1441,6 +1601,7 @@ class LaunchGate:
             "fuzz": [list(f) for f in t.fuzz] if t.kind == "cli" else [],
             "help": f"{t.cmd} --help",
             "range_bases": self._range_bases,
+            "variants": self._variants,
             "range_max": _MAX_RANGE,
             "value_opt": _VALUE_OPTION.pattern,
             "alias": _ALIAS.pattern,

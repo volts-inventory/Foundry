@@ -885,3 +885,103 @@ def test_value_options_are_read_from_the_help_text() -> None:
     assert _value_options(equals_help) == ["--limit", "--out", "-n"]
     many = " ".join(f"--o{i} V" for i in range(9))
     assert len(_value_options(many)) == 4
+
+
+# ---- a variant of a valid input: answered or cleanly refused, never a crash -------
+
+# The bench dice CLI: `2d6+3` rolled, `2d6 + 3` fell through to int() and a traceback.
+_SPEC_CLI = """\
+import re, sys
+args = sys.argv[1:]
+if "--help" in args:
+    print("usage: dice SPEC")
+    sys.exit(0)
+spec = args[-1] if args else sys.stdin.read().strip()
+m = re.fullmatch(r"(\\d+)d(\\d+)(?:\\+(\\d+))?", spec)
+if m is None:
+    GUARD
+    print(int(spec))
+else:
+    print(int(m[1]) * int(m[2]) + int(m[3] or 0))
+"""
+
+
+def _spec(tmp_path: Path, guard: str, runs: tuple[str, ...] | None = None) -> LaunchGate:
+    (tmp_path / "dice.py").write_text(_SPEC_CLI.replace("GUARD", guard or "pass"))
+    cmd = f"{_PY} dice.py"
+    return LaunchGate(
+        LaunchTarget(kind="cli", cmd=cmd, runs=runs or (f"{cmd} 2d6+3", f"{cmd} --help"))
+    )
+
+
+def test_a_cli_that_crashes_on_a_variant_of_a_valid_input_fails(tmp_path: Path) -> None:
+    gate = _spec(tmp_path, "")
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    bad = [f for f in obs.findings if "variant of a valid input" in f]
+    spaced = [f for f in bad if "(spaces around its symbols)" in f]
+    assert spaced and f"`{_PY} dice.py '2d6 + 3'` crashed" in spaced[0], bad
+    assert "ValueError" in spaced[0]
+    assert len(obs.structured["launch"]["variants"]) == 4
+
+
+def test_a_cli_that_cleanly_rejects_variants_passes(tmp_path: Path) -> None:
+    gate = _spec(tmp_path, 'sys.exit("error: bad dice spec")')
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.PASS, obs.findings
+    assert {q["rc"] for q in obs.structured["launch"]["variants"]} == {1}
+
+
+def test_no_known_good_base_command_means_no_variant_probe(tmp_path: Path) -> None:
+    cmd = f"{_PY} dice.py"
+    help_only = _spec(tmp_path, "", runs=(f"{cmd} --help",))
+    obs = help_only.execute(tmp_path)
+    assert help_only.decide(obs) is GateStatus.PASS, obs.findings
+    assert obs.structured["launch"]["variants"] == []
+    # A base command that errored is no known-good input to vary.
+    erred = _spec(tmp_path, "", runs=(f"{cmd} oops", f"{cmd} --help"))
+    obs = erred.execute(tmp_path)
+    assert obs.structured["launch"]["variants"] == []
+
+
+def test_a_piped_scenarios_input_is_varied_on_stdin(tmp_path: Path) -> None:
+    (tmp_path / "dice.py").write_text(_SPEC_CLI.replace("GUARD", "pass"))
+    stack = StackDecision(language="python", kind="cli", launch=f"{_PY} dice.py")
+    crit = [_criterion("AC-1", "T1", "I run `echo 2d6+3 | dice`")]
+    gate = LaunchGate(launch_target(stack, None, criteria=crit))
+    assert gate.target.stdin_sample == "2d6+3"
+    obs = gate.execute(tmp_path)
+    assert gate.decide(obs) is GateStatus.FAIL, obs.findings
+    assert any(
+        f"`echo '2d6 + 3' | {_PY} dice.py` crashed given a variant" in f for f in obs.findings
+    ), obs.findings
+
+
+def test_variants_of_a_valid_input_are_deduped_and_capped() -> None:
+    from foundry.gates.launch import _main_argument, _mutations
+
+    assert _mutations("2d6+3") == [
+        ("spaces around its symbols", "2d6 + 3"),
+        ("letter case swapped", "2D6+3"),
+        ("leading and trailing whitespace", " 2d6+3 "),
+        ("repeated twice", "2d6+3 2d6+3"),
+    ]
+    # No symbols, no letters: those variants equal the original and are dropped.
+    assert _mutations("42") == [
+        ("leading and trailing whitespace", " 42 "),
+        ("repeated twice", "42 42"),
+    ]
+    assert len(_mutations("a-b_C")) == 4
+    # The main argument: past a subcommand and an option's value, or the fuzz slot.
+    assert _main_argument("py d.py", "py d.py roll --seed 7 2d6 -v", (), ("roll",)) == (
+        "py d.py roll --seed 7",
+        "2d6",
+        " -v",
+    )
+    fuzz = (("argument", "py d.py add 'x y'", ""),)
+    assert _main_argument("py d.py", "py d.py add 'x y' milk", fuzz, ()) == (
+        "py d.py add 'x y'",
+        "milk",
+        "",
+    )
+    assert _main_argument("py d.py", "py d.py --all", (), ()) is None
